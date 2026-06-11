@@ -1,11 +1,11 @@
 'use strict';
 
 const { Router }        = require('express');
-const asyncHandler      = require('./asyncHandler');
-const { searchLimiter } = require('./rateLimiters');
-const { searchSchema, validate } = require('./schemas');
-const { duffelRequest } = require('./duffelClient');
-const { normalizeOffer } = require('./offerNormalizer');
+const asyncHandler      = require('../utils/asyncHandler');
+const { searchLimiter } = require('../middleware/rateLimiters');
+const { searchSchema, validate } = require('../validators/schemas');
+const { duffelRequest } = require('../services/duffelClient');
+const { normalizeOffer } = require('../services/offerNormalizer');
 
 const router = Router();
 
@@ -51,29 +51,32 @@ module.exports = router;
 // ── GET /search/airports?q=berlin ────────────────────────
 // Proxy to Duffel airports autocomplete
 router.get('/airports', asyncHandler(async (req, res) => {
-  var q = (req.query.q || '').trim();
+  const q = (req.query.q || '').trim();
   if (!q || q.length < 2) {
     return res.json({ ok: true, airports: [] });
   }
 
-  var result = await duffelRequest(
+  const result = await duffelRequest(
     'GET',
     '/air/airports?query=' + encodeURIComponent(q) + '&suggested=false',
     null,
     req.id
   );
 
-  var airports = (Array.isArray(result.data) ? result.data : [])
-    .filter(function(a) { return a.iata_code && a.iata_code.length === 3; })
+  const airports = (Array.isArray(result.data) ? result.data : [])
+    .filter(a => a.iata_code && a.iata_code.length === 3)
     .slice(0, 8)
-    .map(function(a) {
+    .map(a => {
+      // Duffel uses municipality for city name
+      const city    = a.municipality || a.iata_city_code || a.iata_code;
+      const country = a.iata_country_code || '';
       return {
         code:    a.iata_code,
         name:    a.name || a.iata_code,
-        city:    a.city ? a.city.name : (a.iata_city_code || a.iata_code),
-        country: a.city ? (a.city.country ? a.city.country.name : '') : '',
+        city,
+        country,
       };
     });
 
-  res.json({ ok: true, airports: airports, reqId: req.id });
+  res.json({ ok: true, airports, reqId: req.id });
 }));
