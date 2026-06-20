@@ -676,6 +676,14 @@ function normalizeSeatMap(sm) {
 // ─── POST /create-checkout-session ────────────────────────
 // Creates a Stripe Checkout Session. The actual flight booking happens
 // ONLY after Stripe confirms the payment (see /confirm-payment).
+//
+// [PRICE-CHECK] Before charging the customer, we re-fetch the offer's REAL
+// price from Duffel and compare it to what the frontend last showed
+// (duffel_amount). If it moved, we refuse to create the Stripe session and
+// return 409 + the fresh price instead — the frontend then shows the
+// customer an explicit "price changed, continue or cancel?" prompt. This
+// catches price drift BEFORE any money moves, which is far simpler and
+// safer than detecting it after payment (no partial refunds/charges needed).
 app.post('/create-checkout-session', rateLimit('pay', 15, 60000), async (req, res) => {
   try {
     if (!stripe) return res.status(500).json({ ok: false, error: 'Stripe ist nicht konfiguriert' });
@@ -689,6 +697,49 @@ app.post('/create-checkout-session', rateLimit('pay', 15, 60000), async (req, re
     if (!offer_id) return res.status(400).json({ ok: false, error: 'offer_id مطلوب' });
     if (!passengers?.length) return res.status(400).json({ ok: false, error: 'بيانات المسافرين مطلوبة' });
     if (!customer_amount || Number(customer_amount) <= 0) return res.status(400).json({ ok: false, error: 'Betrag ungültig' });
+
+    // [PRICE-CHECK] Re-verify the offer's current real price + service
+    // availability against what the browser last saw. Same calculation
+    // bookFromSession uses later, so the two checks always agree.
+    let freshAmount = null, freshCurrency = currency, safeServices = services;
+    try {
+      const offerCheck = await duffel('GET', `/air/offers/${offer_id}?return_available_services=true`);
+      const avail = (offerCheck.data && offerCheck.data.available_services) || [];
+      safeServices = await validateServices(offer_id, services || [], avail);
+      if (offerCheck && offerCheck.data && offerCheck.data.total_amount) {
+        freshCurrency = offerCheck.data.total_currency || freshCurrency;
+        let total = parseFloat(offerCheck.data.total_amount);
+        const byId = new Map(avail.map((s) => [s.id, s]));
+        for (const svc of safeServices) {
+          const av = byId.get(svc.id);
+          if (av && av.total_amount) total += parseFloat(av.total_amount) * (svc.quantity || 1);
+        }
+        freshAmount = Math.round(total * 100) / 100;
+      }
+    } catch (e) {
+      log('warn', 'price_check_failed', { offer_id, error: e.message });
+      // Offer fetch failed (expired / network blip) — let Duffel itself be
+      // the final judge at booking time rather than blocking checkout here.
+    }
+
+    if (freshAmount != null) {
+      const oldAmount = Math.round(Number(duffel_amount) * 100) / 100;
+      const diff = Math.round((freshAmount - oldAmount) * 100) / 100;
+      // Ignore sub-cent/rounding noise; anything >= 0.5 currency unit is a
+      // real fare change worth interrupting the customer for.
+      if (Math.abs(diff) >= 0.5) {
+        log('info', 'price_changed_before_checkout', { offer_id, old: oldAmount, fresh: freshAmount, diff });
+        return res.status(409).json({
+          ok: false,
+          code: 'PRICE_CHANGED',
+          error: 'Der Preis hat sich geändert',
+          old_amount: oldAmount,
+          new_amount: freshAmount,
+          currency: freshCurrency,
+          diff,
+        });
+      }
+    }
 
     // Stripe wants the amount in the smallest currency unit (cents)
     const amountCents = Math.round(Number(customer_amount) * 100);
@@ -710,6 +761,7 @@ app.post('/create-checkout-session', rateLimit('pay', 15, 60000), async (req, re
       cancel_url: cancel_url || 'https://example.com/cancel',
       metadata: { flywise: '1' },
     });
+
 
     await rememberBooking(session.id, {
       offer_id,
