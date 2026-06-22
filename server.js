@@ -375,6 +375,28 @@ async function setAdminConfig(key, value) {
   _configCache.set(key, { value, at: Date.now() });
 }
 
+// [CANCEL-NOTIFY-FIX] Customer-initiated cancellations the admin has no
+// other way of finding out about. Stored as a capped list (newest first,
+// oldest dropped past 50) in admin_config — durable across restarts,
+// consistent with everything else config-driven in this file.
+async function recordCancellationEvent(entry) {
+  try {
+    const list = await getAdminConfig('cancellation_events', []);
+    const updated = [{ ...entry, at: new Date().toISOString(), read: false }, ...list].slice(0, 50);
+    await setAdminConfig('cancellation_events', updated);
+  } catch (e) {
+    log('warn', 'cancellation_event_record_failed', { error: e.message });
+  }
+}
+async function getUnreadCancellationCount() {
+  const list = await getAdminConfig('cancellation_events', []);
+  return list.filter((e) => !e.read).length;
+}
+async function markCancellationsRead() {
+  const list = await getAdminConfig('cancellation_events', []);
+  await setAdminConfig('cancellation_events', list.map((e) => ({ ...e, read: true })));
+}
+
 // Same tiered-margin math as the admin dashboard's getMarginForPrice() in
 // JS, kept in lockstep deliberately: { from, to(nullable), pct, fixed }[].
 // `to: null` means "no upper bound". Falls back to the last tier if price
@@ -810,6 +832,37 @@ app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async (r
 
 app.use(express.json({ limit: '256kb' }));
 
+// ─── [KILL-SWITCH] Maintenance mode ────────────────────────
+// Toggled from the admin dashboard for a real emergency (e.g. a pricing
+// bug that could overcharge customers, a Duffel/Stripe outage, a security
+// issue) — takes the customer-facing site down immediately at the API
+// level, not just by hiding the UI. Every request is rejected with 503
+// EXCEPT: /admin/* (the dashboard — including the toggle to turn this back
+// off — must always stay reachable), /maintenance-status (what the
+// frontend polls to show the "under maintenance" screen), and basic
+// health checks (so uptime monitoring doesn't also report a false outage
+// on top of the deliberate one).
+app.use(async (req, res, next) => {
+  if (req.path.startsWith('/admin/') || req.path === '/maintenance-status' || req.path === '/health' || req.path === '/' || req.path === '/status') {
+    return next();
+  }
+  try {
+    const maint = await getAdminConfig('maintenance_mode', { enabled: false, message: '' });
+    if (maint && maint.enabled) {
+      return res.status(503).json({
+        ok: false,
+        maintenance: true,
+        error: maint.message || 'Airpiv ist vorübergehend nicht verfügbar. Bitte versuche es später erneut.',
+      });
+    }
+  } catch (e) {
+    log('warn', 'maintenance_check_failed', { error: e.message });
+    // Fail OPEN — a config-read error must never itself take the whole
+    // site down. Worst case, maintenance mode is briefly ineffective.
+  }
+  next();
+});
+
 // [#23] gzip compression for JSON responses (no external deps, uses zlib).
 // Wraps res.json so large payloads (search results) transfer much smaller.
 const zlib = require('zlib');
@@ -954,6 +1007,49 @@ app.get('/status', (req, res) => {
 
 app.get('/health', (req, res) => {
   res.json({ ok: true, timestamp: new Date().toISOString() });
+});
+
+// ─── GET /maintenance-status ─────────────────────────────────
+// [MAINTENANCE-MODE] Public, unauthenticated — every visitor's browser
+// checks this before rendering the homepage, so it must not require a
+// login. Backed by admin_config (the same durable key-value store as
+// profit tiers / loyalty config / etc.), not an in-memory flag — an
+// in-memory flag would silently reset to "not in maintenance" on every
+// server restart/redeploy, which defeats the purpose of an emergency
+// kill switch the admin expects to stay on until THEY turn it off.
+async function getMaintenanceConfig() {
+  return getAdminConfig('maintenance_mode', { enabled: false, message: '' });
+}
+app.get('/maintenance-status', async (req, res) => {
+  try {
+    const cfg = await getMaintenanceConfig();
+    res.json({ ok: true, enabled: !!cfg.enabled, message: cfg.message || '' });
+  } catch (err) {
+    // Fail OPEN, not closed — a config-read error must never accidentally
+    // lock every visitor out of a perfectly healthy site.
+    res.json({ ok: true, enabled: false, message: '' });
+  }
+});
+
+// ─── GET/POST /admin/maintenance-mode ────────────────────────
+app.get('/admin/maintenance-mode', requireAdmin, async (req, res) => {
+  try {
+    const cfg = await getMaintenanceConfig();
+    res.json({ ok: true, enabled: !!cfg.enabled, message: cfg.message || '' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+app.post('/admin/maintenance-mode', requireAdmin, async (req, res) => {
+  try {
+    const enabled = !!req.body.enabled;
+    const message = typeof req.body.message === 'string' ? req.body.message.slice(0, 500) : '';
+    await setAdminConfig('maintenance_mode', { enabled, message });
+    log('info', 'maintenance_mode_changed', { enabled });
+    res.json({ ok: true, enabled, message });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 // ─── POST /search ─────────────────────────────────────────
@@ -2467,6 +2563,28 @@ app.post('/cancel', rateLimit('cancel', 10, 60000), async (req, res) => {
     const cancelReq = await duffel('POST', '/air/order_cancellations', { data: { order_id } });
     const confirmed = await duffel('POST', `/air/order_cancellations/${cancelReq.data?.id}/actions/confirm`, {});
 
+    // [ADMIN-CANCEL-SYNC-FIX] Reflect the real cancellation in our own
+    // bookings table — previously this only happened via a client-side
+    // Supabase update with a wrong column name (order_id instead of
+    // duffel_order_id), which silently matched nothing every time, AND ran
+    // with the browser's anon key rather than server-side. The admin
+    // dashboard showed every customer-cancelled booking as still
+    // "confirmed" forever, with a real refund already issued, until
+    // someone happened to notice and fix it manually.
+    if (supa) {
+      supa.from('bookings').update({ status: 'cancelled' }).eq('duffel_order_id', order_id)
+        .then(({ data, error }) => {
+          if (error) { log('error', 'admin_cancel_sync_failed', { order_id, error: error.message }); return; }
+          // [CANCEL-NOTIFY-FIX] This is a CUSTOMER cancelling their own
+          // booking (via this public /cancel endpoint), not the admin
+          // cancelling something from the dashboard — the admin has no
+          // other way to find out this happened unless they happen to
+          // check the bookings table. Record it so the dashboard can show
+          // an unread-count badge.
+          recordCancellationEvent({ order_id, refund_amount: confirmed.data?.refund_amount || null });
+        });
+    }
+
     res.json({ ok: true, cancelled: true, refund_amount: confirmed.data?.refund_amount });
   } catch (err) {
     res.status(err.status || 500).json({ ok: false, error: err.message });
@@ -2498,9 +2616,22 @@ app.post('/cancel-quote', async (req, res) => {
 // Duffel step 2: confirm the pending cancellation (executes refund).
 app.post('/cancel-confirm', async (req, res) => {
   try {
-    const { cancellation_id } = req.body;
+    const { cancellation_id, order_id } = req.body;
     if (!cancellation_id) return res.status(400).json({ ok: false, error: 'cancellation_id مطلوب' });
     const confirmed = await duffel('POST', `/air/order_cancellations/${cancellation_id}/actions/confirm`, {});
+
+    // [ADMIN-CANCEL-SYNC-FIX] Same fix as /cancel above — keep the admin
+    // dashboard's bookings table in sync with a real, confirmed
+    // cancellation. order_id isn't always known to the frontend at this
+    // point in the quote→confirm flow, so this is best-effort: if it's
+    // missing, the booking stays marked confirmed here and relies on
+    // whatever other reconciliation exists, rather than guessing at a
+    // lookup that could match the wrong row.
+    if (supa && order_id) {
+      supa.from('bookings').update({ status: 'cancelled' }).eq('duffel_order_id', order_id)
+        .then(({ error }) => { if (error) log('error', 'admin_cancel_sync_failed', { order_id, error: error.message }); });
+    }
+
     res.json({ ok: true, cancelled: true, refund_amount: confirmed.data?.refund_amount });
   } catch (err) {
     res.status(err.status || 500).json({ ok: false, error: err.message, details: err.details });
@@ -2791,10 +2922,53 @@ app.post('/admin/login', rateLimit('admin_login', 10, 60000), (req, res) => {
 });
 
 // ─── GET /admin/stats ───────────────────────────────────────
+// ─── [KILL-SWITCH] Maintenance mode ────────────────────────
+// GET/POST /admin/maintenance — read/toggle from the dashboard.
+// GET /maintenance-status — public, polled by the frontend.
+app.get('/admin/maintenance', requireAdmin, async (req, res) => {
+  try {
+    const maint = await getAdminConfig('maintenance_mode', { enabled: false, message: '' });
+    res.json({ ok: true, enabled: !!maint.enabled, message: maint.message || '' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+app.post('/admin/maintenance', requireAdmin, async (req, res) => {
+  try {
+    const enabled = !!(req.body && req.body.enabled);
+    const message = (req.body && typeof req.body.message === 'string') ? req.body.message.slice(0, 500) : '';
+    await setAdminConfig('maintenance_mode', { enabled, message });
+    log('info', 'maintenance_mode_toggled', { enabled });
+    res.json({ ok: true, enabled, message });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+app.get('/maintenance-status', async (req, res) => {
+  try {
+    const maint = await getAdminConfig('maintenance_mode', { enabled: false, message: '' });
+    res.json({ ok: true, enabled: !!maint.enabled, message: maint.message || '' });
+  } catch (err) {
+    res.json({ ok: true, enabled: false, message: '' }); // fail open
+  }
+});
+
 app.get('/admin/stats', requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { data, error } = await supa.from('bookings').select('*').eq('status', 'confirmed');
+    // [PROFIT-PERIOD-FIX] Optional date-range filter on created_at —
+    // 'from'/'to' are ISO date strings (YYYY-MM-DD). Omitting both keeps
+    // the original all-time behavior unchanged for any existing caller.
+    let query = supa.from('bookings').select('*').eq('status', 'confirmed');
+    if (req.query.from) query = query.gte('created_at', req.query.from);
+    if (req.query.to) {
+      // 'to' is a day boundary, not a timestamp — make it inclusive of the
+      // entire day by treating it as start-of-NEXT-day exclusive.
+      const toDate = new Date(req.query.to + 'T00:00:00Z');
+      toDate.setUTCDate(toDate.getUTCDate() + 1);
+      query = query.lt('created_at', toDate.toISOString());
+    }
+    const { data, error } = await query;
     if (error) throw new Error(error.message);
     const rows = data || [];
     const revenue = rows.reduce((s, b) => s + (Number(b.customer_paid) || 0), 0);
@@ -2812,8 +2986,200 @@ app.get('/admin/stats', requireAdmin, async (req, res) => {
   }
 });
 
+// ════════════════════════════════════════════════════════════
+// [BLOG-SYSTEM] Self-serve blog admin API
+// ════════════════════════════════════════════════════════════
+function slugify(title) {
+  const umlautMap = { 'ä':'ae','ö':'oe','ü':'ue','Ä':'Ae','Ö':'Oe','Ü':'Ue','ß':'ss' };
+  let s = String(title || '').replace(/[äöüÄÖÜß]/g, (c) => umlautMap[c] || c);
+  s = s.toLowerCase()
+    .normalize('NFKD').replace(/[\u0300-\u036f]/g, '') // strip remaining accents
+    .replace(/[^a-z0-9\s-]/g, '')   // drop anything non-ASCII (incl. Arabic) — slug must stay URL-safe
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  // A title that's entirely non-Latin (e.g. fully Arabic) collapses to ''
+  // here — fall back to a short random id so the post still gets a valid,
+  // unique-enough slug instead of failing to save.
+  return s || ('post-' + Math.random().toString(36).slice(2, 8));
+}
+
+// ─── GET /admin/blog-posts ────────────────────────────────────
+// Returns every post regardless of status (draft + published) — the admin
+// dashboard's own list view, not the public-facing one.
+app.get('/admin/blog-posts', requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { data, error } = await supa.from('blog_posts').select('*').order('created_at', { ascending: false });
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, posts: data || [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── POST /admin/blog-posts ───────────────────────────────────
+// Creates a new post. slug is auto-generated from the title if not given;
+// if the generated/given slug collides with an existing one, a numeric
+// suffix is appended (-2, -3, ...) until it's unique, rather than failing
+// outright on a duplicate-title post.
+app.post('/admin/blog-posts', requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { title, meta_description, excerpt, content, cover_image_url, author, status } = req.body;
+    if (!title || !content) return res.status(400).json({ ok: false, error: 'Titel und Inhalt sind erforderlich' });
+
+    let baseSlug = slugify(req.body.slug || title);
+    let slug = baseSlug;
+    for (let attempt = 2; attempt <= 21; attempt++) {
+      const { data: existing } = await supa.from('blog_posts').select('id').eq('slug', slug).maybeSingle();
+      if (!existing) break;
+      slug = baseSlug + '-' + attempt;
+    }
+
+    const isPublishing = status === 'published';
+    const { data, error } = await supa.from('blog_posts').insert({
+      slug, title,
+      meta_description: meta_description || null,
+      excerpt: excerpt || null,
+      content,
+      cover_image_url: cover_image_url || null,
+      author: author || 'Airpiv Team',
+      status: isPublishing ? 'published' : 'draft',
+      published_at: isPublishing ? new Date().toISOString() : null,
+    }).select().maybeSingle();
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, post: data });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── PUT /admin/blog-posts/:id ─────────────────────────────────
+// Updates a post. If this is the transition from draft -> published for
+// the first time, published_at is stamped now (never overwritten on
+// subsequent edits to an already-published post, so the displayed publish
+// date stays stable across later corrections/typo fixes).
+app.put('/admin/blog-posts/:id', requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { data: existing, error: fetchErr } = await supa.from('blog_posts').select('*').eq('id', req.params.id).maybeSingle();
+    if (fetchErr) throw new Error(fetchErr.message);
+    if (!existing) return res.status(404).json({ ok: false, error: 'Beitrag nicht gefunden' });
+
+    const { title, meta_description, excerpt, content, cover_image_url, author, status } = req.body;
+    const update = {
+      updated_at: new Date().toISOString(),
+    };
+    if (title != null) update.title = title;
+    if (meta_description != null) update.meta_description = meta_description;
+    if (excerpt != null) update.excerpt = excerpt;
+    if (content != null) update.content = content;
+    if (cover_image_url != null) update.cover_image_url = cover_image_url;
+    if (author != null) update.author = author;
+    if (status != null) {
+      update.status = status;
+      if (status === 'published' && existing.status !== 'published') {
+        update.published_at = new Date().toISOString();
+      }
+    }
+    // Slug is intentionally NOT editable after creation — changing it
+    // would break any link already shared/indexed by Google for this post.
+    const { data, error } = await supa.from('blog_posts').update(update).eq('id', req.params.id).select().maybeSingle();
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, post: data });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── DELETE /admin/blog-posts/:id ──────────────────────────────
+app.delete('/admin/blog-posts/:id', requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { error } = await supa.from('blog_posts').delete().eq('id', req.params.id);
+    if (error) throw new Error(error.message);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════
+// [BLOG-SYSTEM] Public blog API — no auth, read-only, published only
+// ════════════════════════════════════════════════════════════
+
+// ─── GET /blog-posts ───────────────────────────────────────────
+// List published posts for the public blog index page. Lightweight
+// fields only (no full content) — the index page doesn't need it, and
+// keeping payload small matters more here since this is unauthenticated
+// and could be hit by anyone/anything.
+app.get('/blog-posts', async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
+    const { data, error } = await supa.from('blog_posts')
+      .select('slug,title,excerpt,cover_image_url,author,published_at')
+      .eq('status', 'published')
+      .order('published_at', { ascending: false })
+      .limit(limit);
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, posts: data || [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── GET /blog-posts/:slug ──────────────────────────────────────
+// Single published post by slug, for the public post-detail page.
+// Increments views_count best-effort (fire-and-forget — a failed view
+// count update must never block the post from rendering for the reader).
+app.get('/blog-posts/:slug', async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { data, error } = await supa.from('blog_posts').select('*').eq('slug', req.params.slug).eq('status', 'published').maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) return res.status(404).json({ ok: false, error: 'Beitrag nicht gefunden' });
+    supa.from('blog_posts').update({ views_count: (data.views_count || 0) + 1 }).eq('id', data.id)
+      .then(({ error: e }) => { if (e) log('warn', 'blog_view_count_failed', { error: e.message }); });
+    res.json({ ok: true, post: data });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ─── GET /admin/bookings ────────────────────────────────────
 // Query params: limit (default 100), status (optional filter)
+// ─── GET /admin/cancellations ────────────────────────────────
+// [CANCEL-NOTIFY-FIX] Returns the cancellation event log plus the unread
+// count for the sidebar badge. Joins in booking details (route, customer,
+// amount) where the order_id still matches a row, so the dashboard can
+// show something more useful than a bare order ID.
+app.get('/admin/cancellations', requireAdmin, async (req, res) => {
+  try {
+    const events = await getAdminConfig('cancellation_events', []);
+    let bookingsByOrderId = {};
+    if (supa && events.length) {
+      const orderIds = events.map((e) => e.order_id).filter(Boolean);
+      const { data } = await supa.from('bookings').select('duffel_order_id,booking_reference,route_label,customer_email,customer_name,customer_paid').in('duffel_order_id', orderIds);
+      (data || []).forEach((b) => { bookingsByOrderId[b.duffel_order_id] = b; });
+    }
+    const enriched = events.map((e) => ({ ...e, booking: bookingsByOrderId[e.order_id] || null }));
+    res.json({ ok: true, events: enriched, unreadCount: events.filter((e) => !e.read).length });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+app.post('/admin/cancellations/mark-read', requireAdmin, async (req, res) => {
+  try {
+    await markCancellationsRead();
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/admin/bookings', requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
