@@ -1145,6 +1145,61 @@ app.post('/search', rateLimit('search', 30, 60000), async (req, res) => {
   }
 });
 
+// ─── GET /route-price ───────────────────────────────────────
+// [ROUTE-PAGES] Lightweight cheapest-price lookup for SEO route landing
+// pages. Returns just one number (+currency), not a full offer list.
+// Cached per-route for 6h so many visitors hitting the same page don't
+// each trigger a fresh Duffel search.
+app.get('/route-price', rateLimit('route-price', 60, 60000), async (req, res) => {
+  try {
+    const { from, to } = req.query;
+    if (!from || !to) return res.status(400).json({ ok: false, error: 'from und to sind erforderlich' });
+
+    const cacheKey = 'route_price_' + from.toUpperCase() + '_' + to.toUpperCase();
+    const cached = await getAdminConfig(cacheKey, null);
+    if (cached && cached.fetchedAt && (Date.now() - new Date(cached.fetchedAt).getTime()) < 6 * 60 * 60 * 1000) {
+      return res.json({ ok: true, price: cached.price, currency: cached.currency, cached: true });
+    }
+
+    // A representative near-future date — NOT today, which would surface
+    // artificially high last-minute fares that don't reflect a typical
+    // "from" price for the route.
+    const searchDate = new Date();
+    searchDate.setDate(searchDate.getDate() + 21);
+    const departure_date = searchDate.toISOString().slice(0, 10);
+
+    const result = await duffel('POST', '/air/offer_requests?return_offers=true', {
+      data: {
+        slices: [{ origin: from.toUpperCase(), destination: to.toUpperCase(), departure_date }],
+        passengers: [{ type: 'adult' }],
+        cabin_class: 'economy',
+      },
+    });
+
+    const offers = result.data?.offers || [];
+    if (!offers.length) {
+      return res.json({ ok: true, price: null, currency: null });
+    }
+
+    const ticketTiers = await getTicketProfitTiers();
+    let cheapest = null;
+    for (const o of offers) {
+      const netPrice = parseFloat(o.total_amount || 0);
+      const margin = computeTieredMargin(netPrice, ticketTiers);
+      const customerPrice = Math.round((netPrice + margin) * 100) / 100;
+      if (cheapest === null || customerPrice < cheapest) cheapest = customerPrice;
+    }
+
+    await setAdminConfig(cacheKey, { price: cheapest, currency: offers[0].total_currency || 'EUR', fetchedAt: new Date().toISOString() });
+    res.json({ ok: true, price: cheapest, currency: offers[0].total_currency || 'EUR', cached: false });
+  } catch (err) {
+    // Fail soft — a route page should still render (without a price) if
+    // Duffel is briefly unavailable, never show a broken page.
+    log('warn', 'route_price_failed', { error: err.message });
+    res.json({ ok: true, price: null, currency: null });
+  }
+});
+
 // ─── GET /offer/:id ───────────────────────────────────────
 app.get('/offer/:id', async (req, res) => {
   try {
@@ -3144,6 +3199,121 @@ app.get('/blog-posts/:slug', async (req, res) => {
     supa.from('blog_posts').update({ views_count: (data.views_count || 0) + 1 }).eq('id', data.id)
       .then(({ error: e }) => { if (e) log('warn', 'blog_view_count_failed', { error: e.message }); });
     res.json({ ok: true, post: data });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════
+// [ROUTE-PAGES] Self-serve SEO route landing pages admin + public API
+// ════════════════════════════════════════════════════════════
+
+// ─── GET /admin/route-pages ────────────────────────────────────
+app.get('/admin/route-pages', requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { data, error } = await supa.from('route_pages').select('*').order('created_at', { ascending: false });
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, routes: data || [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── POST /admin/route-pages ───────────────────────────────────
+app.post('/admin/route-pages', requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status } = req.body;
+    if (!origin_iata || !destination_iata || !origin_city || !destination_city) {
+      return res.status(400).json({ ok: false, error: 'IATA-Codes und Stadtnamen sind erforderlich' });
+    }
+
+    // [ROUTE-PAGES] Reuses the exact same slugify() used for blog posts —
+    // same umlaut-transliteration and non-Latin fallback behavior, just
+    // seeded from the city names instead of a post title.
+    let baseSlug = slugify(origin_city + '-' + destination_city);
+    let slug = baseSlug;
+    for (let attempt = 2; attempt <= 21; attempt++) {
+      const { data: existing } = await supa.from('route_pages').select('id').eq('slug', slug).maybeSingle();
+      if (!existing) break;
+      slug = baseSlug + '-' + attempt;
+    }
+
+    const { data, error } = await supa.from('route_pages').insert({
+      slug,
+      origin_iata: origin_iata.toUpperCase(),
+      destination_iata: destination_iata.toUpperCase(),
+      origin_city, destination_city,
+      intro_text: intro_text || null,
+      status: status === 'published' ? 'published' : 'draft',
+    }).select().maybeSingle();
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, route: data });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── PUT /admin/route-pages/:id ─────────────────────────────────
+app.put('/admin/route-pages/:id', requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status } = req.body;
+    const update = { updated_at: new Date().toISOString() };
+    if (origin_iata != null) update.origin_iata = origin_iata.toUpperCase();
+    if (destination_iata != null) update.destination_iata = destination_iata.toUpperCase();
+    if (origin_city != null) update.origin_city = origin_city;
+    if (destination_city != null) update.destination_city = destination_city;
+    if (intro_text != null) update.intro_text = intro_text;
+    if (status != null) update.status = status;
+    // Slug is intentionally NOT editable after creation — same reasoning
+    // as blog posts: changing it breaks any already-shared/indexed link.
+    const { data, error } = await supa.from('route_pages').update(update).eq('id', req.params.id).select().maybeSingle();
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, route: data });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── DELETE /admin/route-pages/:id ──────────────────────────────
+app.delete('/admin/route-pages/:id', requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { error } = await supa.from('route_pages').delete().eq('id', req.params.id);
+    if (error) throw new Error(error.message);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── GET /route-pages ───────────────────────────────────────────
+// Public list of published routes — for a route-index page / internal
+// linking from the blog ("see flights for this route").
+app.get('/route-pages', async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { data, error } = await supa.from('route_pages')
+      .select('slug,origin_iata,destination_iata,origin_city,destination_city')
+      .eq('status', 'published')
+      .order('origin_city', { ascending: true });
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, routes: data || [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── GET /route-pages/:slug ──────────────────────────────────────
+app.get('/route-pages/:slug', async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { data, error } = await supa.from('route_pages').select('*').eq('slug', req.params.slug).eq('status', 'published').maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) return res.status(404).json({ ok: false, error: 'Route nicht gefunden' });
+    res.json({ ok: true, route: data });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
