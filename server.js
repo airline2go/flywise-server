@@ -1908,26 +1908,20 @@ const inFlight = new Set();
 // Books the flight for a paid session, idempotently. Returns a result object.
 // Throws on a real booking failure so callers can mark status + log.
 async function bookFromSession(session_id, session) {
-  console.log('[BFS-STEP-1] bookFromSession called', session_id);
   // 2) Recover the booking payload stored at session creation
   const entry = await getPendingBooking(session_id);
-  console.log('[BFS-STEP-2] getPendingBooking done', !!entry);
   if (!entry) { const e = new Error('Buchungsdaten nicht gefunden oder abgelaufen'); e.code = 'NO_ENTRY'; throw e; }
 
   // 3) Idempotency — already booked for this session
   if (entry.duffel_order_id) {
-    console.log('[BFS-STEP-3] already booked, returning early', entry.duffel_order_id);
     return { already: true, order_id: entry.duffel_order_id, booking_reference: entry.duffel_ref || null };
   }
 
   setBookingStatus(session_id, 'paid');
   const booking = entry.payload;
-  console.log('[BFS-STEP-4] booking payload services:', JSON.stringify(booking.services));
-  console.log('[BFS-STEP-4b] booking payload passengers:', JSON.stringify((booking.passengers||[]).map(p=>({type:p.type}))));
 
   // 4) Book with Duffel (attach passenger ids + drop unavailable services)
   const paxWithIds = await attachPassengerIds(booking.offer_id, booking.passengers);
-  console.log('[BFS-STEP-5] attachPassengerIds done', JSON.stringify(paxWithIds.map(p=>({id:p.id,type:p.type}))));
 
   // [ADMIN-MARGIN] Re-derive pricing from scratch, exactly as
   // /create-checkout-session did — never trust the stored payload's
@@ -1940,7 +1934,6 @@ async function bookFromSession(session_id, session) {
   let payCurrency = booking.currency || 'EUR';
   let safeServices = booking.services || [];
   let pricing = null;
-  console.log('[BFS-STEP-6] about to call computeAuthoritativePricing');
   try {
     // [LOYALTY-TIMING-FIX] true — this runs right after Duffel actually
     // confirms the order, recomputing the same authoritative pricing used
@@ -1952,9 +1945,7 @@ async function bookFromSession(session_id, session) {
     payAmount = String(pricing.duffelAmount);
     payCurrency = pricing.currency;
     safeServices = pricing.safeServices;
-    console.log('[BFS-STEP-7] computeAuthoritativePricing OK, safeServices:', JSON.stringify(safeServices));
   } catch (e) {
-    console.log('[BFS-STEP-7-ERR] computeAuthoritativePricing THREW:', e.message);
     log('warn', 'offer_revalidate_failed', { error: e.message });
     // [SEAT-PRICING-FIX] Same fix as computeAuthoritativePricing() — this
     // rare fallback path (only reached if that function itself threw) must
@@ -2027,71 +2018,6 @@ async function bookFromSession(session_id, session) {
     e.code = 'PRICE_DRIFT';
     e.priceDrift = priceDrift;
     throw e;
-  }
-
-  // [SEAT-ERROR-DIAGNOSTIC] Log exactly what we're about to send Duffel —
-  // passenger order/types/ids and every service id — so a recurring
-  // "expected one seat service per passenger and segments" rejection can
-  // be diagnosed from real data (duplicate service ids? a service id that
-  // belongs to a different segment than intended? wrong passenger/segment
-  // pairing?) instead of guessed at from outside.
-  log('info', 'duffel_order_request_debug', {
-    offer_id: booking.offer_id,
-    passengers: paxWithIds.map(p => ({ id: p.id, type: p.type })),
-    services: safeServices,
-  });
-
-  // [SEAT-ERROR-DIAGNOSTIC-2] Cross-reference each requested seat service
-  // id against the live seat map to find out which segment+passenger it
-  // ACTUALLY belongs to (per Duffel's own data, not assumed from the
-  // frontend's bookkeeping) — then flag any segment+passenger combo that
-  // ends up with more than one seat service. This pinpoints the exact
-  // duplicate instead of guessing from id text patterns.
-  try {
-    const seatMapsCheck = await duffel('GET', `/air/seat_maps?offer_id=${encodeURIComponent(booking.offer_id)}`).catch(() => ({ data: [] }));
-    const serviceLocation = new Map(); // service id -> {segmentId, passengerId}
-    const seatServiceCounts = []; // [{designator, segmentId, serviceCount, serviceIds}]
-    for (const sm of (seatMapsCheck.data || [])) {
-      for (const cabin of (sm.cabins || [])) {
-        for (const row of (cabin.rows || [])) {
-          for (const section of (row.sections || [])) {
-            for (const el of (section.elements || [])) {
-              if (el.type === 'seat' && Array.isArray(el.available_services) && el.available_services.length) {
-                seatServiceCounts.push({
-                  designator: el.designator,
-                  segmentId: sm.segment_id,
-                  serviceCount: el.available_services.length,
-                  serviceIds: el.available_services.map(s => s.id),
-                  passengerIds: el.available_services.map(s => s.passenger_ids),
-                });
-                for (const svc of el.available_services) {
-                  serviceLocation.set(svc.id, { segmentId: sm.segment_id, passengerId: (svc.passenger_ids || [])[0] || null, designator: el.designator });
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    // [SEAT-PER-PASSENGER-DIAGNOSTIC] Definitively answers: does this
-    // airline give 1 shared service per seat, or N services per seat (one
-    // per passenger)? Logging only the FIRST seat that has any services —
-    // every seat on the same offer/cabin behaves the same way, so one
-    // example is enough to diagnose without flooding the log.
-    if (seatServiceCounts.length) {
-      log('info', 'seat_services_per_seat_sample', seatServiceCounts[0]);
-    }
-    const groupCounts = {}; // "segmentId|passengerId" -> count
-    const resolved = safeServices.map(s => {
-      const loc = serviceLocation.get(s.id) || { segmentId: 'UNKNOWN', passengerId: 'UNKNOWN', designator: 'UNKNOWN' };
-      const key = loc.segmentId + '|' + loc.passengerId;
-      groupCounts[key] = (groupCounts[key] || 0) + 1;
-      return { serviceId: s.id, segmentId: loc.segmentId, passengerId: loc.passengerId, designator: loc.designator };
-    });
-    const duplicateGroups = Object.entries(groupCounts).filter(([, count]) => count > 1);
-    log('info', 'seat_service_group_check', { resolved, duplicateGroups });
-  } catch (diagErr) {
-    log('warn', 'seat_service_group_check_failed', { error: diagErr.message });
   }
 
   const result = await duffel('POST', '/air/orders', {
@@ -2208,20 +2134,55 @@ async function bookFromSession(session_id, session) {
     if (booking.user_id) applyLoyaltyForBooking('user', booking.user_id, loyaltyUsed, customerPaid).then(function(){}, function(){});
   }
 
+  // [EMAIL-SEAT-FIX] The order data we just got back from POST
+  // /air/orders may not yet include full passenger/seat detail — Duffel's
+  // own docs note "there may be cases when the reservation is confirmed
+  // but order information is not immediately available" for the create
+  // response. Fetch the order fresh via GET before building anything the
+  // email needs seat data for; retry briefly if the first fetch still
+  // comes back without seats, since this whole block runs after the
+  // customer's HTTP response has already gone out (the email send is
+  // fire-and-forget) so a short delay here is invisible to them.
+  let freshOrderData = result.data;
+  if (orderId) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const fresh = await duffel('GET', `/air/orders/${orderId}`);
+        if (fresh && fresh.data) {
+          freshOrderData = fresh.data;
+          const hasAnySeat = (fresh.data.slices || []).some((sl) =>
+            (sl.segments || []).some((sg) => (sg.passengers || []).some((p) => p.seat && p.seat.designator))
+          );
+          // Only the FIRST attempt is unconditional — if any services were
+          // requested at all (seats or bags) but no seat shows up yet,
+          // retrying twice more (with a short pause) gives Duffel's sync a
+          // little more time without noticeably delaying the email. If
+          // nothing was requested, there's nothing to wait for.
+          const anyServicesRequested = (safeServices || []).length > 0;
+          if (hasAnySeat || !anyServicesRequested) break;
+        }
+      } catch (e) {
+        log('warn', 'order_refetch_for_email_failed', { attempt, error: e.message });
+      }
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+
   // 7) Send a real booking confirmation email (best-effort, never blocks the response)
   const recipientEmail = (booking.passengers && booking.passengers[0] && booking.passengers[0].email) || null;
   if (recipientEmail && bookingRef) {
     // [EMAIL-FIX] Build the same structured summary the in-app confirmation
     // screen uses (flight segments, seats, bags, real ticket/bags/seats/
-    // discount breakdown) — result.data is the live Duffel order we just
-    // got back, and the margin/discount figures were already computed
-    // moments ago by computeAuthoritativePricing() above. Wrapped in
-    // try/catch since this is purely cosmetic for the email — a failure
-    // here must never stop the email from sending with at least the
-    // basic reference + total it had before.
+    // discount breakdown) — freshOrderData is the just-refetched live
+    // Duffel order (see [EMAIL-SEAT-FIX] above), and the margin/discount
+    // figures were already computed moments ago by
+    // computeAuthoritativePricing() above. Wrapped in try/catch since this
+    // is purely cosmetic for the email — a failure here must never stop
+    // the email from sending with at least the basic reference + total it
+    // had before.
     let orderSummary = null;
     try {
-      orderSummary = buildOrderSummaryForEmail(result.data, {
+      orderSummary = buildOrderSummaryForEmail(freshOrderData, {
         ticketMargin: (pricing && pricing.ticketMargin) != null ? pricing.ticketMargin : (booking.ticket_margin || 0),
         ancillaryMargin: (pricing && pricing.servicesMargin) != null ? pricing.servicesMargin : (booking.ancillary_margin || 0),
         discountAmount: booking.discount_amount || 0,
