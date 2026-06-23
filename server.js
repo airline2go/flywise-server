@@ -397,6 +397,26 @@ async function markCancellationsRead() {
   await setAdminConfig('cancellation_events', list.map((e) => ({ ...e, read: true })));
 }
 
+// [BOOKING-FAILURE-NOTIFY] Same pattern as cancellation events — a
+// booking that failed AFTER the customer already paid (offer expired,
+// price drift, any unexpected Duffel/airline error) is arguably more
+// urgent than a clean cancellation, since it means a customer was
+// charged with no ticket (even when auto-refunded — the admin still
+// needs to know it happened, in case the refund itself silently failed).
+async function recordBookingFailureEvent(entry) {
+  try {
+    const list = await getAdminConfig('booking_failure_events', []);
+    const updated = [{ ...entry, at: new Date().toISOString(), read: false }, ...list].slice(0, 50);
+    await setAdminConfig('booking_failure_events', updated);
+  } catch (e) {
+    log('warn', 'booking_failure_event_record_failed', { error: e.message });
+  }
+}
+async function markBookingFailuresRead() {
+  const list = await getAdminConfig('booking_failure_events', []);
+  await setAdminConfig('booking_failure_events', list.map((e) => ({ ...e, read: true })));
+}
+
 // Same tiered-margin math as the admin dashboard's getMarginForPrice() in
 // JS, kept in lockstep deliberately: { from, to(nullable), pct, fixed }[].
 // `to: null` means "no upper bound". Falls back to the last tier if price
@@ -839,11 +859,18 @@ app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async (r
       return;
     }
     // Booking failed after a paid webhook → log loudly for support follow-up
-    log('error', 'webhook_booking_failed', { type: event.type, message: err.message, duffel_errors: err.details });
-    console.error('[WEBHOOK BOOKING FAILED] ' + (err.message || '') + ' | ' + JSON.stringify(err.details || {}));
+    log('error', 'webhook_booking_failed', { type: event.type, message: err.message, duffel_errors: err.details, refunded: err.refunded });
+    console.error('[WEBHOOK BOOKING FAILED] ' + (err.message || '') + ' | refunded=' + (err.refunded ? 'yes' : 'no') + ' | ' + JSON.stringify(err.details || {}));
+    recordBookingFailureEvent({
+      source: 'webhook',
+      session_id: event.data && event.data.object && event.data.object.id,
+      message: err.message,
+      refunded: !!err.refunded,
+      duffel_errors: err.details || null,
+    });
     if (process.env.SENTRY_DSN) {
       Sentry.captureException(err, {
-        tags: { critical: 'booking_failed_after_payment', source: 'webhook' },
+        tags: { critical: 'booking_failed_after_payment', source: 'webhook', refunded: err.refunded ? 'true' : 'false' },
         extra: { event_type: event.type, duffel_errors: err.details },
       });
     }
@@ -2191,15 +2218,48 @@ async function bookFromSession(session_id, session) {
     throw e;
   }
 
-  const result = await duffel('POST', '/air/orders', {
-    data: {
-      type: 'instant',
-      selected_offers: [booking.offer_id],
-      passengers: paxWithIds,
-      payments: [{ type: 'balance', amount: String(payAmount), currency: payCurrency }],
-      ...(safeServices.length > 0 ? { services: safeServices } : {}),
-    },
-  }, { 'Idempotency-Key': 'order_' + session_id });
+  let result;
+  try {
+    result = await duffel('POST', '/air/orders', {
+      data: {
+        type: 'instant',
+        selected_offers: [booking.offer_id],
+        passengers: paxWithIds,
+        payments: [{ type: 'balance', amount: String(payAmount), currency: payCurrency }],
+        ...(safeServices.length > 0 ? { services: safeServices } : {}),
+      },
+    }, { 'Idempotency-Key': 'order_' + session_id });
+  } catch (orderErr) {
+    // [REFUND-SAFETY-FIX] The customer has already paid via Stripe at
+    // this point — ANY failure creating the actual Duffel order (offer
+    // expired between payment and confirmation, an unexpected airline
+    // rejection, a transient API error, anything) means they were
+    // charged with nothing to show for it unless this refunds them right
+    // now. Previously only PRICE_DRIFT (a deliberate pre-emptive check
+    // above) ever triggered a refund — every other failure here had none
+    // at all, confirmed by a real production incident where
+    // "offer_no_longer_available" left a paid customer with no ticket
+    // and no refund.
+    let refunded = false;
+    if (stripe && session && session.payment_intent) {
+      try {
+        await stripe.refunds.create({ payment_intent: session.payment_intent });
+        refunded = true;
+        log('info', 'order_failure_refund_issued', { session_id, payment_intent: session.payment_intent, original_error: orderErr.message });
+      } catch (refundErr) {
+        log('error', 'order_failure_refund_failed', { session_id, error: refundErr.message, original_error: orderErr.message });
+      }
+    }
+    setBookingStatus(session_id, 'failed', { error: orderErr.message, refunded });
+    const e = new Error(refunded
+      ? 'Die Buchung konnte nicht abgeschlossen werden. Deine Zahlung wurde vollständig zurückerstattet.'
+      : orderErr.message);
+    e.code = orderErr.code || 'ORDER_CREATE_FAILED';
+    e.status = orderErr.status;
+    e.details = orderErr.details;
+    e.refunded = refunded;
+    throw e;
+  }
 
   const orderId = result.data?.id;
   const bookingRef = result.data?.booking_reference;
@@ -2425,16 +2485,27 @@ app.post('/confirm-payment', rateLimit('pay', 20, 60000), async (req, res) => {
     }
     // Payment succeeded but booking failed → surface clearly so support can refund/retry
     setBookingStatus(req.body && req.body.session_id, 'failed', { error: err.message });
-    log('error', 'booking_failed_after_payment', { message: err.message, status: err.status, duffel_errors: err.details });
+    log('error', 'booking_failed_after_payment', { message: err.message, status: err.status, duffel_errors: err.details, refunded: err.refunded });
     console.error('[BOOKING FAILED AFTER PAYMENT] message=' + (err.message || '') +
       ' | status=' + (err.status || '') +
+      ' | refunded=' + (err.refunded ? 'yes' : 'no') +
       ' | duffel_errors=' + JSON.stringify(err.details || {}));
+    recordBookingFailureEvent({
+      source: 'confirm-payment',
+      session_id: req.body && req.body.session_id,
+      message: err.message,
+      refunded: !!err.refunded,
+      duffel_errors: err.details || null,
+    });
     // [#8] This is the single most important error in the whole app — a
-    // customer was charged but has no ticket. Send it to Sentry with full
-    // context so it's impossible to miss (Sentry can alert by email/Slack).
+    // customer was charged but has no ticket (unless err.refunded is now
+    // true — see [REFUND-SAFETY-FIX] above — in which case it's a
+    // handled, safe outcome, same as PRICE_DRIFT). Still sent to Sentry
+    // either way so a refund failure (refunded: false) is impossible to
+    // miss.
     if (process.env.SENTRY_DSN) {
       Sentry.captureException(err, {
-        tags: { critical: 'booking_failed_after_payment' },
+        tags: { critical: 'booking_failed_after_payment', refunded: err.refunded ? 'true' : 'false' },
         extra: { session_id: req.body && req.body.session_id, duffel_errors: err.details },
       });
     }
@@ -2444,6 +2515,7 @@ app.post('/confirm-payment', rateLimit('pay', 20, 60000), async (req, res) => {
       details: err.details,
       duffel_errors: err.details,
       booking_failed_after_payment: true,
+      refunded: !!err.refunded,
     });
   }
 });
@@ -3109,6 +3181,28 @@ app.get('/admin/blog-posts', requireAdmin, async (req, res) => {
 // if the generated/given slug collides with an existing one, a numeric
 // suffix is appended (-2, -3, ...) until it's unique, rather than failing
 // outright on a duplicate-title post.
+// [BLOG-CONTENT-FORMAT-FIX] Most people writing a blog post from the
+// dashboard type plain text with blank lines between paragraphs (the way
+// anyone writes in WhatsApp, email, Notes) — never <p> tags. HTML ignores
+// raw newlines entirely without explicit <p>/<br>, so that content was
+// rendering as one unbroken wall of text. This converts plain text into
+// real paragraphs automatically: blank-line-separated blocks become
+// <p>...</p>, a single line break within a block becomes <br>. Detection
+// is conservative — if the content already contains genuine HTML tags
+// (someone who deliberately wrote <h2>, <strong>, etc.), it's left
+// completely untouched, so this never fights with intentional formatting.
+function autoFormatContent(raw) {
+  if (!raw) return raw;
+  const hasHtmlTags = /<(p|h1|h2|h3|h4|ul|ol|li|strong|em|a|br|div|blockquote)[\s>]/i.test(raw);
+  if (hasHtmlTags) return raw;
+  return raw
+    .split(/\n\s*\n/) // blank line = paragraph break
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .map((block) => '<p>' + block.replace(/\n/g, '<br>') + '</p>') // single newline within a paragraph = line break
+    .join('\n');
+}
+
 app.post('/admin/blog-posts', requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
@@ -3128,7 +3222,7 @@ app.post('/admin/blog-posts', requireAdmin, async (req, res) => {
       slug, title,
       meta_description: meta_description || null,
       excerpt: excerpt || null,
-      content,
+      content: autoFormatContent(content),
       cover_image_url: cover_image_url || null,
       author: author || 'Airpiv Team',
       status: isPublishing ? 'published' : 'draft',
@@ -3160,7 +3254,7 @@ app.put('/admin/blog-posts/:id', requireAdmin, async (req, res) => {
     if (title != null) update.title = title;
     if (meta_description != null) update.meta_description = meta_description;
     if (excerpt != null) update.excerpt = excerpt;
-    if (content != null) update.content = content;
+    if (content != null) update.content = autoFormatContent(content);
     if (cover_image_url != null) update.cover_image_url = cover_image_url;
     if (author != null) update.author = author;
     if (status != null) {
@@ -3254,7 +3348,7 @@ app.get('/admin/route-pages', requireAdmin, async (req, res) => {
 app.post('/admin/route-pages', requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status, origin_lat, origin_lng, destination_lat, destination_lng } = req.body;
+    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status, origin_lat, origin_lng, destination_lat, destination_lng, custom_title, custom_meta_description, custom_faq } = req.body;
     if (!origin_iata || !destination_iata || !origin_city || !destination_city) {
       return res.status(400).json({ ok: false, error: 'IATA-Codes und Stadtnamen sind erforderlich' });
     }
@@ -3292,6 +3386,9 @@ app.post('/admin/route-pages', requireAdmin, async (req, res) => {
       destination_lng: destination_lng != null ? Number(destination_lng) : null,
       distance_km, haul_type,
       intro_text: intro_text || null,
+      custom_title: custom_title || null,
+      custom_meta_description: custom_meta_description || null,
+      custom_faq: Array.isArray(custom_faq) && custom_faq.length ? custom_faq : null,
       status: status === 'published' ? 'published' : 'draft',
     }).select().maybeSingle();
     if (error) throw new Error(error.message);
@@ -3305,13 +3402,16 @@ app.post('/admin/route-pages', requireAdmin, async (req, res) => {
 app.put('/admin/route-pages/:id', requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status, origin_lat, origin_lng, destination_lat, destination_lng } = req.body;
+    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status, origin_lat, origin_lng, destination_lat, destination_lng, custom_title, custom_meta_description, custom_faq } = req.body;
     const update = { updated_at: new Date().toISOString() };
     if (origin_iata != null) update.origin_iata = origin_iata.toUpperCase();
     if (destination_iata != null) update.destination_iata = destination_iata.toUpperCase();
     if (origin_city != null) update.origin_city = origin_city;
     if (destination_city != null) update.destination_city = destination_city;
     if (intro_text != null) update.intro_text = intro_text;
+    if (custom_title != null) update.custom_title = custom_title || null;
+    if (custom_meta_description != null) update.custom_meta_description = custom_meta_description || null;
+    if (custom_faq != null) update.custom_faq = Array.isArray(custom_faq) && custom_faq.length ? custom_faq : null;
     if (status != null) update.status = status;
     // [ROUTE-PAGES-DISTANCE] Recompute whenever fresh coordinates are
     // supplied (i.e. the admin re-selected an airport while editing) — so
@@ -3350,6 +3450,60 @@ app.delete('/admin/route-pages/:id', requireAdmin, async (req, res) => {
 // ─── GET /route-pages ───────────────────────────────────────────
 // Public list of published routes — for a route-index page / internal
 // linking from the blog ("see flights for this route").
+// ─── GET /sitemap-routes.xml ────────────────────────────────────
+// [DYNAMIC-SITEMAP] Generated live from the database on every request —
+// always reflects exactly the currently-published routes, with zero
+// manual sitemap maintenance. The static sitemap.xml on GitHub Pages
+// can't be edited by this server directly, so this is referenced FROM
+// that static file as a sitemap-index entry (a standard, Google-supported
+// pattern: one sitemap pointing to others).
+app.get('/sitemap-routes.xml', async (req, res) => {
+  try {
+    if (!supa) return res.status(503).send('');
+    const { data, error } = await supa.from('route_pages')
+      .select('slug, updated_at')
+      .eq('status', 'published');
+    if (error) throw new Error(error.message);
+
+    const urls = (data || []).map((r) => {
+      const lastmod = new Date(r.updated_at || Date.now()).toISOString().slice(0, 10);
+      return `  <url>\n    <loc>https://airpiv.com/flight-route.html?slug=${encodeURIComponent(r.slug)}</loc>\n    <lastmod>${lastmod}</lastmod>\n    <changefreq>weekly</changefreq>\n    <priority>0.7</priority>\n  </url>`;
+    }).join('\n');
+
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>`;
+    res.set('Content-Type', 'application/xml');
+    res.set('Cache-Control', 'public, max-age=3600'); // ساعة كاش — كافية، المسارات لا تتغير كل دقيقة
+    res.send(xml);
+  } catch (err) {
+    res.status(500).send('');
+  }
+});
+
+// ─── GET /route-pages/:slug/related ────────────────────────────
+// [RELATED-ROUTES] Other published routes sharing the same origin OR
+// destination city — powers the "Ähnliche Flugrouten" internal-linking
+// section. Excludes the route itself; capped at 6 (per spec: 3-6 related
+// routes shown).
+app.get('/route-pages/:slug/related', async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { data: current, error: e1 } = await supa.from('route_pages').select('id, origin_city, destination_city').eq('slug', req.params.slug).maybeSingle();
+    if (e1) throw new Error(e1.message);
+    if (!current) return res.status(404).json({ ok: false, error: 'Route nicht gefunden' });
+
+    const { data, error: e2 } = await supa.from('route_pages')
+      .select('slug, origin_city, destination_city, origin_iata, destination_iata')
+      .eq('status', 'published')
+      .neq('id', current.id)
+      .or(`origin_city.eq.${current.origin_city},destination_city.eq.${current.destination_city}`)
+      .limit(6);
+    if (e2) throw new Error(e2.message);
+    res.json({ ok: true, related: data || [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/route-pages', async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
@@ -3402,6 +3556,29 @@ app.get('/admin/cancellations', requireAdmin, async (req, res) => {
 app.post('/admin/cancellations/mark-read', requireAdmin, async (req, res) => {
   try {
     await markCancellationsRead();
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── GET /admin/booking-failures ─────────────────────────────
+// [BOOKING-FAILURE-NOTIFY] Same pattern as /admin/cancellations — a
+// booking that failed after payment (offer expired, price drift, any
+// unexpected error) needs to be just as visible to the admin, since it's
+// the single worst outcome the system can produce (a charged customer
+// with no ticket) even when auto-refunded.
+app.get('/admin/booking-failures', requireAdmin, async (req, res) => {
+  try {
+    const events = await getAdminConfig('booking_failure_events', []);
+    res.json({ ok: true, events, unreadCount: events.filter((e) => !e.read).length });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+app.post('/admin/booking-failures/mark-read', requireAdmin, async (req, res) => {
+  try {
+    await markBookingFailuresRead();
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
