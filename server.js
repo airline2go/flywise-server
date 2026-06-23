@@ -412,6 +412,26 @@ function computeTieredMargin(price, tiers) {
   return Math.round((price * (Number(last.pct) || 0) / 100 + (Number(last.fixed) || 0)) * 100) / 100;
 }
 
+// ─── [ROUTE-PAGES] Distance + haul classification ──────────────
+// Standard great-circle (Haversine) distance between two points,
+// returned in kilometers. Used to compute a real, verifiable distance
+// for SEO route pages — never a fabricated/guessed number.
+function haversineDistanceKm(lat1, lon1, lat2, lon2) {
+  const R = 6371; // Earth's radius in km
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+}
+// 1500km is a standard aviation-industry rule of thumb for where
+// short-haul (typically narrow-body) operations give way to long-haul —
+// an objective, defensible threshold, not an arbitrary content-writing
+// choice.
+function classifyHaul(distanceKm) {
+  return distanceKm < 1500 ? 'short-haul' : 'long-haul';
+}
+
 async function getTicketProfitTiers() { return getAdminConfig('ticket_profit_tiers', DEFAULT_TICKET_TIERS); }
 async function getAncillaryProfitTiers() { return getAdminConfig('ancillary_profit_tiers', DEFAULT_ANCILLARY_TIERS); }
 
@@ -2713,15 +2733,25 @@ app.get('/search/airports', rateLimit('airports', 60, 60000), async (req, res) =
     const push = (o) => { if (o.code && !seen.has(o.code)) { seen.add(o.code); out.push(o); } };
     (result.data || []).forEach((p) => {
       if (p.type === 'city') {
+        // [ROUTE-PAGES] Cities deliberately get no lat/lng — a city can
+        // span multiple airports at different points, so there's no
+        // single coordinate that accurately represents it. Only
+        // individual airports (below) carry coordinates, which is what
+        // route-distance calculations actually need anyway (search is by
+        // airport code, never by city code).
         push({ type: 'city', code: p.iata_code, name: p.name, city: p.name, country: p.iata_country_code });
         (p.airports || []).forEach((ap) => push({
           type: 'airport', code: ap.iata_code, name: ap.name,
           city: ap.city_name || p.name, country: ap.iata_country_code || p.iata_country_code,
+          lat: ap.latitude != null ? Number(ap.latitude) : null,
+          lng: ap.longitude != null ? Number(ap.longitude) : null,
         }));
       } else {
         push({
           type: 'airport', code: p.iata_code, name: p.name,
           city: p.city_name || (p.city && p.city.name) || p.name, country: p.iata_country_code,
+          lat: p.latitude != null ? Number(p.latitude) : null,
+          lng: p.longitude != null ? Number(p.longitude) : null,
         });
       }
     });
@@ -3224,7 +3254,7 @@ app.get('/admin/route-pages', requireAdmin, async (req, res) => {
 app.post('/admin/route-pages', requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status } = req.body;
+    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status, origin_lat, origin_lng, destination_lat, destination_lng } = req.body;
     if (!origin_iata || !destination_iata || !origin_city || !destination_city) {
       return res.status(400).json({ ok: false, error: 'IATA-Codes und Stadtnamen sind erforderlich' });
     }
@@ -3240,11 +3270,27 @@ app.post('/admin/route-pages', requireAdmin, async (req, res) => {
       slug = baseSlug + '-' + attempt;
     }
 
+    // [ROUTE-PAGES-DISTANCE] Computed once here, server-side, from
+    // coordinates the airport autocomplete supplied — never user-entered,
+    // never re-guessed later. Left null if coordinates are missing for any
+    // reason (rare — only some unusual/private airports lack them in
+    // Duffel's data) rather than blocking route creation entirely.
+    let distance_km = null, haul_type = null;
+    if (origin_lat != null && origin_lng != null && destination_lat != null && destination_lng != null) {
+      distance_km = haversineDistanceKm(Number(origin_lat), Number(origin_lng), Number(destination_lat), Number(destination_lng));
+      haul_type = classifyHaul(distance_km);
+    }
+
     const { data, error } = await supa.from('route_pages').insert({
       slug,
       origin_iata: origin_iata.toUpperCase(),
       destination_iata: destination_iata.toUpperCase(),
       origin_city, destination_city,
+      origin_lat: origin_lat != null ? Number(origin_lat) : null,
+      origin_lng: origin_lng != null ? Number(origin_lng) : null,
+      destination_lat: destination_lat != null ? Number(destination_lat) : null,
+      destination_lng: destination_lng != null ? Number(destination_lng) : null,
+      distance_km, haul_type,
       intro_text: intro_text || null,
       status: status === 'published' ? 'published' : 'draft',
     }).select().maybeSingle();
@@ -3259,7 +3305,7 @@ app.post('/admin/route-pages', requireAdmin, async (req, res) => {
 app.put('/admin/route-pages/:id', requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status } = req.body;
+    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status, origin_lat, origin_lng, destination_lat, destination_lng } = req.body;
     const update = { updated_at: new Date().toISOString() };
     if (origin_iata != null) update.origin_iata = origin_iata.toUpperCase();
     if (destination_iata != null) update.destination_iata = destination_iata.toUpperCase();
@@ -3267,6 +3313,18 @@ app.put('/admin/route-pages/:id', requireAdmin, async (req, res) => {
     if (destination_city != null) update.destination_city = destination_city;
     if (intro_text != null) update.intro_text = intro_text;
     if (status != null) update.status = status;
+    // [ROUTE-PAGES-DISTANCE] Recompute whenever fresh coordinates are
+    // supplied (i.e. the admin re-selected an airport while editing) — so
+    // editing a route's endpoints never leaves a stale distance/haul_type
+    // from whatever the original creation computed.
+    if (origin_lat != null && origin_lng != null && destination_lat != null && destination_lng != null) {
+      update.origin_lat = Number(origin_lat);
+      update.origin_lng = Number(origin_lng);
+      update.destination_lat = Number(destination_lat);
+      update.destination_lng = Number(destination_lng);
+      update.distance_km = haversineDistanceKm(Number(origin_lat), Number(origin_lng), Number(destination_lat), Number(destination_lng));
+      update.haul_type = classifyHaul(update.distance_km);
+    }
     // Slug is intentionally NOT editable after creation — same reasoning
     // as blog posts: changing it breaks any already-shared/indexed link.
     const { data, error } = await supa.from('route_pages').update(update).eq('id', req.params.id).select().maybeSingle();
