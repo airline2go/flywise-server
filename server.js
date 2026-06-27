@@ -704,6 +704,20 @@ function log(level, msg, meta) {
   } catch (e) {
     console.log(level, msg);
   }
+  // [ERROR-LOGS] Persist error/fatal/warn entries to the database so they
+  // survive past Render's log retention and are reviewable in the admin
+  // dashboard later — fire-and-forget (never awaited, failure ignored)
+  // so this can never slow down or mask the actual error being logged.
+  if ((level === 'error' || level === 'fatal' || level === 'warn') && supa) {
+    let source = 'server';
+    const haystack = (msg + ' ' + JSON.stringify(meta || {})).toLowerCase();
+    if (haystack.includes('stripe')) source = 'stripe';
+    else if (haystack.includes('duffel')) source = 'duffel';
+    else if (haystack.includes('email') || haystack.includes('brevo')) source = 'email';
+    else if (haystack.includes('booking')) source = 'booking';
+    supa.from('error_logs').insert({ level, message: msg, meta: meta || null, source })
+      .then(({ error }) => { if (error) console.error('[error_logs insert failed]', error.message); });
+  }
 }
 
 // ─── [#12] Environment validation (fail fast on missing critical vars) ────
@@ -3538,6 +3552,38 @@ app.get('/route-pages/:slug', async (req, res) => {
 // count for the sidebar badge. Joins in booking details (route, customer,
 // amount) where the order_id still matches a row, so the dashboard can
 // show something more useful than a bare order ID.
+// ─── GET /admin/error-logs ────────────────────────────────────
+// [ERROR-LOGS] Returns recent error/fatal/warn entries, newest first.
+// Optional ?level= and ?source= filters narrow the list — matches the
+// dashboard's filter dropdowns.
+app.get('/admin/error-logs', requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    let query = supa.from('error_logs').select('*').order('created_at', { ascending: false }).limit(200);
+    if (req.query.level) query = query.eq('level', req.query.level);
+    if (req.query.source) query = query.eq('source', req.query.source);
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, logs: data || [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── DELETE /admin/error-logs ──────────────────────────────────
+// Clears all logged errors — for once an issue has been reviewed/fixed
+// and the admin wants a clean slate rather than scrolling past old ones.
+app.delete('/admin/error-logs', requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { error } = await supa.from('error_logs').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+    if (error) throw new Error(error.message);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/admin/cancellations', requireAdmin, async (req, res) => {
   try {
     const events = await getAdminConfig('cancellation_events', []);
