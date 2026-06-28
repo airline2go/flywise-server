@@ -3420,6 +3420,95 @@ app.get('/blog-posts/:slug', async (req, res) => {
 // ════════════════════════════════════════════════════════════
 
 // ─── GET /admin/route-pages ────────────────────────────────────
+// ─── POST /admin/route-pages/backfill-locations ────────────────
+// [MIGRATION] One-time-use endpoint: routes published before
+// origin_country/destination_country/city_slug existed have those
+// columns null. This fetches each missing airport's real country code
+// via the same Duffel search the admin's airport autocomplete already
+// uses (never guessed), updates the route, and triggers
+// ensureCountryExists()/ensureCityExists() — bringing old routes to
+// exactly the same state as if created today. Idempotent: any route
+// that already has origin_country AND destination_country set is
+// skipped entirely, so running this again is harmless.
+app.post('/admin/route-pages/backfill-locations', requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { data: routes, error } = await supa.from('route_pages').select('*').eq('status', 'published');
+    if (error) throw new Error(error.message);
+
+    const iataCache = new Map(); // avoid looking up the same airport twice in one run
+    async function lookupAirport(code) {
+      if (iataCache.has(code)) return iataCache.get(code);
+      try {
+        const result = await duffel('GET', '/places/suggestions?query=' + encodeURIComponent(code));
+        const match = (result.data || []).find((p) => p.iata_code === code || (p.airports || []).some((a) => a.iata_code === code));
+        const info = match
+          ? { country: match.iata_country_code, city: match.city_name || match.name }
+          : null;
+        iataCache.set(code, info);
+        return info;
+      } catch (e) {
+        iataCache.set(code, null);
+        return null;
+      }
+    }
+
+    let updated = 0, skipped = 0, failed = 0;
+    for (const route of (routes || [])) {
+      if (route.origin_country && route.destination_country && route.origin_city_slug && route.destination_city_slug) {
+        skipped++;
+        continue;
+      }
+      try {
+        const update = {};
+        let originInfo = null, destInfo = null;
+        if (!route.origin_country || !route.origin_city_slug) {
+          originInfo = await lookupAirport(route.origin_iata);
+          if (originInfo) {
+            update.origin_country = originInfo.country;
+            update.origin_city_slug = slugify(originInfo.city || route.origin_city);
+          }
+        }
+        if (!route.destination_country || !route.destination_city_slug) {
+          destInfo = await lookupAirport(route.destination_iata);
+          if (destInfo) {
+            update.destination_country = destInfo.country;
+            update.destination_city_slug = slugify(destInfo.city || route.destination_city);
+          }
+        }
+        if (Object.keys(update).length) {
+          const { error: updErr } = await supa.from('route_pages').update(update).eq('id', route.id);
+          if (updErr) throw new Error(updErr.message);
+          updated++;
+          // [MIGRATION] Same auto-creation calls a fresh route publish
+          // would trigger — backfilled routes end up creating their
+          // country/city pages exactly like a new route does.
+          const finalOriginCountry = update.origin_country || route.origin_country;
+          const finalDestCountry = update.destination_country || route.destination_country;
+          const finalOriginSlug = update.origin_city_slug || route.origin_city_slug;
+          const finalDestSlug = update.destination_city_slug || route.destination_city_slug;
+          if (finalOriginCountry) ensureCountryExists(finalOriginCountry);
+          if (finalDestCountry) ensureCountryExists(finalDestCountry);
+          if (finalOriginSlug) ensureCityExists(finalOriginSlug, route.origin_city, finalOriginCountry, route.origin_iata);
+          if (finalDestSlug) ensureCityExists(finalDestSlug, route.destination_city, finalDestCountry, route.destination_iata);
+        } else {
+          skipped++;
+        }
+        // Small delay between airports — stays well under Duffel's rate
+        // limits even when backfilling many routes in one run.
+        await new Promise((r) => setTimeout(r, 250));
+      } catch (e) {
+        failed++;
+        log('warn', 'route_backfill_failed', { route_id: route.id, error: e.message });
+      }
+    }
+
+    res.json({ ok: true, total: (routes || []).length, updated, skipped, failed });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/admin/route-pages', requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
