@@ -1292,7 +1292,11 @@ app.get('/route-price', rateLimit('route-price', 60, 60000), async (req, res) =>
     const cacheKey = 'route_price_' + from.toUpperCase() + '_' + to.toUpperCase();
     const cached = await getAdminConfig(cacheKey, null);
     if (cached && cached.fetchedAt && (Date.now() - new Date(cached.fetchedAt).getTime()) < 6 * 60 * 60 * 1000) {
-      return res.json({ ok: true, price: cached.price, currency: cached.currency, cached: true });
+      // [DATE-MATCH-FIX] Return the EXACT date this cached price was
+      // computed for — never recomputed as "today + 21" on a cache hit,
+      // which could point a few hours/days later to a different date
+      // than the one that actually produced this price.
+      return res.json({ ok: true, price: cached.price, currency: cached.currency, departure_date: cached.departure_date, cached: true });
     }
 
     // A representative near-future date — NOT today, which would surface
@@ -1312,7 +1316,7 @@ app.get('/route-price', rateLimit('route-price', 60, 60000), async (req, res) =>
 
     const offers = result.data?.offers || [];
     if (!offers.length) {
-      return res.json({ ok: true, price: null, currency: null });
+      return res.json({ ok: true, price: null, currency: null, departure_date: null });
     }
 
     const ticketTiers = await getTicketProfitTiers();
@@ -1324,13 +1328,13 @@ app.get('/route-price', rateLimit('route-price', 60, 60000), async (req, res) =>
       if (cheapest === null || customerPrice < cheapest) cheapest = customerPrice;
     }
 
-    await setAdminConfig(cacheKey, { price: cheapest, currency: offers[0].total_currency || 'EUR', fetchedAt: new Date().toISOString() });
-    res.json({ ok: true, price: cheapest, currency: offers[0].total_currency || 'EUR', cached: false });
+    await setAdminConfig(cacheKey, { price: cheapest, currency: offers[0].total_currency || 'EUR', departure_date, fetchedAt: new Date().toISOString() });
+    res.json({ ok: true, price: cheapest, currency: offers[0].total_currency || 'EUR', departure_date, cached: false });
   } catch (err) {
     // Fail soft — a route page should still render (without a price) if
     // Duffel is briefly unavailable, never show a broken page.
     log('warn', 'route_price_failed', { error: err.message });
-    res.json({ ok: true, price: null, currency: null });
+    res.json({ ok: true, price: null, currency: null, departure_date: null });
   }
 });
 
@@ -2487,7 +2491,19 @@ async function bookFromSession(session_id, session) {
   }
 
   // 7) Send a real booking confirmation email (best-effort, never blocks the response)
-  const recipientEmail = (booking.passengers && booking.passengers[0] && booking.passengers[0].email) || null;
+  // [TICKET-EMAIL-FIX] The ticket/confirmation goes to whatever email the
+  // customer entered on STRIPE'S OWN checkout page (session.customer_
+  // details.email) — not the personal-data email from page 5. This is
+  // the agreed split: the page-5 email determines which ACCOUNT the
+  // booking belongs to (and therefore shows up under "Meine Buchungen"),
+  // while the Stripe-entered email is purely where the actual ticket
+  // gets sent, since the customer may want a different person to
+  // receive it. Falls back to the passenger's own email only if Stripe
+  // genuinely has none on file (rare — some payment methods can skip
+  // email collection) rather than silently sending no email at all.
+  const recipientEmail = (session && session.customer_details && session.customer_details.email)
+    || (booking.passengers && booking.passengers[0] && booking.passengers[0].email)
+    || null;
   if (recipientEmail && bookingRef) {
     // [EMAIL-FIX] Build the same structured summary the in-app confirmation
     // screen uses (flight segments, seats, bags, real ticket/bags/seats/
