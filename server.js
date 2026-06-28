@@ -3490,6 +3490,36 @@ app.get('/blog-posts/:slug', async (req, res) => {
 // exactly the same state as if created today. Idempotent: any route
 // that already has origin_country AND destination_country set is
 // skipped entirely, so running this again is harmless.
+// ─── POST /admin/route-pages/clear-price-cache ──────────────────
+// [DATE-MATCH-FIX] Routes published before departure_date was added to
+// the price cache have stale cached entries missing that field entirely
+// — the price still shows (from the old cache), but departure_date comes
+// back null/undefined, so the "Jetzt Flüge suchen" link's &depart= param
+// never gets added even though the underlying fix is correct. This
+// clears every cached route_price_* entry at once: both the database
+// rows in admin_config AND the in-memory _configCache (getAdminConfig
+// briefly caches reads, so a stale value could still be served for a
+// few minutes even after the database row is gone) — both layers must
+// be cleared for a fresh price+date to actually be fetched on the next
+// page view, rather than waiting up to 6 hours for the old cache to
+// expire naturally.
+app.post('/admin/route-pages/clear-price-cache', requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { data, error } = await supa.from('admin_config').select('key').like('key', 'route_price_%');
+    if (error) throw new Error(error.message);
+    const keys = (data || []).map((r) => r.key);
+    if (keys.length) {
+      const { error: delErr } = await supa.from('admin_config').delete().in('key', keys);
+      if (delErr) throw new Error(delErr.message);
+    }
+    keys.forEach((k) => _configCache.delete(k));
+    res.json({ ok: true, cleared: keys.length });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.post('/admin/route-pages/backfill-locations', requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
@@ -3587,6 +3617,30 @@ app.post('/admin/route-pages', requireAdmin, async (req, res) => {
     const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status, origin_lat, origin_lng, destination_lat, destination_lng, origin_country, destination_country, custom_title, custom_meta_description, custom_faq } = req.body;
     if (!origin_iata || !destination_iata || !origin_city || !destination_city) {
       return res.status(400).json({ ok: false, error: 'IATA-Codes und Stadtnamen sind erforderlich' });
+    }
+
+    // [DUPLICATE-ROUTE-FIX] Real duplicate check based on the actual
+    // identity of a route — the IATA code pair, not the slug (which
+    // could be created differently depending on how the city name was
+    // typed). Hamburg→London and London→Hamburg are checked separately
+    // since they're legitimately different routes (the duplicate is only
+    // the SAME direction, same pair). Matches regardless of status
+    // (draft or published) — a draft is still a real row occupying that
+    // route slot, not a free pass to create a second one.
+    const dupOriginIata = origin_iata.toUpperCase();
+    const dupDestIata = destination_iata.toUpperCase();
+    const { data: dup } = await supa.from('route_pages')
+      .select('id, slug, status')
+      .eq('origin_iata', dupOriginIata)
+      .eq('destination_iata', dupDestIata)
+      .maybeSingle();
+    if (dup) {
+      return res.status(409).json({
+        ok: false,
+        error: 'هذا المسار موجود فعلاً (' + dupOriginIata + ' → ' + dupDestIata + ') — الحالة: ' + (dup.status === 'published' ? 'منشور' : 'مسودة') + '. عدّله من القائمة بدل إنشاء نسخة جديدة.',
+        duplicate: true,
+        existing_slug: dup.slug,
+      });
     }
 
     // [ROUTE-PAGES] Reuses the exact same slugify() used for blog posts —
