@@ -452,6 +452,79 @@ function classifyHaul(distanceKm) {
   return distanceKm < 1500 ? 'short-haul' : 'long-haul';
 }
 
+// [COUNTRY-PAGES] ISO code -> German display name, covering the
+// countries realistically relevant to a German-market flight platform
+// (Europe + major long-haul destinations). Falls back to the raw ISO
+// code for anything not listed — still usable, just less polished —
+// rather than failing to create the country page at all.
+const COUNTRY_NAMES_DE = {
+  DE: 'Deutschland', AT: 'Österreich', CH: 'Schweiz', GB: 'Vereinigtes Königreich',
+  FR: 'Frankreich', ES: 'Spanien', IT: 'Italien', PT: 'Portugal', NL: 'Niederlande',
+  BE: 'Belgien', LU: 'Luxemburg', PL: 'Polen', CZ: 'Tschechien', SK: 'Slowakei',
+  HU: 'Ungarn', RO: 'Rumänien', BG: 'Bulgarien', GR: 'Griechenland', HR: 'Kroatien',
+  SI: 'Slowenien', DK: 'Dänemark', SE: 'Schweden', NO: 'Norwegen', FI: 'Finnland',
+  IE: 'Irland', IS: 'Island', TR: 'Türkei', RU: 'Russland', UA: 'Ukraine',
+  US: 'USA', CA: 'Kanada', MX: 'Mexiko', BR: 'Brasilien', AR: 'Argentinien',
+  AE: 'Vereinigte Arabische Emirate', SA: 'Saudi-Arabien', QA: 'Katar', KW: 'Kuwait',
+  EG: 'Ägypten', MA: 'Marokko', TN: 'Tunesien', JO: 'Jordanien', LB: 'Libanon',
+  IL: 'Israel', IN: 'Indien', TH: 'Thailand', JP: 'Japan', CN: 'China',
+  KR: 'Südkorea', SG: 'Singapur', MY: 'Malaysia', ID: 'Indonesien', VN: 'Vietnam',
+  AU: 'Australien', NZ: 'Neuseeland', ZA: 'Südafrika',
+};
+
+// [COUNTRY-PAGES] Auto-creates a countries row the first time a route
+// touches that country — never pre-populated for the whole world, only
+// on-demand as real routes get published, avoiding empty/thin country
+// pages entirely. Fire-and-forget: a failure here must never block route
+// creation itself (the route is the important part; the country page is
+// a nice-to-have derived from it).
+async function ensureCountryExists(isoCode) {
+  if (!isoCode || !supa) return;
+  try {
+    const { data: existing } = await supa.from('countries').select('id').eq('code', isoCode).maybeSingle();
+    if (existing) return;
+    const name = COUNTRY_NAMES_DE[isoCode] || isoCode;
+    await supa.from('countries').insert({ code: isoCode, name, status: 'published' });
+    log('info', 'country_auto_created', { code: isoCode, name });
+  } catch (e) {
+    log('warn', 'ensure_country_exists_failed', { code: isoCode, error: e.message });
+  }
+}
+
+// [CITY-PAGES] Auto-creates (or updates) a cities row whenever a
+// published route touches a city — mirrors ensureCountryExists(), with
+// the added complexity that airport_codes GROWS over time: the first
+// route for "London" might only reveal LHR; a later route via LGW must
+// append to the existing array, not overwrite it (and must not add a
+// duplicate if the same airport shows up again). citySlug is computed
+// by the caller via slugify() — the same normalization already used for
+// blog/route slugs — so "Berlin" and "berlin " from two different routes
+// correctly resolve to the same city row instead of silently creating
+// two near-duplicate cities.
+async function ensureCityExists(citySlug, displayName, countryCode, airportCode) {
+  if (!citySlug || !supa) return;
+  try {
+    const { data: existing } = await supa.from('cities').select('id, airport_codes').eq('city_slug', citySlug).maybeSingle();
+    if (existing) {
+      if (airportCode && !(existing.airport_codes || []).includes(airportCode)) {
+        await supa.from('cities').update({ airport_codes: [...(existing.airport_codes || []), airportCode] }).eq('id', existing.id);
+        log('info', 'city_airport_added', { city_slug: citySlug, airport: airportCode });
+      }
+      return;
+    }
+    await supa.from('cities').insert({
+      city_slug: citySlug,
+      name: displayName,
+      country_code: countryCode || null,
+      airport_codes: airportCode ? [airportCode] : [],
+      status: 'published',
+    });
+    log('info', 'city_auto_created', { city_slug: citySlug, name: displayName });
+  } catch (e) {
+    log('warn', 'ensure_city_exists_failed', { city_slug: citySlug, error: e.message });
+  }
+}
+
 async function getTicketProfitTiers() { return getAdminConfig('ticket_profit_tiers', DEFAULT_TICKET_TIERS); }
 async function getAncillaryProfitTiers() { return getAdminConfig('ancillary_profit_tiers', DEFAULT_ANCILLARY_TIERS); }
 
@@ -3362,7 +3435,7 @@ app.get('/admin/route-pages', requireAdmin, async (req, res) => {
 app.post('/admin/route-pages', requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status, origin_lat, origin_lng, destination_lat, destination_lng, custom_title, custom_meta_description, custom_faq } = req.body;
+    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status, origin_lat, origin_lng, destination_lat, destination_lng, origin_country, destination_country, custom_title, custom_meta_description, custom_faq } = req.body;
     if (!origin_iata || !destination_iata || !origin_city || !destination_city) {
       return res.status(400).json({ ok: false, error: 'IATA-Codes und Stadtnamen sind erforderlich' });
     }
@@ -3389,23 +3462,41 @@ app.post('/admin/route-pages', requireAdmin, async (req, res) => {
       haul_type = classifyHaul(distance_km);
     }
 
+    const isPublishing = status === 'published';
+    // [CITY-PAGES] Computed server-side via the same slugify() used for
+    // blog/route slugs — never trusts free-text city name matching.
+    const originCitySlug = slugify(origin_city);
+    const destCitySlug = slugify(destination_city);
     const { data, error } = await supa.from('route_pages').insert({
       slug,
       origin_iata: origin_iata.toUpperCase(),
       destination_iata: destination_iata.toUpperCase(),
       origin_city, destination_city,
+      origin_city_slug: originCitySlug,
+      destination_city_slug: destCitySlug,
       origin_lat: origin_lat != null ? Number(origin_lat) : null,
       origin_lng: origin_lng != null ? Number(origin_lng) : null,
       destination_lat: destination_lat != null ? Number(destination_lat) : null,
       destination_lng: destination_lng != null ? Number(destination_lng) : null,
+      origin_country: origin_country || null,
+      destination_country: destination_country || null,
       distance_km, haul_type,
       intro_text: intro_text || null,
       custom_title: custom_title || null,
       custom_meta_description: custom_meta_description || null,
       custom_faq: Array.isArray(custom_faq) && custom_faq.length ? custom_faq : null,
-      status: status === 'published' ? 'published' : 'draft',
+      status: isPublishing ? 'published' : 'draft',
     }).select().maybeSingle();
     if (error) throw new Error(error.message);
+    // [COUNTRY-PAGES / CITY-PAGES] Only auto-create country/city pages
+    // for PUBLISHED routes — a draft isn't publicly visible yet, so its
+    // countries/cities shouldn't appear on the public site either.
+    if (isPublishing) {
+      if (origin_country) ensureCountryExists(origin_country);
+      if (destination_country) ensureCountryExists(destination_country);
+      ensureCityExists(originCitySlug, origin_city, origin_country, origin_iata.toUpperCase());
+      ensureCityExists(destCitySlug, destination_city, destination_country, destination_iata.toUpperCase());
+    }
     res.json({ ok: true, route: data });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -3416,12 +3507,14 @@ app.post('/admin/route-pages', requireAdmin, async (req, res) => {
 app.put('/admin/route-pages/:id', requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status, origin_lat, origin_lng, destination_lat, destination_lng, custom_title, custom_meta_description, custom_faq } = req.body;
+    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status, origin_lat, origin_lng, destination_lat, destination_lng, origin_country, destination_country, custom_title, custom_meta_description, custom_faq } = req.body;
     const update = { updated_at: new Date().toISOString() };
     if (origin_iata != null) update.origin_iata = origin_iata.toUpperCase();
     if (destination_iata != null) update.destination_iata = destination_iata.toUpperCase();
-    if (origin_city != null) update.origin_city = origin_city;
-    if (destination_city != null) update.destination_city = destination_city;
+    if (origin_city != null) { update.origin_city = origin_city; update.origin_city_slug = slugify(origin_city); }
+    if (destination_city != null) { update.destination_city = destination_city; update.destination_city_slug = slugify(destination_city); }
+    if (origin_country != null) update.origin_country = origin_country || null;
+    if (destination_country != null) update.destination_country = destination_country || null;
     if (intro_text != null) update.intro_text = intro_text;
     if (custom_title != null) update.custom_title = custom_title || null;
     if (custom_meta_description != null) update.custom_meta_description = custom_meta_description || null;
@@ -3443,6 +3536,16 @@ app.put('/admin/route-pages/:id', requireAdmin, async (req, res) => {
     // as blog posts: changing it breaks any already-shared/indexed link.
     const { data, error } = await supa.from('route_pages').update(update).eq('id', req.params.id).select().maybeSingle();
     if (error) throw new Error(error.message);
+    // [COUNTRY-PAGES / CITY-PAGES] Covers both: editing airports on an
+    // already-published route, and the common "save as draft, publish
+    // later" flow — country/city data saved at creation time is still
+    // on the row, so publishing later still triggers creation correctly.
+    if (status === 'published' && data) {
+      if (data.origin_country) ensureCountryExists(data.origin_country);
+      if (data.destination_country) ensureCountryExists(data.destination_country);
+      if (data.origin_city_slug) ensureCityExists(data.origin_city_slug, data.origin_city, data.origin_country, data.origin_iata);
+      if (data.destination_city_slug) ensureCityExists(data.destination_city_slug, data.destination_city, data.destination_country, data.destination_iata);
+    }
     res.json({ ok: true, route: data });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -3522,11 +3625,123 @@ app.get('/route-pages', async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { data, error } = await supa.from('route_pages')
-      .select('slug,origin_iata,destination_iata,origin_city,destination_city')
+      .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_country,destination_country')
       .eq('status', 'published')
       .order('origin_city', { ascending: true });
     if (error) throw new Error(error.message);
     res.json({ ok: true, routes: data || [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── GET /countries ───────────────────────────────────────────
+// [COUNTRY-PAGES] Public list of published countries — only ones with at
+// least one real route actually exist here (see ensureCountryExists),
+// so this never returns an empty/thin entry.
+app.get('/countries', async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { data, error } = await supa.from('countries').select('code,name').eq('status', 'published').order('name', { ascending: true });
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, countries: data || [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── GET /countries/:code ──────────────────────────────────────
+// [COUNTRY-PAGES] Single country plus every published route that
+// touches it (as origin OR destination) — what the public country.html
+// page actually renders. 404s if the country doesn't exist or has no
+// published routes left (e.g. the last route touching it was
+// unpublished/deleted) — never serves an empty shell page.
+app.get('/countries/:code', async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const code = req.params.code.toUpperCase();
+    const { data: country, error: countryErr } = await supa.from('countries').select('*').eq('code', code).eq('status', 'published').maybeSingle();
+    if (countryErr) throw new Error(countryErr.message);
+    if (!country) return res.status(404).json({ ok: false, error: 'Land nicht gefunden' });
+
+    const { data: routes, error: routesErr } = await supa.from('route_pages')
+      .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_country,destination_country')
+      .eq('status', 'published')
+      .or(`origin_country.eq.${code},destination_country.eq.${code}`)
+      .order('origin_city', { ascending: true });
+    if (routesErr) throw new Error(routesErr.message);
+    if (!routes || !routes.length) return res.status(404).json({ ok: false, error: 'Keine Routen für dieses Land gefunden' });
+
+    res.json({ ok: true, country, routes });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── GET /cities/:slug ──────────────────────────────────────────
+// [CITY-PAGES] Single city plus every published route that touches it
+// (as origin OR destination) — what the public city.html page renders.
+// Mirrors /countries/:code exactly. 404s if the city doesn't exist or
+// has no published routes left, never serving an empty shell page.
+app.get('/cities/:slug', async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const citySlug = req.params.slug.toLowerCase();
+    const { data: city, error: cityErr } = await supa.from('cities').select('*').eq('city_slug', citySlug).eq('status', 'published').maybeSingle();
+    if (cityErr) throw new Error(cityErr.message);
+    if (!city) return res.status(404).json({ ok: false, error: 'Stadt nicht gefunden' });
+
+    const { data: routes, error: routesErr } = await supa.from('route_pages')
+      .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_city_slug,destination_city_slug,origin_country,destination_country')
+      .eq('status', 'published')
+      .or(`origin_city_slug.eq.${citySlug},destination_city_slug.eq.${citySlug}`)
+      .order('origin_city', { ascending: true });
+    if (routesErr) throw new Error(routesErr.message);
+    if (!routes || !routes.length) return res.status(404).json({ ok: false, error: 'Keine Routen für diese Stadt gefunden' });
+
+    res.json({ ok: true, city, routes });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── GET /airports/:code ─────────────────────────────────────────
+// [AIRPORT-PAGES] The 4th and final level of the Home → Country → City
+// → Airport hierarchy. Unlike countries/cities, airports need no
+// separate table or auto-creation step — every route_pages row already
+// carries the airport's IATA code, city, and coordinates directly, so
+// an airport page simply exists whenever at least one published route
+// uses that code. 404s if no published route touches this airport at
+// all, same no-thin-content guarantee as every other level.
+app.get('/airports/:code', async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const code = req.params.code.toUpperCase();
+    const { data: routes, error: routesErr } = await supa.from('route_pages')
+      .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_city_slug,destination_city_slug,origin_country,destination_country,origin_lat,origin_lng,destination_lat,destination_lng')
+      .eq('status', 'published')
+      .or(`origin_iata.eq.${code},destination_iata.eq.${code}`)
+      .order('origin_city', { ascending: true });
+    if (routesErr) throw new Error(routesErr.message);
+    if (!routes || !routes.length) return res.status(404).json({ ok: false, error: 'Flughafen nicht gefunden' });
+
+    // [AIRPORT-PAGES] Derive the airport's display city/country/slug/
+    // coordinates from whichever route mentions it first — there's no
+    // separate airports table holding this independently, so this is
+    // the only source of truth available.
+    const firstAsOrigin = routes.find((r) => r.origin_iata === code);
+    const firstAsDest = routes.find((r) => r.destination_iata === code);
+    const ref = firstAsOrigin || firstAsDest;
+    const airport = {
+      code,
+      city: firstAsOrigin ? ref.origin_city : ref.destination_city,
+      city_slug: firstAsOrigin ? ref.origin_city_slug : ref.destination_city_slug,
+      country: firstAsOrigin ? ref.origin_country : ref.destination_country,
+      lat: firstAsOrigin ? ref.origin_lat : ref.destination_lat,
+      lng: firstAsOrigin ? ref.origin_lng : ref.destination_lng,
+    };
+
+    res.json({ ok: true, airport, routes });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
