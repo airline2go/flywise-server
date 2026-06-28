@@ -163,6 +163,32 @@ function buildOrderSummaryForEmail(order, money) {
   const netTotal = parseFloat(order.total_amount || 0);
   const ticketPrice = netTotal - netAncillaryTotal + (money.ticketMargin || 0);
 
+  // [MARGIN-DISPLAY-FIX] Same fix as orderToBookingData() in index.html —
+  // purchasedBags/allSeats above carry Duffel's raw net service price
+  // (e.g. a bag's real cost of 20€), and the email template below
+  // displays b.amount/s.netPrice directly, so the email showed that raw
+  // price for an individual bag/seat while the summary total a few lines
+  // down already showed the margin-included total (28€) for the exact
+  // same purchase. Distributes the category-level margin to each
+  // INDIVIDUAL item proportionally by its own net cost share — not an
+  // equal split — and mutates .amount/.netPrice in place so the email
+  // template (which reads these same arrays further down) automatically
+  // shows the corrected price with no template change needed.
+  const bagsMarginTotal = bagsPrice - netBagsTotal;
+  if (netBagsTotal > 0 && bagsMarginTotal !== 0) {
+    purchasedBags.forEach((bag) => {
+      bag.amount = Math.round((bag.amount + bagsMarginTotal * (bag.amount / netBagsTotal)) * 100) / 100;
+    });
+  }
+  const seatsMarginTotal = seatsPrice - netSeatsTotal;
+  if (netSeatsTotal > 0 && seatsMarginTotal !== 0) {
+    allSeats.forEach((seat) => {
+      if (seat.netPrice != null) {
+        seat.netPrice = Math.round((seat.netPrice + seatsMarginTotal * (seat.netPrice / netSeatsTotal)) * 100) / 100;
+      }
+    });
+  }
+
   return {
     legs, allSeats, purchasedBags,
     ticketPrice: Math.round(ticketPrice * 100) / 100,
@@ -223,8 +249,14 @@ async function sendBookingConfirmationEmail(to, data) {
     <table width="100%" cellpadding="0" cellspacing="0">${segs.map(segRow).join('')}</table>`;
   }
 
+  // [CONTACT-EMAIL-DISPLAY] Same shared booking-contact email shown under
+  // each passenger's name, matching the confirmation screen/"Meine
+  // Buchungen" treatment exactly.
   const paxRows = (data.passengers || [])
-    .map((p) => `<tr><td style="padding:5px 0;color:#46586c;font-size:13px">${(p.given_name || '')} ${(p.family_name || '')}</td></tr>`)
+    .map((p) => `<tr><td style="padding:5px 0;color:#46586c;font-size:13px">
+      ${(p.given_name || '')} ${(p.family_name || '')}
+      ${data.contactEmail ? `<div style="font-size:12px;color:#8fa4b4;margin-top:1px">✉ ${data.contactEmail}</div>` : ''}
+    </td></tr>`)
     .join('');
 
   let flightHtml = '';
@@ -1840,6 +1872,12 @@ app.get('/booking-confirmation', async (req, res) => {
         loyaltyDiscount: Number(bookingRow.loyalty_discount) || 0,
         customerPaid: Number(bookingRow.customer_paid) || 0,
         createdAt: bookingRow.created_at,
+        // [CONTACT-EMAIL-DISPLAY] Already selected from the database
+        // (select('*') above) but never forwarded here — this is the
+        // authoritative page-5 contact email (the same field that
+        // determines account linking), more reliable than reading it
+        // back from Duffel's order.passengers[0].email.
+        customerEmail: bookingRow.customer_email || null,
       } : null,
     });
   } catch (err) {
@@ -2532,6 +2570,12 @@ async function bookFromSession(session_id, session) {
       orderId,
       route: booking.route_label || '',
       passengers: booking.passengers || [],
+      // [CONTACT-EMAIL-DISPLAY] The page-5 contact email — distinct from
+      // recipientEmail above (which is Stripe's checkout email, where the
+      // email actually gets sent) — shown under each passenger's name in
+      // the email body, same as the confirmation screen/"Meine
+      // Buchungen".
+      contactEmail: (booking.passengers && booking.passengers[0] && booking.passengers[0].email) || null,
       totalAmount: result.data?.total_amount,
       currency: result.data?.total_currency,
       orderSummary,
