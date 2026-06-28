@@ -1085,6 +1085,97 @@ app.use((req, res, next) => {
 
 // [#13] Input sanitization — strip control chars / null bytes and cap string
 // length recursively on the JSON body. Defends against injection & abuse.
+// ════════════════════════════════════════════════════════════
+// [SCHEMA-VALIDATION] Lightweight, dependency-free schema validator —
+// same philosophy as Zod/Joi (declare the expected shape, validate
+// automatically) but with zero npm dependencies, since this environment
+// has no terminal access to install packages or rebuild the deployment.
+// Centralizes what used to be scattered ad-hoc checks (e.g.
+// "if (!passengers?.length)") into one consistent, reusable validator
+// with clear German error messages for every sensitive endpoint.
+//
+// Usage: const err = validate(req.body, { offer_id: 'string', passengers: { type: 'array', min: 1, of: PASSENGER_SCHEMA } });
+// Returns null if valid, or a German error string describing the first
+// problem found (checked in declaration order, so the error is always
+// about the first thing actually wrong — not an arbitrary one from deep
+// within a nested structure).
+// ════════════════════════════════════════════════════════════
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function validateField(value, rule, fieldName) {
+  // A bare string like 'string'/'number' is shorthand for { type: 'string', required: true }
+  if (typeof rule === 'string') rule = { type: rule, required: true };
+
+  if (value === undefined || value === null || value === '') {
+    if (rule.required) return `${fieldName} ist erforderlich`;
+    return null; // optional and absent — nothing more to check
+  }
+
+  switch (rule.type) {
+    case 'string':
+      if (typeof value !== 'string') return `${fieldName} muss ein Text sein`;
+      if (rule.min != null && value.length < rule.min) return `${fieldName} ist zu kurz`;
+      if (rule.max != null && value.length > rule.max) return `${fieldName} ist zu lang`;
+      if (rule.pattern && !rule.pattern.test(value)) return `${fieldName} hat ein ungültiges Format`;
+      break;
+    case 'email':
+      if (typeof value !== 'string' || !EMAIL_RE.test(value)) return `${fieldName} ist keine gültige E-Mail-Adresse`;
+      break;
+    case 'date':
+      if (typeof value !== 'string' || !DATE_RE.test(value)) return `${fieldName} muss das Format JJJJ-MM-TT haben`;
+      break;
+    case 'number':
+      if (typeof value !== 'number' || isNaN(value)) return `${fieldName} muss eine Zahl sein`;
+      if (rule.min != null && value < rule.min) return `${fieldName} ist zu klein`;
+      if (rule.max != null && value > rule.max) return `${fieldName} ist zu groß`;
+      break;
+    case 'array':
+      if (!Array.isArray(value)) return `${fieldName} muss eine Liste sein`;
+      if (rule.min != null && value.length < rule.min) return `${fieldName}: mindestens ${rule.min} Einträge erforderlich`;
+      if (rule.max != null && value.length > rule.max) return `${fieldName}: höchstens ${rule.max} Einträge erlaubt`;
+      if (rule.of) {
+        for (let i = 0; i < value.length; i++) {
+          const itemErr = validate(value[i], rule.of, `${fieldName}[${i}]`);
+          if (itemErr) return itemErr;
+        }
+      }
+      break;
+    case 'object':
+      if (typeof value !== 'object' || Array.isArray(value)) return `${fieldName} muss ein Objekt sein`;
+      break;
+  }
+  return null;
+}
+
+// Validates `data` against `schema` (a plain object mapping field name ->
+// rule). `prefix` is used internally for array-item error messages
+// (e.g. "passengers[0].given_name") — never pass it manually.
+function validate(data, schema, prefix) {
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) {
+    return (prefix || 'Daten') + ' müssen ein Objekt sein';
+  }
+  for (const field in schema) {
+    if (!Object.prototype.hasOwnProperty.call(schema, field)) continue;
+    const label = prefix ? `${prefix}.${field}` : field;
+    const err = validateField(data[field], schema[field], label);
+    if (err) return err;
+  }
+  return null;
+}
+
+// [SCHEMA-VALIDATION] Reusable passenger schema — the same shape Duffel
+// itself expects (given_name/family_name/born_on/email), used by every
+// endpoint that accepts passenger data so a malformed passenger (missing
+// name, garbage date, invalid email) is rejected with a clear message
+// before ever reaching Duffel's own API.
+const PASSENGER_SCHEMA = {
+  given_name: { type: 'string', required: true, min: 1, max: 100 },
+  family_name: { type: 'string', required: true, min: 1, max: 100 },
+  born_on: { type: 'date', required: true },
+  email: { type: 'email', required: false }, // not every passenger entry carries one (e.g. additional travelers reusing the contact email)
+};
+
 function sanitizeValue(v, depth) {
   if (depth > 6) return v;
   if (typeof v === 'string') {
@@ -1328,7 +1419,9 @@ app.get('/route-price', rateLimit('route-price', 60, 60000), async (req, res) =>
       // computed for — never recomputed as "today + 21" on a cache hit,
       // which could point a few hours/days later to a different date
       // than the one that actually produced this price.
-      return res.json({ ok: true, price: cached.price, currency: cached.currency, departure_date: cached.departure_date, cached: true });
+      // [ROUTE-INSIGHTS] insights defaults to null for entries cached
+      // before this field existed — safe fallback, never a crash.
+      return res.json({ ok: true, price: cached.price, currency: cached.currency, departure_date: cached.departure_date, insights: cached.insights || null, cached: true });
     }
 
     // A representative near-future date — NOT today, which would surface
@@ -1348,7 +1441,7 @@ app.get('/route-price', rateLimit('route-price', 60, 60000), async (req, res) =>
 
     const offers = result.data?.offers || [];
     if (!offers.length) {
-      return res.json({ ok: true, price: null, currency: null, departure_date: null });
+      return res.json({ ok: true, price: null, currency: null, departure_date: null, insights: null });
     }
 
     const ticketTiers = await getTicketProfitTiers();
@@ -1360,8 +1453,40 @@ app.get('/route-price', rateLimit('route-price', 60, 60000), async (req, res) =>
       if (cheapest === null || customerPrice < cheapest) cheapest = customerPrice;
     }
 
-    await setAdminConfig(cacheKey, { price: cheapest, currency: offers[0].total_currency || 'EUR', departure_date, fetchedAt: new Date().toISOString() });
-    res.json({ ok: true, price: cheapest, currency: offers[0].total_currency || 'EUR', departure_date, cached: false });
+    // [ROUTE-INSIGHTS] Real flight facts pulled from the SAME Duffel
+    // offers already fetched above for pricing — duration, stop count,
+    // and actual operating airlines for this specific route. Previously
+    // every field except total_amount was discarded. These are the
+    // figures the route page's new "Route Insights" section displays —
+    // every one computed from real data for this exact origin/
+    // destination pair, never invented or generic boilerplate.
+    function isoMinutesToHours(iso) {
+      const m = String(iso || '').match(/PT(?:(\d+)H)?(?:(\d+)M)?/);
+      if (!m) return null;
+      return (parseInt(m[1] || 0, 10) * 60) + parseInt(m[2] || 0, 10);
+    }
+    const durations = [];
+    const stopCounts = [];
+    const airlines = new Set();
+    for (const o of offers) {
+      const slice = (o.slices || [])[0];
+      if (!slice) continue;
+      const durMin = isoMinutesToHours(slice.duration);
+      if (durMin != null) durations.push(durMin);
+      const segs = slice.segments || [];
+      stopCounts.push(Math.max(0, segs.length - 1));
+      segs.forEach((s) => { if (s.marketing_carrier?.name) airlines.add(s.marketing_carrier.name); });
+    }
+    const insights = durations.length ? {
+      avgDurationMin: Math.round(durations.reduce((a, b) => a + b, 0) / durations.length),
+      minDurationMin: Math.min(...durations),
+      directAvailable: stopCounts.some((s) => s === 0),
+      allDirect: stopCounts.every((s) => s === 0),
+      airlines: Array.from(airlines).slice(0, 8), // cap — purely defensive, real routes rarely exceed this
+    } : null;
+
+    await setAdminConfig(cacheKey, { price: cheapest, currency: offers[0].total_currency || 'EUR', departure_date, insights, fetchedAt: new Date().toISOString() });
+    res.json({ ok: true, price: cheapest, currency: offers[0].total_currency || 'EUR', departure_date, insights, cached: false });
   } catch (err) {
     // Fail soft — a route page should still render (without a price) if
     // Duffel is briefly unavailable, never show a broken page.
@@ -1614,8 +1739,18 @@ app.post('/create-checkout-session', rateLimit('pay', 15, 60000), attachUserIfPr
       route_label, success_url, cancel_url,
     } = req.body;
 
-    if (!offer_id) return res.status(400).json({ ok: false, error: 'offer_id مطلوب' });
-    if (!passengers?.length) return res.status(400).json({ ok: false, error: 'بيانات المسافرين مطلوبة' });
+    // [SCHEMA-VALIDATION] Full structural check — catches a malformed
+    // passenger (missing name, garbage date, invalid email format) before
+    // it ever reaches Duffel's own API or computeAuthoritativePricing().
+    // This is the highest-stakes endpoint in the system (it's what
+    // actually moves money via Stripe), so it gets the most thorough
+    // schema of any endpoint.
+    const validationErr = validate(req.body, {
+      offer_id: { type: 'string', required: true, min: 3, max: 200 },
+      passengers: { type: 'array', required: true, min: 1, max: 9, of: PASSENGER_SCHEMA },
+      currency: { type: 'string', required: false, min: 3, max: 3 },
+    });
+    if (validationErr) return res.status(400).json({ ok: false, error: validationErr });
 
     let pricing;
     try {
@@ -2757,6 +2892,14 @@ app.post('/confirm-add-services', rateLimit('pay', 10, 60000), async (req, res) 
     if (!stripe) return res.status(500).json({ ok: false, error: 'Stripe ist nicht konfiguriert' });
     const { session_id } = req.body;
     if (!session_id) return res.status(400).json({ ok: false, error: 'session_id مطلوب' });
+    // [SCHEMA-VALIDATION] Lightweight format check — Stripe checkout
+    // session IDs always start with "cs_". This endpoint's real security
+    // already comes from payload being read from getPendingBooking()
+    // below (never trusted from the request body itself), so this is
+    // just an early reject for obviously malformed input.
+    if (typeof session_id !== 'string' || !session_id.startsWith('cs_')) {
+      return res.status(400).json({ ok: false, error: 'session_id hat ein ungültiges Format' });
+    }
 
     const session = await stripe.checkout.sessions.retrieve(session_id);
     if (!session || session.payment_status !== 'paid') {
@@ -2807,7 +2950,23 @@ app.post('/confirm-add-services', rateLimit('pay', 10, 60000), async (req, res) 
 });
 
 
+// [SECURITY-FIX] DISABLED — this endpoint was unused by the actual
+// frontend booking flow (confirmed: index.html never calls /order; real
+// bookings go through /create-checkout-session → Stripe → webhook) but
+// remained live and reachable directly. It trusted total_amount straight
+// from the request body and charged Duffel that exact figure — unlike
+// /create-checkout-session, which always recomputes the real price
+// server-side via computeAuthoritativePricing() and never trusts a
+// client-supplied amount. A bad actor could have called this directly
+// with an artificially low total_amount to book a real ticket for far
+// less than its actual cost, bypassing Stripe and this system's pricing
+// logic entirely. Disabled outright rather than patched, since it serves
+// no purpose the real booking flow doesn't already cover correctly.
 app.post('/order', rateLimit('order', 15, 60000), async (req, res) => {
+  return res.status(410).json({ ok: false, error: 'Dieser Endpunkt ist nicht mehr verfügbar. Bitte verwende den regulären Buchungsablauf.' });
+});
+
+async function legacyOrderEndpoint_UNUSED(req, res) {
   try {
     const { offer_id, passengers, services = [], total_amount, currency = 'EUR' } = req.body;
 
@@ -2836,7 +2995,7 @@ app.post('/order', rateLimit('order', 15, 60000), async (req, res) => {
   } catch (err) {
     res.status(err.status || 500).json({ ok: false, error: err.message, details: err.details });
   }
-});
+}
 
 // ─── GET /order/:id ───────────────────────────────────────
 app.get('/order/:id', async (req, res) => {
