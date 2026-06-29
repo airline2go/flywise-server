@@ -449,6 +449,32 @@ async function markBookingFailuresRead() {
   await setAdminConfig('booking_failure_events', list.map((e) => ({ ...e, read: true })));
 }
 
+// [SYNC-FAILURE-NOTIFY] Deliberately generic event type for "the real
+// operation succeeded externally (Duffel/Stripe), but our own database
+// failed to record it" scenarios — distinct from booking_failure_events
+// (customer charged, no ticket) and cancellation_events (a normal,
+// successful cancellation everyone already knows about). This category
+// means something more subtle and dangerous: everything succeeded for
+// the customer, but our internal records have silently drifted from
+// reality — e.g. a cancellation went through and the customer was
+// refunded, but our bookings table still says "confirmed". Only manual
+// reconciliation catches this, which is exactly why it needs its own
+// loud, distinct notification rather than blending into routine
+// cancellation events.
+async function recordSyncFailureEvent(entry) {
+  try {
+    const list = await getAdminConfig('sync_failure_events', []);
+    const updated = [{ ...entry, at: new Date().toISOString(), read: false, severity: 'critical' }, ...list].slice(0, 50);
+    await setAdminConfig('sync_failure_events', updated);
+  } catch (e) {
+    log('warn', 'sync_failure_event_record_failed', { error: e.message });
+  }
+}
+async function markSyncFailuresRead() {
+  const list = await getAdminConfig('sync_failure_events', []);
+  await setAdminConfig('sync_failure_events', list.map((e) => ({ ...e, read: true })));
+}
+
 // Same tiered-margin math as the admin dashboard's getMarginForPrice() in
 // JS, kept in lockstep deliberately: { from, to(nullable), pct, fixed }[].
 // `to: null` means "no upper bound". Falls back to the last tier if price
@@ -992,6 +1018,81 @@ app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async (r
         tags: { critical: 'booking_failed_after_payment', source: 'webhook', refunded: err.refunded ? 'true' : 'false' },
         extra: { event_type: event.type, duffel_errors: err.details },
       });
+    }
+  }
+});
+
+// ─── POST /webhooks/duffel ──────────────────────────────────
+// [CANCEL-CONFIRM-100PCT-FIX] Independent, server-verified confirmation
+// that a cancellation actually completed — separate from (not solely
+// dependent on) the direct /cancel-confirm API call succeeding. Per
+// Duffel's docs, the X-Duffel-Signature header has the format
+// "t=<timestamp>,v1=<hex-hmac-sha256>", computed over "<timestamp>.<raw
+// body>" using the webhook's signing secret (same general scheme as
+// Stripe/Mux). Must run BEFORE express.json() below — signature
+// verification needs the raw, unparsed body; if json() ran first here
+// the body would already be a parsed object and every signature check
+// would fail.
+app.post('/webhooks/duffel', express.raw({ type: 'application/json' }), async (req, res) => {
+  const secret = process.env.DUFFEL_WEBHOOK_SECRET;
+  if (!secret) {
+    log('error', 'duffel_webhook_not_configured', {});
+    return res.status(500).send('webhook not configured');
+  }
+
+  try {
+    const sigHeader = req.headers['x-duffel-signature'] || '';
+    const parts = Object.fromEntries(sigHeader.split(',').map((p) => p.split('=')));
+    const timestamp = parts.t;
+    const signature = parts.v1;
+    if (!timestamp || !signature) {
+      log('warn', 'duffel_webhook_signature_missing', {});
+      return res.status(400).send('Missing signature');
+    }
+    const expected = require('crypto').createHmac('sha256', secret).update(`${timestamp}.${req.body}`).digest('hex');
+    const sigBuf = Buffer.from(signature, 'hex');
+    const expBuf = Buffer.from(expected, 'hex');
+    if (sigBuf.length !== expBuf.length || !require('crypto').timingSafeEqual(sigBuf, expBuf)) {
+      log('warn', 'duffel_webhook_signature_invalid', {});
+      return res.status(400).send('Invalid signature');
+    }
+  } catch (e) {
+    log('warn', 'duffel_webhook_verify_error', { error: e.message });
+    return res.status(400).send('Signature verification failed');
+  }
+
+  let event;
+  try {
+    event = JSON.parse(req.body.toString('utf8'));
+  } catch (e) {
+    return res.status(400).send('Invalid payload');
+  }
+
+  // Acknowledge immediately — Duffel retries failed deliveries for 72h on
+  // a backoff, so we must not let slow downstream work (our own DB call)
+  // risk a timeout that triggers an unnecessary retry storm.
+  res.json({ received: true });
+
+  try {
+    if (event.type === 'order_cancellation.confirmed') {
+      const cancellation = event.data?.object || {};
+      // [CANCEL-CONFIRM-100PCT-FIX] order_id comes from Duffel's own
+      // confirmed payload — the authoritative source, never trusted from
+      // a request the frontend sent us.
+      const orderId = cancellation.order_id;
+      if (supa && orderId) {
+        const { error } = await supa.from('bookings').update({ status: 'cancelled' }).eq('duffel_order_id', orderId);
+        if (error) {
+          log('error', 'duffel_webhook_cancel_sync_failed', { order_id: orderId, error: error.message });
+        } else {
+          log('info', 'duffel_webhook_cancel_confirmed', { order_id: orderId, refund_amount: cancellation.refund_amount });
+        }
+      }
+    }
+  } catch (err) {
+    log('error', 'duffel_webhook_processing_failed', { error: err.message, event_type: event.type });
+    if (process.env.SENTRY_DSN) {
+      Sentry.captureException(err, { tags: { critical: 'duffel_webhook_failed' }, extra: { event_type: event.type } });
     }
   }
 });
@@ -3069,23 +3170,129 @@ app.post('/cancel-quote', async (req, res) => {
 // Duffel step 2: confirm the pending cancellation (executes refund).
 app.post('/cancel-confirm', async (req, res) => {
   try {
-    const { cancellation_id, order_id } = req.body;
+    const { cancellation_id, order_id: order_id_from_client } = req.body;
     if (!cancellation_id) return res.status(400).json({ ok: false, error: 'cancellation_id مطلوب' });
     const confirmed = await duffel('POST', `/air/order_cancellations/${cancellation_id}/actions/confirm`, {});
 
-    // [ADMIN-CANCEL-SYNC-FIX] Same fix as /cancel above — keep the admin
-    // dashboard's bookings table in sync with a real, confirmed
-    // cancellation. order_id isn't always known to the frontend at this
-    // point in the quote→confirm flow, so this is best-effort: if it's
-    // missing, the booking stays marked confirmed here and relies on
-    // whatever other reconciliation exists, rather than guessing at a
-    // lookup that could match the wrong row.
-    if (supa && order_id) {
-      supa.from('bookings').update({ status: 'cancelled' }).eq('duffel_order_id', order_id)
-        .then(({ error }) => { if (error) log('error', 'admin_cancel_sync_failed', { order_id, error: error.message }); });
+    // [CANCEL-CONFIRM-100PCT-FIX] order_id comes primarily from Duffel's
+    // own confirmed response — the authoritative source — with the
+    // frontend-supplied value kept only as a fallback if Duffel's
+    // response is ever missing it. Combined with the independent
+    // /webhooks/duffel confirmation above, this gives two separate,
+    // Duffel-sourced confirmations of every cancellation rather than
+    // trusting solely what the browser happened to send.
+    const order_id = confirmed.data?.order_id || order_id_from_client;
+    // [STRIPE-REFUND-FIX] This is Duffel's NET refund amount — what
+    // Duffel itself returns to us, NOT what the customer should get back.
+    const duffelRefundAmount = parseFloat(confirmed.data?.refund_amount || 0);
+
+    // [STRIPE-REFUND-FIX] The actual missing piece: until now, nothing
+    // on this path ever called Stripe to refund the customer ANY amount
+    // — the customer would see "Refund: 120€", confirm, have their
+    // booking cancelled, and never receive a cent, since refund_amount
+    // was purely a display value from Duffel with no corresponding
+    // Stripe action behind it. Computes a FAIR, proportional refund: the
+    // same ratio Duffel actually granted (duffelRefundAmount /
+    // duffel_amount) applied to customer_paid (the FULL amount charged,
+    // including our margin) — so a fully-refundable fare returns the
+    // customer's complete payment (margin included, since no service was
+    // delivered), and a partially-refundable fare returns the same
+    // proportion of what they actually paid, not just Duffel's net share.
+    let actualRefundToCustomer = 0;
+    let refundCurrency = confirmed.data?.refund_currency || 'EUR';
+    let stripeRefundIssued = false;
+    let stripeRefundError = null;
+    if (supa && order_id && duffelRefundAmount > 0) {
+      try {
+        const { data: bookingRow } = await supa.from('bookings')
+          .select('duffel_amount,customer_paid,stripe_payment_id,currency')
+          .eq('duffel_order_id', order_id).maybeSingle();
+        if (bookingRow && bookingRow.stripe_payment_id && stripe) {
+          const duffelAmount = Number(bookingRow.duffel_amount) || 0;
+          const customerPaid = Number(bookingRow.customer_paid) || 0;
+          // Ratio of what Duffel actually refunded vs the full net cost —
+          // 1.0 for a fully-refundable fare, less for a partial refund.
+          const refundRatio = duffelAmount > 0 ? Math.min(1, duffelRefundAmount / duffelAmount) : 0;
+          actualRefundToCustomer = Math.round(customerPaid * refundRatio * 100) / 100;
+          refundCurrency = bookingRow.currency || refundCurrency;
+          if (actualRefundToCustomer > 0) {
+            await stripe.refunds.create({
+              payment_intent: bookingRow.stripe_payment_id,
+              amount: Math.round(actualRefundToCustomer * 100), // Stripe expects the smallest currency unit (cents)
+            });
+            stripeRefundIssued = true;
+            log('info', 'cancellation_stripe_refund_issued', { order_id, amount: actualRefundToCustomer, currency: refundCurrency, ratio: refundRatio });
+          }
+        } else if (!bookingRow) {
+          log('warn', 'cancellation_refund_no_booking_row', { order_id });
+        } else if (!bookingRow.stripe_payment_id) {
+          log('warn', 'cancellation_refund_no_payment_id', { order_id });
+        }
+      } catch (refundErr) {
+        // [STRIPE-REFUND-FIX] A failed Stripe refund here is exactly as
+        // serious as the database-sync failure below — the customer was
+        // told they'd be refunded and Duffel's cancellation already
+        // went through, but the money didn't actually move. This MUST
+        // surface as a critical admin alert, never just a log line.
+        stripeRefundError = refundErr.message;
+        log('error', 'cancellation_stripe_refund_failed', { order_id, error: refundErr.message });
+        Sentry.captureException(refundErr, {
+          tags: { critical: 'cancellation_refund_failed', order_id },
+          extra: { order_id, cancellation_id, duffel_refund_amount: duffelRefundAmount },
+        });
+        recordSyncFailureEvent({
+          type: 'cancellation_refund_failed',
+          order_id, cancellation_id,
+          refund_amount: duffelRefundAmount,
+          message: 'Stornierung bestätigt, aber die Stripe-Rückerstattung an den Kunden ist fehlgeschlagen — manuelle Rückerstattung erforderlich!',
+          db_error: refundErr.message,
+        });
+      }
     }
 
-    res.json({ ok: true, cancelled: true, refund_amount: confirmed.data?.refund_amount });
+    // [SYNC-FAILURE-NOTIFY] The cancellation with Duffel has ALREADY
+    // succeeded by this point — that's the part that matters financially
+    // to the customer, and it's never undone or delayed by anything
+    // below. This sync-to-our-database step is genuinely fire-and-forget
+    // (no await on the response path): one immediate retry covers the
+    // common transient-network-blip case; if BOTH attempts fail, this
+    // escalates to a dedicated, loud admin notification + Sentry alert
+    // for manual reconciliation — never silently logged and forgotten,
+    // since a confirmed-but-unsynced cancellation means the admin
+    // dashboard would keep showing a real, refunded cancellation as an
+    // active booking indefinitely.
+    if (supa && order_id) {
+      (async () => {
+        let lastError = null;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          const { error } = await supa.from('bookings').update({ status: 'cancelled' }).eq('duffel_order_id', order_id);
+          if (!error) return; // success — nothing further to do
+          lastError = error;
+          if (attempt === 1) await new Promise((r) => setTimeout(r, 1500));
+        }
+        // Both attempts failed — this is the real, dangerous case.
+        log('error', 'cancel_sync_failed_after_retry', { order_id, cancellation_id, error: lastError.message });
+        Sentry.captureException(new Error('Cancellation confirmed with Duffel but database sync failed after retry'), {
+          tags: { critical: 'cancel_sync_failed', order_id },
+          extra: { order_id, cancellation_id, db_error: lastError.message },
+        });
+        recordSyncFailureEvent({
+          type: 'cancellation_sync_failed',
+          order_id, cancellation_id,
+          message: 'Stornierung bei Duffel erfolgreich bestätigt, aber Status in der Datenbank konnte nicht aktualisiert werden — manuelle Prüfung erforderlich.',
+          db_error: lastError.message,
+        });
+      })();
+    }
+
+    res.json({
+      ok: true,
+      cancelled: true,
+      refund_amount: actualRefundToCustomer || duffelRefundAmount,
+      refund_currency: refundCurrency,
+      stripe_refund_issued: stripeRefundIssued,
+      stripe_refund_error: stripeRefundError,
+    });
   } catch (err) {
     res.status(err.status || 500).json({ ok: false, error: err.message, details: err.details });
   }
@@ -4202,6 +4409,53 @@ app.get('/admin/booking-failures', requireAdmin, async (req, res) => {
 app.post('/admin/booking-failures/mark-read', requireAdmin, async (req, res) => {
   try {
     await markBookingFailuresRead();
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── GET /admin/sync-failures ─────────────────────────────────
+// [SYNC-FAILURE-NOTIFY] Same pattern as /admin/cancellations and
+// /admin/booking-failures — but for the specific, more dangerous case of
+// "the real operation (cancellation, etc.) succeeded with Duffel/Stripe,
+// but our own database silently failed to reflect it." Enriched with the
+// actual booking row so the admin sees the customer's name/email/amount
+// alongside the raw sync-failure details — exactly what manual
+// reconciliation needs.
+app.get('/admin/sync-failures', requireAdmin, async (req, res) => {
+  try {
+    const events = await getAdminConfig('sync_failure_events', []);
+    let bookingsByOrderId = {};
+    if (supa && events.length) {
+      const orderIds = events.map((e) => e.order_id).filter(Boolean);
+      const { data } = await supa.from('bookings').select('duffel_order_id,booking_reference,route_label,customer_email,customer_name,customer_paid,status').in('duffel_order_id', orderIds);
+      (data || []).forEach((b) => { bookingsByOrderId[b.duffel_order_id] = b; });
+    }
+    const enriched = events.map((e) => ({ ...e, booking: bookingsByOrderId[e.order_id] || null }));
+    res.json({ ok: true, events: enriched, unreadCount: events.filter((e) => !e.read).length });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+app.post('/admin/sync-failures/mark-read', requireAdmin, async (req, res) => {
+  try {
+    await markSyncFailuresRead();
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+// ─── POST /admin/sync-failures/:order_id/resolve ───────────────
+// [SYNC-FAILURE-NOTIFY] Manual reconciliation action: once the admin has
+// verified (e.g. by checking the Duffel dashboard directly) that a
+// cancellation genuinely went through, this lets them manually fix the
+// drifted status in one click rather than needing direct database access.
+app.post('/admin/sync-failures/:order_id/resolve', requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { error } = await supa.from('bookings').update({ status: 'cancelled' }).eq('duffel_order_id', req.params.order_id);
+    if (error) throw new Error(error.message);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
