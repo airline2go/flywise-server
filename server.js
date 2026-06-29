@@ -461,6 +461,57 @@ async function markBookingFailuresRead() {
 // reconciliation catches this, which is exactly why it needs its own
 // loud, distinct notification rather than blending into routine
 // cancellation events.
+// [CANCELLATION-EMAIL-FIX] The missing piece: until now, a cancellation
+// only ever showed an in-app toast — no permanent email record for the
+// customer to keep, unlike every other transactional event (booking
+// confirmation, password reset) which all send a real email. Matches the
+// same branded visual identity as those templates. Honestly reflects
+// whatever the actual refund outcome is — never claims money was
+// refunded if the Stripe refund call itself failed (see stripeRefundError
+// parameter), since that would be a false promise on top of an already
+// difficult situation.
+async function sendCancellationEmail(to, data) {
+  const fmtMoney = (n, cur) => `${(Number(n) || 0).toFixed(2)} ${cur || 'EUR'}`;
+  const refundSection = data.stripeRefundError
+    ? `<p style="color:#46586c;font-size:14px;line-height:1.6;margin:0 0 16px">
+         Die Rückerstattung wird gerade bearbeitet. Falls du innerhalb von 5 Werktagen nichts auf deinem Konto siehst,
+         kontaktiere bitte unseren Support — wir kümmern uns sofort darum.
+       </p>`
+    : (data.refundAmount > 0
+      ? `<div style="background:#f0fdfa;border:1px solid #99f2e5;border-radius:10px;padding:14px 16px;margin:0 0 16px">
+           <div style="font-size:12px;color:#0a9384;font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px">Rückerstattung</div>
+           <div style="font-size:20px;font-weight:800;color:#0a1822">${fmtMoney(data.refundAmount, data.refundCurrency)}</div>
+           <div style="font-size:12px;color:#46586c;margin-top:4px">Die Rückerstattung erfolgt auf dein ursprüngliches Zahlungsmittel innerhalb von 5–10 Werktagen.</div>
+         </div>`
+      : `<p style="color:#46586c;font-size:14px;line-height:1.6;margin:0 0 16px">
+           Gemäß den Tarifbedingungen dieser Buchung ist keine Rückerstattung möglich.
+         </p>`);
+
+  const html = `
+  <div style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:0 auto;background:#ffffff">
+    <div style="background:linear-gradient(135deg,#0A1822,#16283a);padding:28px 24px;text-align:center">
+      <div style="font-family:Arial,sans-serif;font-size:1.4rem;font-weight:800;color:#ffffff">
+        Air<span style="color:#0FB5A0">piv</span>
+      </div>
+    </div>
+    <div style="padding:32px 28px">
+      <h2 style="color:#0A1822;font-size:1.2rem;margin:0 0 16px">✕ Buchung storniert</h2>
+      <p style="color:#46586c;font-size:14px;line-height:1.6;margin:0 0 20px">
+        Deine Buchung <strong>${data.bookingRef || ''}</strong>${data.routeLabel ? ` (${data.routeLabel})` : ''} wurde erfolgreich storniert.
+      </p>
+      ${refundSection}
+      <p style="color:#8fa4b4;font-size:12.5px;line-height:1.6;margin:20px 0 0">
+        Falls du Fragen hast, antworte einfach auf diese E-Mail oder kontaktiere unseren Support.
+      </p>
+    </div>
+    <div style="background:#f6f8fa;padding:18px 24px;text-align:center;border-top:1px solid #e5eaf0">
+      <p style="color:#8fa4b4;font-size:11px;margin:0">© 2026 Airpiv · Alle Rechte vorbehalten</p>
+    </div>
+  </div>`;
+
+  return sendEmail(to, `Stornierung bestätigt — ${data.bookingRef || 'Airpiv'}`, html);
+}
+
 async function recordSyncFailureEvent(entry) {
   try {
     const list = await getAdminConfig('sync_failure_events', []);
@@ -3241,6 +3292,23 @@ app.post('/cancel-confirm', async (req, res) => {
     if (!cancellation_id) return res.status(400).json({ ok: false, error: 'cancellation_id مطلوب' });
     const confirmed = await duffel('POST', `/air/order_cancellations/${cancellation_id}/actions/confirm`, {});
 
+    // [REFUND-DIAGNOSTIC] Logs Duffel's RAW response fields exactly as
+    // received — refund_amount is documented as a nullable STRING (e.g.
+    // "90.80"), not a number, and can be null when Duffel itself can't
+    // get a refund quote from the carrier. This makes the actual root
+    // cause of "no refund happening" verifiable from the logs with
+    // certainty (a stale deployment vs. Duffel genuinely returning
+    // null/0.00 vs. a missing booking row/stripe_payment_id) rather than
+    // guessed.
+    log('info', 'cancellation_confirmed_raw', {
+      cancellation_id,
+      raw_order_id: confirmed.data?.order_id,
+      raw_refund_amount: confirmed.data?.refund_amount,
+      raw_refund_amount_type: typeof confirmed.data?.refund_amount,
+      raw_refund_currency: confirmed.data?.refund_currency,
+      raw_refund_to: confirmed.data?.refund_to,
+    });
+
     // [CANCEL-CONFIRM-100PCT-FIX] order_id comes primarily from Duffel's
     // own confirmed response — the authoritative source — with the
     // frontend-supplied value kept only as a fallback if Duffel's
@@ -3265,19 +3333,66 @@ app.post('/cancel-confirm', async (req, res) => {
     // customer's complete payment (margin included, since no service was
     // delivered), and a partially-refundable fare returns the same
     // proportion of what they actually paid, not just Duffel's net share.
+    // [REFUND-DIAGNOSTIC] Always logs the parsed refund amount — confirms
+    // with certainty whether Duffel itself genuinely returned 0/null (a
+    // real non-refundable fare, the correct and expected outcome for
+    // many basic-economy tickets) versus some other unexpected value,
+    // BEFORE any of the conditional refund logic below even runs.
+    log('info', 'cancellation_duffel_refund_amount_parsed', {
+      order_id, cancellation_id, duffelRefundAmount,
+      is_genuinely_zero_or_unrefundable: duffelRefundAmount <= 0,
+    });
+
     let actualRefundToCustomer = 0;
     let refundCurrency = confirmed.data?.refund_currency || 'EUR';
     let stripeRefundIssued = false;
     let stripeRefundError = null;
     let refundRatioForLoyalty = 0;
     let bookingRowForLoyalty = null;
-    if (supa && order_id && duffelRefundAmount > 0) {
+    // [CANCELLATION-EMAIL-FIX] Lookup now happens for EVERY confirmed
+    // cancellation, not just refundable ones — a non-refundable fare is a
+    // common, normal case, and the customer still needs their
+    // confirmation email and the loyalty/sync bookkeeping below still
+    // needs this row (even if refundRatioForLoyalty ends up 0).
+    let bookingRowForEmail = null;
+    if (supa && order_id) {
       try {
         const { data: bookingRow } = await supa.from('bookings')
-          .select('duffel_amount,customer_paid,stripe_payment_id,currency,user_id,loyalty_discount,loyalty_points_earned')
+          .select('duffel_amount,customer_paid,stripe_payment_id,currency,user_id,loyalty_discount,loyalty_points_earned,customer_email,booking_reference,route_label')
           .eq('duffel_order_id', order_id).maybeSingle();
         bookingRowForLoyalty = bookingRow;
-        if (bookingRow && bookingRow.stripe_payment_id && stripe) {
+        bookingRowForEmail = bookingRow;
+      } catch (lookupErr) {
+        log('warn', 'cancellation_booking_lookup_failed', { order_id, error: lookupErr.message });
+      }
+    }
+    // [STRIPE-REFUND-FIX] The actual missing piece: until now, nothing
+    // on this path ever called Stripe to refund the customer ANY amount
+    // — the customer would see "Refund: 120€", confirm, have their
+    // booking cancelled, and never receive a cent, since refund_amount
+    // was purely a display value from Duffel with no corresponding
+    // Stripe action behind it. Computes a FAIR, proportional refund: the
+    // same ratio Duffel actually granted (duffelRefundAmount /
+    // duffel_amount) applied to customer_paid (the FULL amount charged,
+    // including our margin) — so a fully-refundable fare returns the
+    // customer's complete payment (margin included, since no service was
+    // delivered), and a partially-refundable fare returns the same
+    // proportion of what they actually paid, not just Duffel's net share.
+    if (bookingRowForLoyalty && duffelRefundAmount > 0) {
+      try {
+        const bookingRow = bookingRowForLoyalty;
+        // [REFUND-DIAGNOSTIC] Logs the exact booking-row values feeding
+        // into the ratio computation — confirms with certainty whether
+        // duffel_amount/stripe_payment_id are actually present and
+        // correct on this specific booking row, rather than guessing.
+        log('info', 'cancellation_refund_inputs', {
+          order_id,
+          duffel_amount_raw: bookingRow.duffel_amount,
+          customer_paid_raw: bookingRow.customer_paid,
+          has_stripe_payment_id: !!bookingRow.stripe_payment_id,
+          duffel_refund_amount: duffelRefundAmount,
+        });
+        if (bookingRow.stripe_payment_id && stripe) {
           const duffelAmount = Number(bookingRow.duffel_amount) || 0;
           const customerPaid = Number(bookingRow.customer_paid) || 0;
           // Ratio of what Duffel actually refunded vs the full net cost —
@@ -3286,6 +3401,7 @@ app.post('/cancel-confirm', async (req, res) => {
           refundRatioForLoyalty = refundRatio;
           actualRefundToCustomer = Math.round(customerPaid * refundRatio * 100) / 100;
           refundCurrency = bookingRow.currency || refundCurrency;
+          log('info', 'cancellation_refund_computed', { order_id, duffelAmount, customerPaid, refundRatio, actualRefundToCustomer });
           if (actualRefundToCustomer > 0) {
             await stripe.refunds.create({
               payment_intent: bookingRow.stripe_payment_id,
@@ -3293,9 +3409,9 @@ app.post('/cancel-confirm', async (req, res) => {
             });
             stripeRefundIssued = true;
             log('info', 'cancellation_stripe_refund_issued', { order_id, amount: actualRefundToCustomer, currency: refundCurrency, ratio: refundRatio });
+          } else {
+            log('warn', 'cancellation_refund_amount_zero_after_ratio', { order_id, duffelAmount, customerPaid, refundRatio });
           }
-        } else if (!bookingRow) {
-          log('warn', 'cancellation_refund_no_booking_row', { order_id });
         } else if (!bookingRow.stripe_payment_id) {
           log('warn', 'cancellation_refund_no_payment_id', { order_id });
         }
@@ -3381,6 +3497,23 @@ app.post('/cancel-confirm', async (req, res) => {
           db_error: lastError.message,
         });
       })();
+    }
+
+    // [CANCELLATION-EMAIL-FIX] Fire-and-forget, matching every other email
+    // send in this codebase — never delays the cancellation response to
+    // the customer. Honestly reflects the actual refund outcome: a real
+    // refund amount if Stripe succeeded, a "no refund per fare
+    // conditions" message if duffelRefundAmount was 0 to begin with, or
+    // a "still being processed" message if the Stripe refund call itself
+    // failed — never claiming money was refunded when it wasn't.
+    if (bookingRowForEmail && bookingRowForEmail.customer_email) {
+      sendCancellationEmail(bookingRowForEmail.customer_email, {
+        bookingRef: bookingRowForEmail.booking_reference,
+        routeLabel: bookingRowForEmail.route_label,
+        refundAmount: actualRefundToCustomer,
+        refundCurrency,
+        stripeRefundError,
+      }).then(function(){}, function(e){ log('warn', 'cancellation_email_failed', { order_id, error: e.message }); });
     }
 
     res.json({
