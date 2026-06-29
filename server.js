@@ -3356,14 +3356,33 @@ app.post('/cancel-confirm', async (req, res) => {
     // needs this row (even if refundRatioForLoyalty ends up 0).
     let bookingRowForEmail = null;
     if (supa && order_id) {
-      try {
-        const { data: bookingRow } = await supa.from('bookings')
-          .select('duffel_amount,customer_paid,stripe_payment_id,currency,user_id,loyalty_discount,loyalty_points_earned,customer_email,booking_reference,route_label')
-          .eq('duffel_order_id', order_id).maybeSingle();
+      // [REFUND-DIAGNOSTIC] CRITICAL FIX confirmed by an actual production
+      // incident: Supabase's client doesn't throw on a query error (e.g. a
+      // missing column) — it returns { data: null, error: {...} } quietly.
+      // The previous code only destructured `data` and never checked
+      // `error` at all, so a schema mismatch (the loyalty_points_earned
+      // column not yet existing) silently resulted in bookingRowForLoyalty
+      // staying null — which meant the entire refund/loyalty-reversal
+      // logic below never ran, with NO visible error anywhere. Now
+      // explicitly checks `error` and escalates loudly.
+      const { data: bookingRow, error: bookingLookupErr } = await supa.from('bookings')
+        .select('duffel_amount,customer_paid,stripe_payment_id,currency,user_id,loyalty_discount,loyalty_points_earned,customer_email,booking_reference,route_label')
+        .eq('duffel_order_id', order_id).maybeSingle();
+      if (bookingLookupErr) {
+        log('error', 'cancellation_booking_lookup_failed', { order_id, error: bookingLookupErr.message });
+        Sentry.captureException(new Error('Cancellation confirmed with Duffel but booking lookup failed — likely a schema mismatch'), {
+          tags: { critical: 'cancellation_booking_lookup_failed', order_id },
+          extra: { order_id, db_error: bookingLookupErr.message },
+        });
+        recordSyncFailureEvent({
+          type: 'cancellation_booking_lookup_failed',
+          order_id, cancellation_id,
+          message: 'Stornierung bei Duffel bestätigt, aber die Buchung konnte aus der Datenbank nicht geladen werden (möglicherweise fehlt eine Spalte) — Rückerstattung und E-Mail wurden NICHT verarbeitet. Sofortige manuelle Prüfung erforderlich!',
+          db_error: bookingLookupErr.message,
+        });
+      } else {
         bookingRowForLoyalty = bookingRow;
         bookingRowForEmail = bookingRow;
-      } catch (lookupErr) {
-        log('warn', 'cancellation_booking_lookup_failed', { order_id, error: lookupErr.message });
       }
     }
     // [STRIPE-REFUND-FIX] The actual missing piece: until now, nothing
