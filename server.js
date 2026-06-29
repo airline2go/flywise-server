@@ -675,13 +675,16 @@ async function computeLoyaltyDiscount(kind, id, subtotal) {
 
 // Deducts used credit + awards points for a confirmed booking. Called only
 // from bookFromSession, after Duffel has actually confirmed the order —
-// never speculatively before payment succeeds.
+// never speculatively before payment succeeds. Returns the exact points
+// earned, so the caller can persist it on the booking row itself — a
+// later cancellation must reverse this EXACT figure, not a value
+// recomputed against whatever tier the account happens to be at by then.
 async function applyLoyaltyForBooking(kind, id, creditUsed, paidAmount) {
-  if (!supa || !id) return;
+  if (!supa || !id) return 0;
   const column = kind === 'device' ? 'device_id' : 'user_id';
   try {
     const account = await getOrCreateLoyaltyAccount(kind, id);
-    if (!account) return;
+    if (!account) return 0;
     const cfg = await getLoyaltyConfig();
     const tierMultiplier = account.tier === 'gold' ? 2 : account.tier === 'silver' ? 1.5 : 1;
     const earned = Math.floor((Number(paidAmount) || 0) * (Number(cfg.pointsPerEuro) || 0) * tierMultiplier);
@@ -702,8 +705,59 @@ async function applyLoyaltyForBooking(kind, id, creditUsed, paidAmount) {
       bookings_count: (Number(account.bookings_count) || 0) + 1,
       tier: newTier,
     }).eq(column, id);
+    return earned;
   } catch (e) {
     log('warn', 'loyalty_apply_failed', { error: e.message });
+    return 0;
+  }
+}
+
+// [LOYALTY-CANCEL-REVERSAL-FIX] Mirror image of applyLoyaltyForBooking,
+// called on cancellation — reverses a FAIR PROPORTION (refundRatio, the
+// same ratio used for the Stripe refund itself) of exactly what THIS
+// booking actually did to the account: gives back that fraction of the
+// credit that was used, removes that fraction of the points that were
+// earned, decrements lifetime_points by the same amount (so a tier
+// upgrade earned partly or wholly from this booking is correctly undone
+// — recalculated fresh from the resulting lifetime_points, never
+// force-set), and decrements bookings_count. A refundRatio of 1.0 (full
+// refund) reverses everything completely; a partial refund reverses the
+// same proportion, consistent with how the Stripe refund itself is
+// computed. Never throws — a failure here must never block the
+// cancellation response itself, and is reported via the same
+// sync-failure admin-notification path as the other reconciliation
+// concerns on this endpoint.
+async function reverseLoyaltyForBooking(kind, id, creditUsedOriginal, pointsEarnedOriginal, refundRatio) {
+  if (!supa || !id) return { ok: true };
+  const column = kind === 'device' ? 'device_id' : 'user_id';
+  try {
+    const account = await getOrCreateLoyaltyAccount(kind, id);
+    if (!account) return { ok: true };
+    const creditToRestore = Math.round((Number(creditUsedOriginal) || 0) * refundRatio * 100) / 100;
+    const pointsToRemove = Math.floor((Number(pointsEarnedOriginal) || 0) * refundRatio);
+    const newCredit = Math.round(((Number(account.credit) || 0) + creditToRestore) * 100) / 100;
+    const newCreditUsed = Math.max(0, Math.round(((Number(account.credit_used) || 0) - creditToRestore) * 100) / 100);
+    const newPoints = Math.max(0, (Number(account.points) || 0) - pointsToRemove);
+    const currentLifetime = (account.lifetime_points != null ? Number(account.lifetime_points) : Number(account.points)) || 0;
+    const newLifetime = Math.max(0, currentLifetime - pointsToRemove);
+    // Tier recalculated fresh from the resulting lifetime_points — never
+    // force-set — so a tier upgrade earned (even partly) from this
+    // booking is correctly undone if the reduced lifetime total no
+    // longer qualifies.
+    const newTier = newLifetime >= 10000 ? 'gold' : newLifetime >= 4000 ? 'silver' : 'bronze';
+    const { error } = await supa.from('loyalty_accounts').update({
+      credit: newCredit,
+      credit_used: newCreditUsed,
+      points: newPoints,
+      lifetime_points: newLifetime,
+      bookings_count: Math.max(0, (Number(account.bookings_count) || 0) - 1),
+      tier: newTier,
+    }).eq(column, id);
+    if (error) return { ok: false, error: error.message };
+    log('info', 'loyalty_reversed_for_cancellation', { kind, id, creditToRestore, pointsToRemove, newTier, refundRatio });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
   }
 }
 
@@ -2727,7 +2781,20 @@ async function bookFromSession(session_id, session) {
     // The old device_id fallback is removed rather than left as dead code
     // that could silently start working again if loyaltyUsed were ever
     // populated some other way.
-    if (booking.user_id) applyLoyaltyForBooking('user', booking.user_id, loyaltyUsed, customerPaid).then(function(){}, function(){});
+    // [LOYALTY-CANCEL-REVERSAL-FIX] Now awaited (was fire-and-forget) so
+    // the exact points earned can be captured and persisted on this
+    // booking row — needed for a later cancellation to reverse this
+    // EXACT figure, not a value recomputed against whatever tier the
+    // account is at by then.
+    if (booking.user_id) {
+      try {
+        const earnedPoints = await applyLoyaltyForBooking('user', booking.user_id, loyaltyUsed, customerPaid);
+        if (earnedPoints > 0 && orderId) {
+          supa.from('bookings').update({ loyalty_points_earned: earnedPoints }).eq('duffel_order_id', orderId)
+            .then(function(){}, function(e){ log('warn', 'loyalty_points_persist_failed', { order_id: orderId, error: e.message }); });
+        }
+      } catch (e) { log('warn', 'loyalty_apply_call_failed', { error: e.message }); }
+    }
   }
 
   // [EMAIL-SEAT-FIX] The order data we just got back from POST
@@ -3202,17 +3269,21 @@ app.post('/cancel-confirm', async (req, res) => {
     let refundCurrency = confirmed.data?.refund_currency || 'EUR';
     let stripeRefundIssued = false;
     let stripeRefundError = null;
+    let refundRatioForLoyalty = 0;
+    let bookingRowForLoyalty = null;
     if (supa && order_id && duffelRefundAmount > 0) {
       try {
         const { data: bookingRow } = await supa.from('bookings')
-          .select('duffel_amount,customer_paid,stripe_payment_id,currency')
+          .select('duffel_amount,customer_paid,stripe_payment_id,currency,user_id,loyalty_discount,loyalty_points_earned')
           .eq('duffel_order_id', order_id).maybeSingle();
+        bookingRowForLoyalty = bookingRow;
         if (bookingRow && bookingRow.stripe_payment_id && stripe) {
           const duffelAmount = Number(bookingRow.duffel_amount) || 0;
           const customerPaid = Number(bookingRow.customer_paid) || 0;
           // Ratio of what Duffel actually refunded vs the full net cost —
           // 1.0 for a fully-refundable fare, less for a partial refund.
           const refundRatio = duffelAmount > 0 ? Math.min(1, duffelRefundAmount / duffelAmount) : 0;
+          refundRatioForLoyalty = refundRatio;
           actualRefundToCustomer = Math.round(customerPaid * refundRatio * 100) / 100;
           refundCurrency = bookingRow.currency || refundCurrency;
           if (actualRefundToCustomer > 0) {
@@ -3247,6 +3318,33 @@ app.post('/cancel-confirm', async (req, res) => {
           message: 'Stornierung bestätigt, aber die Stripe-Rückerstattung an den Kunden ist fehlgeschlagen — manuelle Rückerstattung erforderlich!',
           db_error: refundErr.message,
         });
+      }
+    }
+
+    // [LOYALTY-CANCEL-REVERSAL-FIX] Reverses the same fair proportion
+    // (refundRatioForLoyalty) of whatever credit was used and points
+    // earned on THIS specific booking — runs independently of whether
+    // the Stripe refund above succeeded, since this is owed based on
+    // what Duffel actually granted, not on Stripe's execution. A safe
+    // no-op if the booking never used credit or has no logged-in user.
+    // Never blocks the response — failures surface through the same
+    // sync-failure admin-notification path as everything else here.
+    if (bookingRowForLoyalty && bookingRowForLoyalty.user_id && refundRatioForLoyalty > 0) {
+      const creditUsedOriginal = Number(bookingRowForLoyalty.loyalty_discount) || 0;
+      const pointsEarnedOriginal = Number(bookingRowForLoyalty.loyalty_points_earned) || 0;
+      if (creditUsedOriginal > 0 || pointsEarnedOriginal > 0) {
+        reverseLoyaltyForBooking('user', bookingRowForLoyalty.user_id, creditUsedOriginal, pointsEarnedOriginal, refundRatioForLoyalty)
+          .then((result) => {
+            if (!result.ok) {
+              log('error', 'loyalty_reversal_failed', { order_id, error: result.error });
+              recordSyncFailureEvent({
+                type: 'loyalty_reversal_failed',
+                order_id, cancellation_id,
+                message: 'Stornierung bestätigt, aber Treuepunkte/Guthaben konnten nicht zurückgebucht werden — manuelle Prüfung erforderlich.',
+                db_error: result.error,
+              });
+            }
+          });
       }
     }
 
