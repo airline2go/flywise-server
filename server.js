@@ -2816,6 +2816,7 @@ async function bookFromSession(session_id, session) {
         promo_code: booking.promo_code || null,
         loyalty_discount: loyaltyUsed,
         customer_paid: customerPaid,
+        stripe_payment_id: (session && session.payment_intent) || null,
       });
       if (bookingInsertError) log('error', 'supa_booking_insert_failed', { error: bookingInsertError.message });
     } catch (e) {
@@ -3416,11 +3417,17 @@ app.post('/cancel-confirm', async (req, res) => {
         if (bookingRow.stripe_payment_id && stripe) {
           const duffelAmount = Number(bookingRow.duffel_amount) || 0;
           const customerPaid = Number(bookingRow.customer_paid) || 0;
-          // Ratio of what Duffel actually refunded vs the full net cost —
-          // 1.0 for a fully-refundable fare, less for a partial refund.
+          // [REFUND-EXACT-FIX] Refund exactly what Duffel actually
+          // refunded, capped at what the customer paid as a safety
+          // ceiling — never re-derive it by applying a ratio to
+          // customerPaid, since customerPaid includes our margin and a
+          // ratio-based calc was previously over-refunding customers.
           const refundRatio = duffelAmount > 0 ? Math.min(1, duffelRefundAmount / duffelAmount) : 0;
           refundRatioForLoyalty = refundRatio;
-          actualRefundToCustomer = Math.round(customerPaid * refundRatio * 100) / 100;
+          actualRefundToCustomer = customerPaid > 0
+            ? Math.min(duffelRefundAmount, customerPaid)
+            : duffelRefundAmount;
+          actualRefundToCustomer = Math.round(actualRefundToCustomer * 100) / 100;
           refundCurrency = bookingRow.currency || refundCurrency;
           log('info', 'cancellation_refund_computed', { order_id, duffelAmount, customerPaid, refundRatio, actualRefundToCustomer });
           if (actualRefundToCustomer > 0) {
