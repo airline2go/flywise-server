@@ -2788,6 +2788,13 @@ async function bookFromSession(session_id, session) {
       const primaryPax = (booking.passengers && booking.passengers[0]) || {};
       const { error: bookingInsertError } = await supa.from('bookings').insert({
         stripe_session_id: session_id,
+        // [STRIPE-REFUND-FIX-2] Without this, /cancel-confirm can never
+        // find a payment_intent to refund against — every cancellation
+        // would silently skip the actual Stripe refund regardless of the
+        // bookings.stripe_payment_id column existing or not. session here
+        // is the same Stripe Checkout Session object already used a few
+        // lines above for the payments-table insert.
+        stripe_payment_id: (session && session.payment_intent) || null,
         duffel_order_id: orderId || null,
         booking_reference: bookingRef || null,
         route_label: booking.route_label || null,
