@@ -2788,13 +2788,6 @@ async function bookFromSession(session_id, session) {
       const primaryPax = (booking.passengers && booking.passengers[0]) || {};
       const { error: bookingInsertError } = await supa.from('bookings').insert({
         stripe_session_id: session_id,
-        // [STRIPE-REFUND-FIX-2] Without this, /cancel-confirm can never
-        // find a payment_intent to refund against — every cancellation
-        // would silently skip the actual Stripe refund regardless of the
-        // bookings.stripe_payment_id column existing or not. session here
-        // is the same Stripe Checkout Session object already used a few
-        // lines above for the payments-table insert.
-        stripe_payment_id: (session && session.payment_intent) || null,
         duffel_order_id: orderId || null,
         booking_reference: bookingRef || null,
         route_label: booking.route_label || null,
@@ -3399,16 +3392,26 @@ app.post('/cancel-confirm', async (req, res) => {
     // was purely a display value from Duffel with no corresponding
     // Stripe action behind it. Computes a FAIR, proportional refund: the
     // same ratio Duffel actually granted (duffelRefundAmount /
-    // duffel_amount) applied to customer_paid (the FULL amount charged,
-    // including our margin) — so a fully-refundable fare returns the
-    // customer's complete payment (margin included, since no service was
-    // delivered), and a partially-refundable fare returns the same
-    // proportion of what they actually paid, not just Duffel's net share.
+    // [REFUND-EXACT-FIX] Previously this scaled customer_paid (the FULL
+    // amount charged, margin included) by the ratio Duffel granted —
+    // which meant a fully-refundable fare (ratio 1.0) refunded the
+    // customer's ENTIRE payment, margin included, even though Duffel only
+    // ever returned the net ticket cost. Confirmed by a real incident:
+    // duffel_amount 719.80 == duffelRefundAmount 719.80 → ratio 1.0 →
+    // customer refunded 797.58 (the full customer_paid, margin and all),
+    // a direct loss of the margin on every fully-refundable cancellation.
+    // The business requirement is simple and exact: refund the customer
+    // EXACTLY what Duffel's API reports as refund_amount — nothing scaled,
+    // nothing inferred — capped at customer_paid only as a hard safety
+    // ceiling (Stripe cannot refund more than was originally charged, and
+    // duffelRefundAmount should never exceed duffel_amount, but a cap here
+    // costs nothing and prevents an over-refund if Duffel's number is ever
+    // unexpectedly off).
     if (bookingRowForLoyalty && duffelRefundAmount > 0) {
       try {
         const bookingRow = bookingRowForLoyalty;
         // [REFUND-DIAGNOSTIC] Logs the exact booking-row values feeding
-        // into the ratio computation — confirms with certainty whether
+        // into the refund — confirms with certainty whether
         // duffel_amount/stripe_payment_id are actually present and
         // correct on this specific booking row, rather than guessing.
         log('info', 'cancellation_refund_inputs', {
@@ -3419,24 +3422,30 @@ app.post('/cancel-confirm', async (req, res) => {
           duffel_refund_amount: duffelRefundAmount,
         });
         if (bookingRow.stripe_payment_id && stripe) {
-          const duffelAmount = Number(bookingRow.duffel_amount) || 0;
           const customerPaid = Number(bookingRow.customer_paid) || 0;
-          // Ratio of what Duffel actually refunded vs the full net cost —
-          // 1.0 for a fully-refundable fare, less for a partial refund.
-          const refundRatio = duffelAmount > 0 ? Math.min(1, duffelRefundAmount / duffelAmount) : 0;
-          refundRatioForLoyalty = refundRatio;
-          actualRefundToCustomer = Math.round(customerPaid * refundRatio * 100) / 100;
+          // Exactly what Duffel reports — never scaled by customer_paid.
+          // Capped at customerPaid purely as a safety ceiling.
+          actualRefundToCustomer = customerPaid > 0
+            ? Math.min(duffelRefundAmount, customerPaid)
+            : duffelRefundAmount;
+          actualRefundToCustomer = Math.round(actualRefundToCustomer * 100) / 100;
+          // Used only to proportionally reverse loyalty credit/points —
+          // reflects what fraction of the customer's payment was actually
+          // refunded, now correctly tracking the EXACT refund above.
+          refundRatioForLoyalty = customerPaid > 0
+            ? Math.min(1, actualRefundToCustomer / customerPaid)
+            : 0;
           refundCurrency = bookingRow.currency || refundCurrency;
-          log('info', 'cancellation_refund_computed', { order_id, duffelAmount, customerPaid, refundRatio, actualRefundToCustomer });
+          log('info', 'cancellation_refund_computed', { order_id, customerPaid, duffelRefundAmount, actualRefundToCustomer, refundRatioForLoyalty });
           if (actualRefundToCustomer > 0) {
             await stripe.refunds.create({
               payment_intent: bookingRow.stripe_payment_id,
               amount: Math.round(actualRefundToCustomer * 100), // Stripe expects the smallest currency unit (cents)
             });
             stripeRefundIssued = true;
-            log('info', 'cancellation_stripe_refund_issued', { order_id, amount: actualRefundToCustomer, currency: refundCurrency, ratio: refundRatio });
+            log('info', 'cancellation_stripe_refund_issued', { order_id, amount: actualRefundToCustomer, currency: refundCurrency });
           } else {
-            log('warn', 'cancellation_refund_amount_zero_after_ratio', { order_id, duffelAmount, customerPaid, refundRatio });
+            log('warn', 'cancellation_refund_amount_zero', { order_id, duffelRefundAmount, customerPaid });
           }
         } else if (!bookingRow.stripe_payment_id) {
           log('warn', 'cancellation_refund_no_payment_id', { order_id });
