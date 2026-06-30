@@ -224,18 +224,20 @@ async function sendBookingConfirmationEmail(to, data) {
     <tr>
       <td style="padding:10px 0;border-bottom:1px solid #eef1f4">
         <table width="100%" cellpadding="0" cellspacing="0"><tr>
-          <td style="width:60px;vertical-align:top">
+          <td style="width:80px;vertical-align:top">
             <div style="font-size:15px;font-weight:700;color:#101d2c">${fmtTime(seg.dep)}</div>
             <div style="font-size:11px;color:#8fa4b4">${seg.from}</div>
+            <div style="font-size:10px;color:#8fa4b4;margin-top:1px">${fmtDate(seg.dep)}</div>
           </td>
           <td style="text-align:center;vertical-align:top;color:#8fa4b4;font-size:11px;padding:0 8px">
             <div>${durStr(seg.dur)}</div>
             <div style="border-top:1px dashed #c8d4de;margin:4px 0"></div>
             <div>${seg.al} ${seg.fn}</div>
           </td>
-          <td style="width:60px;text-align:right;vertical-align:top">
+          <td style="width:80px;text-align:right;vertical-align:top">
             <div style="font-size:15px;font-weight:700;color:#101d2c">${fmtTime(seg.arr)}</div>
             <div style="font-size:11px;color:#8fa4b4">${seg.to}</div>
+            <div style="font-size:10px;color:#8fa4b4;margin-top:1px">${fmtDate(seg.arr)}</div>
           </td>
         </tr></table>
       </td>
@@ -2788,12 +2790,6 @@ async function bookFromSession(session_id, session) {
       const primaryPax = (booking.passengers && booking.passengers[0]) || {};
       const { error: bookingInsertError } = await supa.from('bookings').insert({
         stripe_session_id: session_id,
-        // [STRIPE-REFUND-FIX-2] Without this, /cancel-confirm can never
-        // find a payment_intent to refund against — every cancellation
-        // silently skips the actual Stripe refund. `session` here is the
-        // same Stripe Checkout Session object already used a few lines
-        // above for the payments-table insert.
-        stripe_payment_id: (session && session.payment_intent) || null,
         duffel_order_id: orderId || null,
         booking_reference: bookingRef || null,
         route_label: booking.route_label || null,
@@ -3391,16 +3387,23 @@ app.post('/cancel-confirm', async (req, res) => {
         bookingRowForEmail = bookingRow;
       }
     }
-    // [REFUND-EXACT-FIX] The exact amount Duffel reports as refund_amount
-    // is what gets refunded to the customer via Stripe — never scaled by
-    // customer_paid (which includes our margin). A fully-refundable fare
-    // returns Duffel's net ticket cost, not the full payment including
-    // margin. Capped at customer_paid only as a hard safety ceiling.
+    // [STRIPE-REFUND-FIX] The actual missing piece: until now, nothing
+    // on this path ever called Stripe to refund the customer ANY amount
+    // — the customer would see "Refund: 120€", confirm, have their
+    // booking cancelled, and never receive a cent, since refund_amount
+    // was purely a display value from Duffel with no corresponding
+    // Stripe action behind it. Computes a FAIR, proportional refund: the
+    // same ratio Duffel actually granted (duffelRefundAmount /
+    // duffel_amount) applied to customer_paid (the FULL amount charged,
+    // including our margin) — so a fully-refundable fare returns the
+    // customer's complete payment (margin included, since no service was
+    // delivered), and a partially-refundable fare returns the same
+    // proportion of what they actually paid, not just Duffel's net share.
     if (bookingRowForLoyalty && duffelRefundAmount > 0) {
       try {
         const bookingRow = bookingRowForLoyalty;
         // [REFUND-DIAGNOSTIC] Logs the exact booking-row values feeding
-        // into the refund — confirms with certainty whether
+        // into the ratio computation — confirms with certainty whether
         // duffel_amount/stripe_payment_id are actually present and
         // correct on this specific booking row, rather than guessing.
         log('info', 'cancellation_refund_inputs', {
@@ -3411,25 +3414,24 @@ app.post('/cancel-confirm', async (req, res) => {
           duffel_refund_amount: duffelRefundAmount,
         });
         if (bookingRow.stripe_payment_id && stripe) {
+          const duffelAmount = Number(bookingRow.duffel_amount) || 0;
           const customerPaid = Number(bookingRow.customer_paid) || 0;
-          actualRefundToCustomer = customerPaid > 0
-            ? Math.min(duffelRefundAmount, customerPaid)
-            : duffelRefundAmount;
-          actualRefundToCustomer = Math.round(actualRefundToCustomer * 100) / 100;
-          refundRatioForLoyalty = customerPaid > 0
-            ? Math.min(1, actualRefundToCustomer / customerPaid)
-            : 0;
+          // Ratio of what Duffel actually refunded vs the full net cost —
+          // 1.0 for a fully-refundable fare, less for a partial refund.
+          const refundRatio = duffelAmount > 0 ? Math.min(1, duffelRefundAmount / duffelAmount) : 0;
+          refundRatioForLoyalty = refundRatio;
+          actualRefundToCustomer = Math.round(customerPaid * refundRatio * 100) / 100;
           refundCurrency = bookingRow.currency || refundCurrency;
-          log('info', 'cancellation_refund_computed', { order_id, customerPaid, duffelRefundAmount, actualRefundToCustomer, refundRatioForLoyalty });
+          log('info', 'cancellation_refund_computed', { order_id, duffelAmount, customerPaid, refundRatio, actualRefundToCustomer });
           if (actualRefundToCustomer > 0) {
             await stripe.refunds.create({
               payment_intent: bookingRow.stripe_payment_id,
               amount: Math.round(actualRefundToCustomer * 100), // Stripe expects the smallest currency unit (cents)
             });
             stripeRefundIssued = true;
-            log('info', 'cancellation_stripe_refund_issued', { order_id, amount: actualRefundToCustomer, currency: refundCurrency });
+            log('info', 'cancellation_stripe_refund_issued', { order_id, amount: actualRefundToCustomer, currency: refundCurrency, ratio: refundRatio });
           } else {
-            log('warn', 'cancellation_refund_amount_zero', { order_id, duffelRefundAmount, customerPaid });
+            log('warn', 'cancellation_refund_amount_zero_after_ratio', { order_id, duffelAmount, customerPaid, refundRatio });
           }
         } else if (!bookingRow.stripe_payment_id) {
           log('warn', 'cancellation_refund_no_payment_id', { order_id });
