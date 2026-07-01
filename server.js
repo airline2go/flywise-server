@@ -3559,6 +3559,56 @@ app.post('/cancel-confirm', async (req, res) => {
 
 // ─── GET /search/airports?q=... (بحث المدن/المطارات الحي من Duffel) ──
 const _apCache = new Map(); // كاش 5 دقائق لتخفيف الطلبات على Duffel
+
+// [AIRPORT-CODE-FALLBACK] Duffel's /places/suggestions endpoint sometimes
+// only returns a city entry (e.g. Munich → MUC, Berlin → BER) with NO
+// matching airport-type entry, even though the airport is real and very
+// much in service — apparently a data-completeness gap in that specific
+// endpoint, not something specific to these two cities. Since city
+// entries deliberately carry no lat/lng (a city can span several real
+// airports — see the comment below), any single-airport city Duffel
+// fails to nest under `airports` becomes completely unselectable in the
+// admin route picker, silently excluding some of the busiest airports in
+// Europe. This looks the airport up directly via Duffel's separate,
+// authoritative /air/airports reference-data endpoint instead of ever
+// guessing/hardcoding coordinates. Cached hard (24h) and per-country,
+// since this is static reference data — a country's airport list simply
+// doesn't change hour to hour, so repeated lookups for the same country
+// (e.g. searching several German cities in one admin session) cost one
+// real fetch instead of one per search.
+const _airportsByCountryCache = new Map();
+async function fetchAirportsForCountry(countryCode) {
+  const key = countryCode.toUpperCase();
+  const hit = _airportsByCountryCache.get(key);
+  if (hit && (Date.now() - hit.t) < 86400000) return hit.data;
+
+  const all = [];
+  let after = null;
+  // Bounded at 10 pages (≤2000 airports) — generous for every country
+  // this business actually serves; if a lookup ever misses because a
+  // huge country has more airports than that, the search simply falls
+  // back to its prior behavior (city shown, no separate airport entry)
+  // rather than hanging on unbounded pagination.
+  for (let page = 0; page < 10; page++) {
+    const qs = 'iata_country_code=' + encodeURIComponent(key) + '&limit=200' + (after ? '&after=' + encodeURIComponent(after) : '');
+    const r = await duffel('GET', '/air/airports?' + qs);
+    all.push(...(r.data || []));
+    after = r.meta && r.meta.after ? r.meta.after : null;
+    if (!after) break;
+  }
+  _airportsByCountryCache.set(key, { t: Date.now(), data: all });
+  return all;
+}
+async function fetchAirportByCode(code, countryCode) {
+  if (!countryCode) return null;
+  try {
+    const list = await fetchAirportsForCountry(countryCode);
+    return list.find((a) => a.iata_code === code) || null;
+  } catch (err) {
+    return null; // best-effort fallback — a failure here just means the search keeps its prior (imperfect) behavior, never a hard error
+  }
+}
+
 app.get('/search/airports', rateLimit('airports', 60, 60000), async (req, res) => {
   try {
     const q = (req.query.q || '').toString().trim();
@@ -3575,6 +3625,7 @@ app.get('/search/airports', rateLimit('airports', 60, 60000), async (req, res) =
     const out = [];
     const seen = new Set();
     const push = (o) => { if (o.code && !seen.has(o.code)) { seen.add(o.code); out.push(o); } };
+    const cityFallbacks = []; // [AIRPORT-CODE-FALLBACK] cities needing a direct lookup, resolved after the main loop
     (result.data || []).forEach((p) => {
       if (p.type === 'city') {
         // [ROUTE-PAGES] Cities deliberately get no lat/lng — a city can
@@ -3584,12 +3635,19 @@ app.get('/search/airports', rateLimit('airports', 60, 60000), async (req, res) =
         // route-distance calculations actually need anyway (search is by
         // airport code, never by city code).
         push({ type: 'city', code: p.iata_code, name: p.name, city: p.name, country: p.iata_country_code });
-        (p.airports || []).forEach((ap) => push({
-          type: 'airport', code: ap.iata_code, name: ap.name,
-          city: ap.city_name || p.name, country: ap.iata_country_code || p.iata_country_code,
-          lat: ap.latitude != null ? Number(ap.latitude) : null,
-          lng: ap.longitude != null ? Number(ap.longitude) : null,
-        }));
+        if (p.airports && p.airports.length) {
+          p.airports.forEach((ap) => push({
+            type: 'airport', code: ap.iata_code, name: ap.name,
+            city: ap.city_name || p.name, country: ap.iata_country_code || p.iata_country_code,
+            lat: ap.latitude != null ? Number(ap.latitude) : null,
+            lng: ap.longitude != null ? Number(ap.longitude) : null,
+          }));
+        } else if (p.iata_code) {
+          // [AIRPORT-CODE-FALLBACK] No nested airports at all — likely a
+          // single-airport city sharing its code with the airport itself
+          // (Munich/MUC, Berlin/BER are the confirmed real-world cases).
+          cityFallbacks.push({ code: p.iata_code, name: p.name, country: p.iata_country_code });
+        }
       } else {
         push({
           type: 'airport', code: p.iata_code, name: p.name,
@@ -3599,6 +3657,23 @@ app.get('/search/airports', rateLimit('airports', 60, 60000), async (req, res) =
         });
       }
     });
+
+    // Resolve fallbacks in parallel — only for cities that came back with
+    // zero nested airports above, so this adds no extra latency for the
+    // (large majority of) searches that don't hit the gap.
+    if (cityFallbacks.length) {
+      const resolved = await Promise.all(cityFallbacks.map((c) => fetchAirportByCode(c.code, c.country)));
+      resolved.forEach((ap, i) => {
+        if (ap) {
+          push({
+            type: 'airport', code: ap.iata_code, name: ap.name,
+            city: ap.city_name || cityFallbacks[i].name, country: ap.iata_country_code,
+            lat: ap.latitude != null ? Number(ap.latitude) : null,
+            lng: ap.longitude != null ? Number(ap.longitude) : null,
+          });
+        }
+      });
+    }
 
     _apCache.set(key, { t: Date.now(), data: out });
     res.set('Cache-Control', 'public, max-age=3600'); // المتصفح يخزّن نتائج المطارات ساعة
