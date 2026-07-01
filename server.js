@@ -1674,19 +1674,36 @@ app.get('/route-price', rateLimit('route-price', 60, 60000), async (req, res) =>
       return (parseInt(m[1] || 0, 10) * 60) + parseInt(m[2] || 0, 10);
     }
     const durations = [];
+    const directDurations = []; // [DURATION-ACCURACY-FIX] see below
     const stopCounts = [];
     const airlines = new Set();
     for (const o of offers) {
       const slice = (o.slices || [])[0];
       if (!slice) continue;
       const durMin = isoMinutesToHours(slice.duration);
-      if (durMin != null) durations.push(durMin);
       const segs = slice.segments || [];
-      stopCounts.push(Math.max(0, segs.length - 1));
+      const stops = Math.max(0, segs.length - 1);
+      if (durMin != null) {
+        durations.push(durMin);
+        if (stops === 0) directDurations.push(durMin);
+      }
+      stopCounts.push(stops);
       segs.forEach((s) => { if (s.marketing_carrier?.name) airlines.add(s.marketing_carrier.name); });
     }
+    // [DURATION-ACCURACY-FIX] Averaging across ALL offers — direct AND
+    // connecting — was producing wildly misleading figures (a real
+    // production case: 520km Berlin→Vienna showing "6h10m" because a
+    // handful of long-layover connecting offers dragged the mean up,
+    // even though direct flights on that route take about 1.5h). The
+    // "Flugzeit" a customer expects from this figure is actual flying
+    // time on a normal routing, not an average blended with layover
+    // time from itineraries most people would never choose. Prefer the
+    // average among DIRECT offers whenever at least one exists — falling
+    // back to the all-offers average only for routes with no direct
+    // flights at all, where that's the only real data available.
+    const durationsForAvg = directDurations.length ? directDurations : durations;
     const insights = durations.length ? {
-      avgDurationMin: Math.round(durations.reduce((a, b) => a + b, 0) / durations.length),
+      avgDurationMin: Math.round(durationsForAvg.reduce((a, b) => a + b, 0) / durationsForAvg.length),
       minDurationMin: Math.min(...durations),
       directAvailable: stopCounts.some((s) => s === 0),
       allDirect: stopCounts.every((s) => s === 0),
