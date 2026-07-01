@@ -3625,7 +3625,16 @@ app.get('/search/airports', rateLimit('airports', 60, 60000), async (req, res) =
 
     const out = [];
     const seen = new Set();
-    const push = (o) => { if (o.code && !seen.has(o.code)) { seen.add(o.code); out.push(o); } };
+    // [DEDUP-TYPE-COLLISION-FIX] Was keyed by `code` alone — but a city
+    // and its own single airport can share the exact same IATA code
+    // (Munich/MUC, Berlin/BER). Since the city entry is always pushed
+    // first, that alone silently blocked the real airport entry with the
+    // same code from ever being added, even when Duffel DID return it
+    // with real coordinates. Keying by `type:code` lets a city and an
+    // airport with the same code coexist — admin/search consumers only
+    // ever want the airport-type one anyway, but it has to actually be
+    // in the list to be selectable.
+    const push = (o) => { const k = o.type + ':' + o.code; if (o.code && !seen.has(k)) { seen.add(k); out.push(o); } };
     const cityFallbacks = []; // [AIRPORT-CODE-FALLBACK] cities needing a direct lookup, resolved after the main loop
     (result.data || []).forEach((p) => {
       if (p.type === 'city') {
