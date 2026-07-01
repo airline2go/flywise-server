@@ -3600,12 +3600,13 @@ async function fetchAirportsForCountry(countryCode) {
   return all;
 }
 async function fetchAirportByCode(code, countryCode) {
-  if (!countryCode) return null;
+  if (!countryCode) return { airport: null, debug: 'no country code on city entry' };
   try {
     const list = await fetchAirportsForCountry(countryCode);
-    return list.find((a) => a.iata_code === code) || null;
+    const found = list.find((a) => a.iata_code === code) || null;
+    return { airport: found, debug: found ? 'found' : ('not found in ' + list.length + ' airports for ' + countryCode) };
   } catch (err) {
-    return null; // best-effort fallback — a failure here just means the search keeps its prior (imperfect) behavior, never a hard error
+    return { airport: null, debug: 'error: ' + err.message }; // best-effort fallback — a failure here just means the search keeps its prior (imperfect) behavior, never a hard error
   }
 }
 
@@ -3661,15 +3662,17 @@ app.get('/search/airports', rateLimit('airports', 60, 60000), async (req, res) =
     // Resolve fallbacks in parallel — only for cities that came back with
     // zero nested airports above, so this adds no extra latency for the
     // (large majority of) searches that don't hit the gap.
+    const fallbackDebug = [];
     if (cityFallbacks.length) {
       const resolved = await Promise.all(cityFallbacks.map((c) => fetchAirportByCode(c.code, c.country)));
-      resolved.forEach((ap, i) => {
-        if (ap) {
+      resolved.forEach((r, i) => {
+        fallbackDebug.push({ code: cityFallbacks[i].code, country: cityFallbacks[i].country, result: r.debug });
+        if (r.airport) {
           push({
-            type: 'airport', code: ap.iata_code, name: ap.name,
-            city: ap.city_name || cityFallbacks[i].name, country: ap.iata_country_code,
-            lat: ap.latitude != null ? Number(ap.latitude) : null,
-            lng: ap.longitude != null ? Number(ap.longitude) : null,
+            type: 'airport', code: r.airport.iata_code, name: r.airport.name,
+            city: r.airport.city_name || cityFallbacks[i].name, country: r.airport.iata_country_code,
+            lat: r.airport.latitude != null ? Number(r.airport.latitude) : null,
+            lng: r.airport.longitude != null ? Number(r.airport.longitude) : null,
           });
         }
       });
@@ -3677,6 +3680,13 @@ app.get('/search/airports', rateLimit('airports', 60, 60000), async (req, res) =
 
     _apCache.set(key, { t: Date.now(), data: out });
     res.set('Cache-Control', 'public, max-age=3600'); // المتصفح يخزّن نتائج المطارات ساعة
+    // [TEMP-DEBUG] Only included when explicitly requested via ?debug=1 —
+    // never sent to normal callers, purely for tracing the airport-code
+    // fallback while diagnosing a live issue. Safe to remove once the
+    // underlying cause is confirmed fixed.
+    if (req.query.debug === '1') {
+      return res.json({ ok: true, airports: out, _fallbackDebug: fallbackDebug });
+    }
     res.json({ ok: true, airports: out });
   } catch (err) {
     res.status(err.status || 500).json({ ok: false, error: err.message, airports: [] });
