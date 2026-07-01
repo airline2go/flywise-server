@@ -3636,17 +3636,25 @@ app.get('/search/airports', rateLimit('airports', 60, 60000), async (req, res) =
         // route-distance calculations actually need anyway (search is by
         // airport code, never by city code).
         push({ type: 'city', code: p.iata_code, name: p.name, city: p.name, country: p.iata_country_code });
-        if (p.airports && p.airports.length) {
-          p.airports.forEach((ap) => push({
+        // [AIRPORT-CODE-FALLBACK] The bug isn't "no nested airports at
+        // all" — Munich's city entry DOES nest a metro-area airport
+        // (Augsburg/AGB), just never Munich's own MUC. Checking
+        // `.length` alone missed this entirely: the array was non-empty,
+        // so the fallback below never even ran. The real check has to be
+        // "is the city's OWN code represented among its nested airports"
+        // — true for cities with no metro-area entries at all, false for
+        // Munich (list exists, but MUC itself is never in it).
+        var ownCodeMatched = false;
+        (p.airports || []).forEach((ap) => {
+          if (ap.iata_code === p.iata_code) ownCodeMatched = true;
+          push({
             type: 'airport', code: ap.iata_code, name: ap.name,
             city: ap.city_name || p.name, country: ap.iata_country_code || p.iata_country_code,
             lat: ap.latitude != null ? Number(ap.latitude) : null,
             lng: ap.longitude != null ? Number(ap.longitude) : null,
-          }));
-        } else if (p.iata_code) {
-          // [AIRPORT-CODE-FALLBACK] No nested airports at all — likely a
-          // single-airport city sharing its code with the airport itself
-          // (Munich/MUC, Berlin/BER are the confirmed real-world cases).
+          });
+        });
+        if (!ownCodeMatched && p.iata_code) {
           cityFallbacks.push({ code: p.iata_code, name: p.name, country: p.iata_country_code });
         }
       } else {
