@@ -4239,7 +4239,7 @@ app.get('/admin/route-pages', requireAdmin, async (req, res) => {
 app.post('/admin/route-pages', requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status, origin_lat, origin_lng, destination_lat, destination_lng, origin_country, destination_country, custom_title, custom_meta_description, custom_faq } = req.body;
+    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status, origin_lat, origin_lng, destination_lat, destination_lng, origin_country, destination_country, custom_title, custom_meta_description, custom_faq, weekly_flights, best_time_text, attractions_text } = req.body;
     if (!origin_iata || !destination_iata || !origin_city || !destination_city) {
       return res.status(400).json({ ok: false, error: 'IATA-Codes und Stadtnamen sind erforderlich' });
     }
@@ -4313,6 +4313,9 @@ app.post('/admin/route-pages', requireAdmin, async (req, res) => {
       custom_title: custom_title || null,
       custom_meta_description: custom_meta_description || null,
       custom_faq: Array.isArray(custom_faq) && custom_faq.length ? custom_faq : null,
+      weekly_flights: weekly_flights != null && weekly_flights !== '' ? Number(weekly_flights) : null,
+      best_time_text: best_time_text || null,
+      attractions_text: attractions_text || null,
       status: isPublishing ? 'published' : 'draft',
     }).select().maybeSingle();
     if (error) throw new Error(error.message);
@@ -4335,7 +4338,7 @@ app.post('/admin/route-pages', requireAdmin, async (req, res) => {
 app.put('/admin/route-pages/:id', requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status, origin_lat, origin_lng, destination_lat, destination_lng, origin_country, destination_country, custom_title, custom_meta_description, custom_faq } = req.body;
+    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status, origin_lat, origin_lng, destination_lat, destination_lng, origin_country, destination_country, custom_title, custom_meta_description, custom_faq, weekly_flights, best_time_text, attractions_text } = req.body;
     const update = { updated_at: new Date().toISOString() };
     if (origin_iata != null) update.origin_iata = origin_iata.toUpperCase();
     if (destination_iata != null) update.destination_iata = destination_iata.toUpperCase();
@@ -4347,6 +4350,9 @@ app.put('/admin/route-pages/:id', requireAdmin, async (req, res) => {
     if (custom_title != null) update.custom_title = custom_title || null;
     if (custom_meta_description != null) update.custom_meta_description = custom_meta_description || null;
     if (custom_faq != null) update.custom_faq = Array.isArray(custom_faq) && custom_faq.length ? custom_faq : null;
+    if (weekly_flights !== undefined) update.weekly_flights = weekly_flights != null && weekly_flights !== '' ? Number(weekly_flights) : null;
+    if (best_time_text !== undefined) update.best_time_text = best_time_text || null;
+    if (attractions_text !== undefined) update.attractions_text = attractions_text || null;
     if (status != null) update.status = status;
     // [ROUTE-PAGES-DISTANCE] Recompute whenever fresh coordinates are
     // supplied (i.e. the admin re-selected an airport while editing) — so
@@ -4412,7 +4418,7 @@ app.get('/sitemap-routes.xml', async (req, res) => {
 
     const urls = (data || []).map((r) => {
       const lastmod = new Date(r.updated_at || Date.now()).toISOString().slice(0, 10);
-      return `  <url>\n    <loc>https://airpiv.com/flight-route.html?slug=${encodeURIComponent(r.slug)}</loc>\n    <lastmod>${lastmod}</lastmod>\n    <changefreq>weekly</changefreq>\n    <priority>0.7</priority>\n  </url>`;
+      return `  <url>\n    <loc>https://airpiv.com/flights/${encodeURIComponent(r.slug)}</loc>\n    <lastmod>${lastmod}</lastmod>\n    <changefreq>weekly</changefreq>\n    <priority>0.7</priority>\n  </url>`;
     }).join('\n');
 
     const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>`;
