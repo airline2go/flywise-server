@@ -3702,7 +3702,7 @@ app.get('/search/airports', rateLimit('airports', 60, 60000), async (req, res) =
     // fallback while diagnosing a live issue. Safe to remove once the
     // underlying cause is confirmed fixed.
     if (req.query.debug === '1') {
-      return res.json({ ok: true, airports: out, _fallbackDebug: fallbackDebug, _codeVersion: 'ownCodeMatched-fix-v2' });
+      return res.json({ ok: true, airports: out, _fallbackDebug: fallbackDebug, _codeVersion: 'dedup-type-fix-v3' });
     }
     res.json({ ok: true, airports: out });
   } catch (err) {
