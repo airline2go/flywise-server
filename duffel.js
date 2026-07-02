@@ -8,9 +8,9 @@
 //    ثانية ويرجّع خطأ سريع بدل ما يخنق السيرفر بطلبات محكوم عليها بالفشل
 // ═══════════════════════════════════════════════════════════════
 
-const env = require('../config/env');
-const log = require('../utils/log');
-const Sentry = require('../clients/sentry');
+const env = require('./env');
+const log = require('./log');
+const Sentry = require('./sentry');
 
 const DUFFEL_TIMEOUT_MS = 20000;
 

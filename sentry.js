@@ -7,7 +7,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 const Sentry = require('@sentry/node');
-const env = require('../config/env');
+const env = require('./env');
 
 if (env.SENTRY_DSN) {
   Sentry.init({

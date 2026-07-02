@@ -5,8 +5,8 @@
 // مسار جديد يلمسها — كل ده لصفحات SEO.
 // ═══════════════════════════════════════════════════════════════
 
-const supa = require('../clients/supabase');
-const log = require('../utils/log');
+const supa = require('./supabase');
+const log = require('./log');
 
 // ─── [ROUTE-PAGES] Distance + haul classification ──────────────
 // Standard great-circle (Haversine) distance between two points,

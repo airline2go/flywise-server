@@ -4,11 +4,11 @@
 // /loyalty/config (قراءة عامة لأرقام الولاء القابلة للتعديل).
 // ═══════════════════════════════════════════════════════════════
 
-const log = require('../utils/log');
-const supa = require('../clients/supabase');
-const rateLimit = require('../middleware/rateLimit');
-const { attachUserIfPresent } = require('../middleware/auth');
-const { getLoyaltyConfig, getOrCreateLoyaltyAccount } = require('../services/loyalty');
+const log = require('./log');
+const supa = require('./supabase');
+const rateLimit = require('./rateLimit');
+const { attachUserIfPresent } = require('./auth');
+const { getLoyaltyConfig, getOrCreateLoyaltyAccount } = require('./loyalty');
 
 module.exports = (app) => {
 

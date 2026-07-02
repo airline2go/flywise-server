@@ -6,12 +6,12 @@
 // الربح، أكواد الخصم، الفواتير، إعدادات الولاء، ومعاينة التسعير.
 // ═══════════════════════════════════════════════════════════════
 
-const env = require('../config/env');
-const log = require('../utils/log');
-const supa = require('../clients/supabase');
-const rateLimit = require('../middleware/rateLimit');
-const { requireAdmin } = require('../middleware/auth');
-const duffel = require('../services/duffel');
+const env = require('./env');
+const log = require('./log');
+const supa = require('./supabase');
+const rateLimit = require('./rateLimit');
+const { requireAdmin } = require('./auth');
+const duffel = require('./duffel');
 const {
   DEFAULT_TICKET_TIERS, DEFAULT_ANCILLARY_TIERS, DEFAULT_INVOICE_CONFIG,
   getAdminConfig, setAdminConfig, clearConfigCacheKeys,
@@ -19,9 +19,9 @@ const {
   markBookingFailuresRead,
   markSyncFailuresRead,
   computeTieredMargin, getTicketProfitTiers, getAncillaryProfitTiers,
-} = require('../services/adminConfig');
-const { getLoyaltyConfig } = require('../services/loyalty');
-const { haversineDistanceKm, classifyHaul, ensureCountryExists, ensureCityExists } = require('../services/routePages');
+} = require('./adminConfig');
+const { getLoyaltyConfig } = require('./loyalty');
+const { haversineDistanceKm, classifyHaul, ensureCountryExists, ensureCityExists } = require('./routePages');
 
 module.exports = (app) => {
 

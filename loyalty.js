@@ -6,8 +6,8 @@
 // (زائر مجهول) أو user_id (مسجّل دخول).
 // ═══════════════════════════════════════════════════════════════
 
-const supa = require('../clients/supabase');
-const log = require('../utils/log');
+const supa = require('./supabase');
+const log = require('./log');
 const { getAdminConfig, computeTieredMargin, getTicketProfitTiers, getAncillaryProfitTiers } = require('./adminConfig');
 
 // ─── [ADMIN-LOYALTY] Server-side loyalty program ───────────────────────

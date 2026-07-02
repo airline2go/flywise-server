@@ -6,7 +6,7 @@
 // تنفيذ الكود اللي بينده عليه).
 // ═══════════════════════════════════════════════════════════════
 
-const supa = require('../clients/supabase');
+const supa = require('./supabase');
 
 function log(level, msg, meta) {
   try {

@@ -6,8 +6,8 @@
 // ويربطه بمعرّف المستخدم، لأي endpoint محتاج يعرف مين اللي بيسأل.
 // ═══════════════════════════════════════════════════════════════
 
-const env = require('../config/env');
-const supa = require('../clients/supabase');
+const env = require('./env');
+const supa = require('./supabase');
 
 function requireAdmin(req, res, next) {
   if (!env.ADMIN_TOKEN) return res.status(503).json({ ok: false, error: 'ADMIN_TOKEN nicht konfiguriert' });

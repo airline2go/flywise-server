@@ -4,8 +4,8 @@
 // الدول، المدن، المطارات، وخريطة الموقع الديناميكية للمسارات.
 // ═══════════════════════════════════════════════════════════════
 
-const log = require('../utils/log');
-const supa = require('../clients/supabase');
+const log = require('./log');
+const supa = require('./supabase');
 
 module.exports = (app) => {
 

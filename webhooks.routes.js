@@ -7,13 +7,13 @@
 // ═══════════════════════════════════════════════════════════════
 
 const express = require('express');
-const env = require('../config/env');
-const log = require('../utils/log');
-const Sentry = require('../clients/sentry');
-const stripe = require('../clients/stripe');
-const supa = require('../clients/supabase');
-const { bookFromSession, inFlight } = require('../services/booking');
-const { recordBookingFailureEvent } = require('../services/adminConfig');
+const env = require('./env');
+const log = require('./log');
+const Sentry = require('./sentry');
+const stripe = require('./stripe');
+const supa = require('./supabase');
+const { bookFromSession, inFlight } = require('./booking');
+const { recordBookingFailureEvent } = require('./adminConfig');
 
 module.exports = (app) => {
 

@@ -7,7 +7,7 @@
 // الملف الأصلي).
 // ═══════════════════════════════════════════════════════════════
 
-const env = require('../config/env');
+const env = require('./env');
 
 let supa = null;
 if (env.SUPABASE_URL && env.SUPABASE_SERVICE_KEY) {

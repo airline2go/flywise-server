@@ -4,7 +4,7 @@
 // كراش)، بالظبط زي سلوك الملف الأصلي.
 // ═══════════════════════════════════════════════════════════════
 
-const env = require('../config/env');
+const env = require('./env');
 
 const stripe = env.STRIPE_SECRET_KEY ? require('stripe')(env.STRIPE_SECRET_KEY) : null;
 

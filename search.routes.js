@@ -5,12 +5,12 @@
 // 5 دقائق)، /debug/raw (تشخيصي، محمي بالأدمن).
 // ═══════════════════════════════════════════════════════════════
 
-const log = require('../utils/log');
-const rateLimit = require('../middleware/rateLimit');
-const { requireAdmin } = require('../middleware/auth');
-const duffel = require('../services/duffel');
-const { getAdminConfig, setAdminConfig, getTicketProfitTiers, computeTieredMargin } = require('../services/adminConfig');
-const { normalizeOffer } = require('../services/normalizeOffer');
+const log = require('./log');
+const rateLimit = require('./rateLimit');
+const { requireAdmin } = require('./auth');
+const duffel = require('./duffel');
+const { getAdminConfig, setAdminConfig, getTicketProfitTiers, computeTieredMargin } = require('./adminConfig');
+const { normalizeOffer } = require('./normalizeOffer');
 
 // [MEMORY-LEAK-FIX] كاش 5 دقائق لبحث المطارات — بينضف نفسه دوري
 // كل 5 دقائق عشان مايتراكمش مصطلحات بحث قديمة للأبد.

@@ -4,14 +4,14 @@
 // (عام، بيفحصه أي زائر)، و/admin/maintenance-mode (محمي بالأدمن).
 // ═══════════════════════════════════════════════════════════════
 
-const env = require('../config/env');
-const log = require('../utils/log');
-const supa = require('../clients/supabase');
-const redis = require('../clients/redis');
-const rateLimit = require('../middleware/rateLimit');
-const { requireAdmin } = require('../middleware/auth');
-const duffel = require('../services/duffel');
-const { getAdminConfig, setAdminConfig } = require('../services/adminConfig');
+const env = require('./env');
+const log = require('./log');
+const supa = require('./supabase');
+const redis = require('./redis');
+const rateLimit = require('./rateLimit');
+const { requireAdmin } = require('./auth');
+const duffel = require('./duffel');
+const { getAdminConfig, setAdminConfig } = require('./adminConfig');
 
 async function checkWithTimeout(fn, ms) {
   return Promise.race([

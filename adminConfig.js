@@ -6,8 +6,8 @@
 // اللي بتظهر كتنبيهات في لوحة الأدمن.
 // ═══════════════════════════════════════════════════════════════
 
-const supa = require('../clients/supabase');
-const log = require('../utils/log');
+const supa = require('./supabase');
+const log = require('./log');
 
 // ─── [ADMIN] admin_config key/value store ──────────────────────────────
 // Used for ticket profit tiers, ancillary (seat/baggage) profit tiers,

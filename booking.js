@@ -9,9 +9,9 @@
 // - كل عمليات القاعدة (bookings, payments) وتطبيق الولاء والإيميل
 // ═══════════════════════════════════════════════════════════════
 
-const supa = require('../clients/supabase');
-const stripe = require('../clients/stripe');
-const log = require('../utils/log');
+const supa = require('./supabase');
+const stripe = require('./stripe');
+const log = require('./log');
 const duffel = require('./duffel');
 const { computeTieredMargin, getTicketProfitTiers, getAncillaryProfitTiers } = require('./adminConfig');
 const { computeLoyaltyDiscount, applyLoyaltyForBooking } = require('./loyalty');

@@ -8,10 +8,10 @@
 // ═══════════════════════════════════════════════════════════════
 
 const zlib = require('zlib');
-const env = require('../config/env');
-const log = require('../utils/log');
-const sanitizeValue = require('../utils/sanitize');
-const { getAdminConfig } = require('../services/adminConfig');
+const env = require('./env');
+const log = require('./log');
+const sanitizeValue = require('./sanitize');
+const { getAdminConfig } = require('./adminConfig');
 
 function applyGlobalMiddleware(app) {
   // 1) Request ID — أول حاجة، عشان كل حاجة بعده تقدر تستخدمه في اللوج

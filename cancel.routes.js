@@ -5,15 +5,15 @@
 // الفعلي + استرداد Stripe متناسب + عكس نقاط الولاء + إيميل تأكيد).
 // ═══════════════════════════════════════════════════════════════
 
-const log = require('../utils/log');
-const Sentry = require('../clients/sentry');
-const stripe = require('../clients/stripe');
-const supa = require('../clients/supabase');
-const rateLimit = require('../middleware/rateLimit');
-const duffel = require('../services/duffel');
-const { recordCancellationEvent, recordSyncFailureEvent } = require('../services/adminConfig');
-const { reverseLoyaltyForBooking } = require('../services/loyalty');
-const { sendCancellationEmail } = require('../services/email');
+const log = require('./log');
+const Sentry = require('./sentry');
+const stripe = require('./stripe');
+const supa = require('./supabase');
+const rateLimit = require('./rateLimit');
+const duffel = require('./duffel');
+const { recordCancellationEvent, recordSyncFailureEvent } = require('./adminConfig');
+const { reverseLoyaltyForBooking } = require('./loyalty');
+const { sendCancellationEmail } = require('./email');
 
 module.exports = (app) => {
 

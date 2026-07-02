@@ -4,8 +4,8 @@
 // computeAuthoritativePricing وقت الدفع الحقيقي).
 // ═══════════════════════════════════════════════════════════════
 
-const rateLimit = require('../middleware/rateLimit');
-const { lookupPromoCode } = require('../services/booking');
+const rateLimit = require('./rateLimit');
+const { lookupPromoCode } = require('./booking');
 
 module.exports = (app) => {
 

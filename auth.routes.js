@@ -5,11 +5,11 @@
 // المستخدم — من السيرفر بمفتاح الخدمة، مش من المتصفح مباشرة).
 // ═══════════════════════════════════════════════════════════════
 
-const log = require('../utils/log');
-const supa = require('../clients/supabase');
-const rateLimit = require('../middleware/rateLimit');
-const { attachUserIfPresent } = require('../middleware/auth');
-const { getOrCreateLoyaltyAccount } = require('../services/loyalty');
+const log = require('./log');
+const supa = require('./supabase');
+const rateLimit = require('./rateLimit');
+const { attachUserIfPresent } = require('./auth');
+const { getOrCreateLoyaltyAccount } = require('./loyalty');
 
 module.exports = (app) => {
 

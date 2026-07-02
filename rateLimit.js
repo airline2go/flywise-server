@@ -10,8 +10,8 @@
 // — عشان كل استخدام موجود في ملفات الراوتات يشتغل من غير أي تعديل.
 // ═══════════════════════════════════════════════════════════════
 
-const redis = require('../clients/redis');
-const log = require('../utils/log');
+const redis = require('./redis');
+const log = require('./log');
 
 const rlStore = new Map(); // مخزن احتياطي (وبرضو المستخدم لما Redis واقع)
 

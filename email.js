@@ -5,8 +5,8 @@
 // الحجز نفسه لازم يستمر حتى لو فشل الإيميل، فالفشل بيتسجل بس.
 // ═══════════════════════════════════════════════════════════════
 
-const env = require('../config/env');
-const log = require('../utils/log');
+const env = require('./env');
+const log = require('./log');
 
 async function sendEmail(to, subject, htmlContent) {
   if (!env.BREVO_API_KEY) { log('warn', 'email_not_configured', { to }); return false; }

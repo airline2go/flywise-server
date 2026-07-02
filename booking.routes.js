@@ -6,19 +6,19 @@
 // بالظبط — نفس المنطق الماليّ الحساس.
 // ═══════════════════════════════════════════════════════════════
 
-const env = require('../config/env');
-const log = require('../utils/log');
-const Sentry = require('../clients/sentry');
-const stripe = require('../clients/stripe');
-const supa = require('../clients/supabase');
-const rateLimit = require('../middleware/rateLimit');
-const { attachUserIfPresent } = require('../middleware/auth');
-const { validate, PASSENGER_SCHEMA } = require('../utils/validate');
-const duffel = require('../services/duffel');
-const { getTicketProfitTiers, getAncillaryProfitTiers, computeTieredMargin, recordBookingFailureEvent } = require('../services/adminConfig');
-const { normalizeOffer } = require('../services/normalizeOffer');
-const { rememberBooking, getPendingBooking, setBookingStatus, getBookingStatus } = require('../services/pendingBookings');
-const { computeAuthoritativePricing, bookFromSession, inFlight } = require('../services/booking');
+const env = require('./env');
+const log = require('./log');
+const Sentry = require('./sentry');
+const stripe = require('./stripe');
+const supa = require('./supabase');
+const rateLimit = require('./rateLimit');
+const { attachUserIfPresent } = require('./auth');
+const { validate, PASSENGER_SCHEMA } = require('./validate');
+const duffel = require('./duffel');
+const { getTicketProfitTiers, getAncillaryProfitTiers, computeTieredMargin, recordBookingFailureEvent } = require('./adminConfig');
+const { normalizeOffer } = require('./normalizeOffer');
+const { rememberBooking, getPendingBooking, setBookingStatus, getBookingStatus } = require('./pendingBookings');
+const { computeAuthoritativePricing, bookFromSession, inFlight } = require('./booking');
 
 module.exports = (app) => {
 

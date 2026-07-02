@@ -4,10 +4,10 @@
 // تنبيهات المستخدم، حذف/تعطيل، وفحص السعر الحي لمسار محفوظ.
 // ═══════════════════════════════════════════════════════════════
 
-const log = require('../utils/log');
-const supa = require('../clients/supabase');
-const rateLimit = require('../middleware/rateLimit');
-const duffel = require('../services/duffel');
+const log = require('./log');
+const supa = require('./supabase');
+const rateLimit = require('./rateLimit');
+const duffel = require('./duffel');
 
 module.exports = (app) => {
 

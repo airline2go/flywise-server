@@ -8,8 +8,8 @@
 // الفرونت إند يقدر يستكمل الحالة بعد ريفريش أو قفل المتصفح.
 // ═══════════════════════════════════════════════════════════════
 
-const supa = require('../clients/supabase');
-const log = require('../utils/log');
+const supa = require('./supabase');
+const log = require('./log');
 
 
 // survive restarts and work across instances; falls back to in-memory if

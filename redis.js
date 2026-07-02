@@ -5,8 +5,8 @@
 // المحلية بدل ما توقف. الموقع أبداً معتمدش على Redis عشان يفضل شغال.
 // ═══════════════════════════════════════════════════════════════
 
-const env = require('../config/env');
-const log = require('../utils/log');
+const env = require('./env');
+const log = require('./log');
 
 let redis = null;
 if (env.REDIS_URL) {

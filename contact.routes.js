@@ -3,10 +3,10 @@
 // نموذج التواصل — بيبعت الرسالة فعلياً لإيميل الدعم عن طريق Brevo.
 // ═══════════════════════════════════════════════════════════════
 
-const env = require('../config/env');
-const log = require('../utils/log');
-const rateLimit = require('../middleware/rateLimit');
-const { sendEmail } = require('../services/email');
+const env = require('./env');
+const log = require('./log');
+const rateLimit = require('./rateLimit');
+const { sendEmail } = require('./email');
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));

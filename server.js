@@ -22,13 +22,13 @@
  */
 
 // ─── [1] Sentry — أول حاجة تتحمّل ─────────────────────────
-const Sentry = require('./src/clients/sentry');
+const Sentry = require('./sentry');
 
 const express = require('express');
 const app = express();
-const env = require('./src/config/env');
-const log = require('./src/utils/log');
-const supa = require('./src/clients/supabase');
+const env = require('./env');
+const log = require('./log');
+const supa = require('./supabase');
 
 // ─── [2] حماية الكراش ──────────────────────────────────────
 process.on('unhandledRejection', (reason, promise) => {
@@ -69,24 +69,24 @@ process.on('uncaughtException', (err) => {
 })();
 
 // ─── [4] Webhooks — لازم قبل express.json() ────────────────
-require('./src/routes/webhooks.routes')(app);
+require('./webhooks.routes')(app);
 
 // ─── [5] express.json() + الـ middleware العام ─────────────
 app.use(express.json({ limit: '256kb' }));
-require('./src/middleware/globalMiddleware')(app);
+require('./globalMiddleware')(app);
 
 // ─── [6] باقي كل الروتات ────────────────────────────────────
-require('./src/routes/health.routes')(app);
-require('./src/routes/search.routes')(app);
-require('./src/routes/booking.routes')(app);
-require('./src/routes/cancel.routes')(app);
-require('./src/routes/alerts.routes')(app);
-require('./src/routes/contact.routes')(app);
-require('./src/routes/auth.routes')(app);
-require('./src/routes/loyalty.routes')(app);
-require('./src/routes/promo.routes')(app);
-require('./src/routes/content.routes')(app);
-require('./src/routes/admin.routes')(app);
+require('./health.routes')(app);
+require('./search.routes')(app);
+require('./booking.routes')(app);
+require('./cancel.routes')(app);
+require('./alerts.routes')(app);
+require('./contact.routes')(app);
+require('./auth.routes')(app);
+require('./loyalty.routes')(app);
+require('./promo.routes')(app);
+require('./content.routes')(app);
+require('./admin.routes')(app);
 
 // ─── [7] معالج الأخطاء الموحّد ───────────────────────────────
 if (env.SENTRY_DSN) {
