@@ -53,7 +53,7 @@ app.get('/sitemap-routes.xml', async (req, res) => {
 
     const urls = (data || []).map((r) => {
       const lastmod = new Date(r.updated_at || Date.now()).toISOString().slice(0, 10);
-      return `  <url>\n    <loc>https://airpiv.com/flight-route.html?slug=${encodeURIComponent(r.slug)}</loc>\n    <lastmod>${lastmod}</lastmod>\n    <changefreq>weekly</changefreq>\n    <priority>0.7</priority>\n  </url>`;
+      return `  <url>\n    <loc>https://airpiv.com/flights/${encodeURIComponent(r.slug)}</loc>\n    <lastmod>${lastmod}</lastmod>\n    <changefreq>weekly</changefreq>\n    <priority>0.7</priority>\n  </url>`;
     }).join('\n');
 
     const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>`;
