@@ -340,7 +340,7 @@ app.get('/admin/route-pages', requireAdmin, async (req, res) => {
     const to = from + limit - 1;
 
     let query = supa.from('route_pages').select('*', { count: 'exact' });
-    if (statusFilter === 'published' || statusFilter === 'draft') {
+    if (statusFilter === 'published' || statusFilter === 'draft' || statusFilter === 'dead') {
       query = query.eq('status', statusFilter);
     }
     if (q) {
@@ -394,12 +394,18 @@ app.post('/admin/route-pages/bulk-create', requireAdmin, async (req, res) => {
     }
 
     // فحص الموجود فعلاً بطلب واحد بدل ما نسأل عن كل زوج لوحده
-    const { data: existingRoutes, error: existErr } = await supa.from('route_pages').select('origin_iata, destination_iata');
+    const { data: existingRoutes, error: existErr } = await supa.from('route_pages').select('origin_iata, destination_iata, slug');
     if (existErr) throw new Error(existErr.message);
     const existingSet = new Set((existingRoutes || []).map((r) => r.origin_iata + '_' + r.destination_iata));
 
     const toInsert = [];
-    const usedSlugs = new Set();
+    // [SLUG-DUPLICATE-FIX] كانت بتتأكد بس من الروابط اللي اتولدت جوه
+    // نفس الدفعة الحالية — لو رابط بنفس الاسم موجود بالفعل من دفعة
+    // سابقة أو مسار اتضاف يدوي قبل كده، السيرفر كان بيحاول يعمل نفس
+    // الاسم تاني ويفشل بالكامل برسالة قاعدة بيانات مش مفهومة، بدل ما
+    // يتجاهل المسار ده بهدوء ويكمل الباقي. دلوقتي بتبدأ من كل الروابط
+    // الموجودة فعلاً في قاعدة البيانات كاملة، مش من الصفر.
+    const usedSlugs = new Set((existingRoutes || []).map((r) => r.slug));
     let skippedExisting = 0;
     for (const [o, d] of pairs) {
       const oCode = o.code.toUpperCase(), dCode = d.code.toUpperCase();
@@ -437,11 +443,97 @@ app.post('/admin/route-pages/bulk-create', requireAdmin, async (req, res) => {
       return res.json({ ok: true, created: 0, skippedExisting, message: 'كل التوليفات دي موجودة بالفعل — مفيش حاجة جديدة اتعملت' });
     }
 
-    const { data: inserted, error: insertErr } = await supa.from('route_pages').insert(toInsert).select('id');
+    // [SLUG-DUPLICATE-FIX] upsert مع ignoreDuplicates بدل insert العادي —
+    // حتى لو حصل تعارض نادر (زي فتح الإنشاء بالجملة مرتين في نفس
+    // اللحظة بالظبط)، قاعدة البيانات نفسها بتتجاهل الصف المكرر بهدوء
+    // بدل ما تفشّل الدفعة كلها برسالة خطأ. onConflict:'slug' لأن ده
+    // العمود اللي عليه قيد التفرد (route_pages_slug_key).
+    const { data: inserted, error: insertErr } = await supa.from('route_pages')
+      .upsert(toInsert, { onConflict: 'slug', ignoreDuplicates: true })
+      .select('id');
     if (insertErr) throw new Error(insertErr.message);
 
     log('info', 'bulk_route_pages_created', { count: inserted.length, skippedExisting });
     res.json({ ok: true, created: inserted.length, skippedExisting, totalPairs: pairs.length });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// [DEAD-ROUTES-HEALTH-CHECK] بيفحص دفعة صغيرة من المسارات (10 في
+// المرة) عن طريق سؤال Duffel فعلياً — مش من الكاش — هل فيه رحلات
+// حقيقية على المسار ده ولا لأ. أي مسار مفيهوش رحلات خالص بيتحوّل
+// لحالة "dead" تلقائياً (بيختفي من الموقع للزوار فوراً، لأن endpoint
+// عرض المسار للزوار بيطلب status=published بس). دفعة صغيرة عمداً —
+// عشان الطلب الواحد مايستغرقش وقت طويل يخلي المتصفح يستنى أو الطلب
+// يفشل بـ timeout؛ الواجهة الأمامية هي اللي بتنده على الـ endpoint
+// ده بشكل متكرر لحد ما كل المسارات تتفحص.
+app.post('/admin/route-pages/health-check-batch', requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const BATCH_SIZE = 10;
+
+    // نبدأ بالمسارات اللي لسه ما اتفحصتش خالص (NULL)، وبعدين الأقدم
+    // فحصاً — مش دايماً نفس الأوائل كل مرة.
+    const { data: batch, error: fetchErr } = await supa.from('route_pages')
+      .select('id, origin_iata, destination_iata, status')
+      .neq('status', 'dead')
+      .order('last_health_check_at', { ascending: true, nullsFirst: true })
+      .limit(BATCH_SIZE);
+    if (fetchErr) throw new Error(fetchErr.message);
+
+    if (!batch || !batch.length) {
+      const { count } = await supa.from('route_pages').select('id', { count: 'exact', head: true }).neq('status', 'dead');
+      return res.json({ ok: true, checked: 0, dead: 0, remaining: 0, message: 'كل المسارات اتفحصت بالفعل' });
+    }
+
+    const searchDate = new Date();
+    searchDate.setDate(searchDate.getDate() + 21);
+    const departure_date = searchDate.toISOString().slice(0, 10);
+
+    async function checkOne(route) {
+      try {
+        const result = await duffel('POST', '/air/offer_requests?return_offers=true', {
+          data: {
+            slices: [{ origin: route.origin_iata, destination: route.destination_iata, departure_date }],
+            passengers: [{ type: 'adult' }],
+            cabin_class: 'economy',
+          },
+        });
+        const hasOffers = !!(result.data?.offers && result.data.offers.length);
+        return { id: route.id, alive: hasOffers };
+      } catch (e) {
+        // [FAIL-SAFE] خطأ في الاتصال بـ Duffel (مش "مفيش رحلات" فعلياً)
+        // — منسيبش المسار يتعلّم "ميت" بسبب مشكلة شبكة مؤقتة، بنسيبه
+        // زي ما هو ونحاول تاني في الدفعة الجاية.
+        log('warn', 'health_check_error', { route_id: route.id, error: e.message });
+        return { id: route.id, alive: null };
+      }
+    }
+
+    // دفعات فرعية صغيرة (3 في المرة) — نفس أسلوب تحميل أسعار الصفحة
+    // الرئيسية، عشان مانضربش Duffel بـ10 طلبات مرة واحدة بالظبط.
+    const results = [];
+    for (let i = 0; i < batch.length; i += 3) {
+      const sub = batch.slice(i, i + 3);
+      const subResults = await Promise.all(sub.map(checkOne));
+      results.push(...subResults);
+    }
+
+    let deadCount = 0;
+    const now = new Date().toISOString();
+    for (const r of results) {
+      if (r.alive === null) continue; // خطأ مؤقت — نسيبه من غير تحديث، هيتحاول تاني بعدين
+      const update = { last_health_check_at: now };
+      if (!r.alive) { update.status = 'dead'; deadCount++; }
+      await supa.from('route_pages').update(update).eq('id', r.id);
+    }
+
+    const { count: remaining } = await supa.from('route_pages').select('id', { count: 'exact', head: true }).neq('status', 'dead').is('last_health_check_at', null);
+    const { count: remainingTotal } = await supa.from('route_pages').select('id', { count: 'exact', head: true }).neq('status', 'dead');
+
+    log('info', 'route_health_check_batch', { checked: results.length, dead: deadCount });
+    res.json({ ok: true, checked: results.length, dead: deadCount, remaining: remaining || 0, remainingTotal: remainingTotal || 0 });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
