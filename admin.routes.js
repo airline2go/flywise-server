@@ -733,6 +733,35 @@ app.post('/admin/route-pages/publish-all-drafts', requireAdmin, async (req, res)
   }
 });
 
+// [RESET-HEALTH-CHECK] بيمسح تاريخ الفحص (last_health_check_at) لكل
+// المسارات، ويرجّع أي مسار "ميت" لحالة "مسودة" — عشان يتفحصوا من
+// الأول. **مهم جداً تستخدمه بعد ما تفعّل Duffel في وضع Production**:
+// في وضع Test، Duffel بيرجّع عروض وهمية (شركة طيران اختبارية) حتى
+// للمسارات اللي مفيهاش رحلات حقيقية خالص، فأي فحص اتعمل في وضع Test
+// نتيجته مش موثوقة — وبما إن الأداة مصممة عمداً متفحصش نفس المسار
+// مرتين، لازم تصفير الفحوصات القديمة يدوياً بعد التفعيل عشان الفحص
+// الجديد يبقى حقيقي 100%.
+app.post('/admin/route-pages/reset-health-checks', requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+
+    const { error: clearErr, count: clearedCount } = await supa.from('route_pages')
+      .update({ last_health_check_at: null }, { count: 'exact' })
+      .not('last_health_check_at', 'is', null);
+    if (clearErr) throw new Error(clearErr.message);
+
+    const { error: reviveErr, count: revivedCount } = await supa.from('route_pages')
+      .update({ status: 'draft' }, { count: 'exact' })
+      .eq('status', 'dead');
+    if (reviveErr) throw new Error(reviveErr.message);
+
+    log('info', 'route_health_checks_reset', { cleared: clearedCount, revived: revivedCount });
+    res.json({ ok: true, cleared: clearedCount || 0, revived: revivedCount || 0 });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.delete('/admin/route-pages/:id', requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
