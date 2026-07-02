@@ -5,12 +5,12 @@
 // 5 دقائق)، /debug/raw (تشخيصي، محمي بالأدمن).
 // ═══════════════════════════════════════════════════════════════
 
-const log = require('./log');
-const rateLimit = require('./rateLimit');
-const { requireAdmin } = require('./auth');
-const duffel = require('./duffel');
-const { getAdminConfig, setAdminConfig, getTicketProfitTiers, computeTieredMargin } = require('./adminConfig');
-const { normalizeOffer } = require('./normalizeOffer');
+const log = require('../utils/log');
+const rateLimit = require('../middleware/rateLimit');
+const { requireAdmin } = require('../middleware/auth');
+const duffel = require('../services/duffel');
+const { getAdminConfig, setAdminConfig, getTicketProfitTiers, computeTieredMargin } = require('../services/adminConfig');
+const { normalizeOffer } = require('../services/normalizeOffer');
 
 // [MEMORY-LEAK-FIX] كاش 5 دقائق لبحث المطارات — بينضف نفسه دوري
 // كل 5 دقائق عشان مايتراكمش مصطلحات بحث قديمة للأبد.
@@ -212,7 +212,16 @@ app.get('/search/airports', rateLimit('airports', 60, 60000), async (req, res) =
 
     const out = [];
     const seen = new Set();
-    const push = (o) => { if (o.code && !seen.has(o.code)) { seen.add(o.code); out.push(o); } };
+    // [DEDUP-TYPE-FIX] Was keyed by `o.code` alone — a city entry from
+    // Duffel shares the exact same IATA code as its own main airport
+    // (e.g. city "MUC" and airport "MUC" for Munich). Since the city
+    // entry got pushed first, the real airport entry (with real lat/lng)
+    // was silently rejected as a "duplicate" — this is exactly why
+    // searching "Munich" or "Berlin" could return the city placeholder
+    // with no usable coordinates instead of the real airport. Keying by
+    // `type + ':' + code` lets a city and an airport with the same code
+    // coexist as two distinct, valid results.
+    const push = (o) => { const k = o.type + ':' + o.code; if (o.code && !seen.has(k)) { seen.add(k); out.push(o); } };
     (result.data || []).forEach((p) => {
       if (p.type === 'city') {
         // [ROUTE-PAGES] Cities deliberately get no lat/lng — a city can
