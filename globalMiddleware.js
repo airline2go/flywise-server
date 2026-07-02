@@ -86,10 +86,19 @@ function applyGlobalMiddleware(app) {
   });
 
   // 5) [#7] تسجيل كل طلب
+  // [SLOW-QUERY-MONITOR] أي طلب بياخد أكتر من ثانيتين (بحث، سعر، أو
+  // استعلام قاعدة بيانات بطيء) بيتسجل بمستوى "warn" بدل "req" العادي —
+  // يعني تقدر تفلتر اللوج على "slow_request" بس ولاقي كل الحالات
+  // البطيئة الحقيقية من غير ما تدوّر وسط آلاف السطور العادية.
+  const SLOW_REQUEST_THRESHOLD_MS = 2000;
   app.use((req, res, next) => {
     const start = Date.now();
     res.on('finish', () => {
-      log('req', req.method + ' ' + req.path, { status: res.statusCode, ms: Date.now() - start, reqId: req.id });
+      const ms = Date.now() - start;
+      log('req', req.method + ' ' + req.path, { status: res.statusCode, ms, reqId: req.id });
+      if (ms > SLOW_REQUEST_THRESHOLD_MS) {
+        log('warn', 'slow_request', { method: req.method, path: req.path, ms, reqId: req.id });
+      }
     });
     next();
   });

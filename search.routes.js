@@ -6,6 +6,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 const log = require('./log');
+const redis = require('./redis');
 const rateLimit = require('./rateLimit');
 const { requireAdmin } = require('./auth');
 const duffel = require('./duffel');
@@ -19,6 +20,29 @@ setInterval(() => {
   const cutoff = Date.now() - 300000;
   for (const [k, v] of _apCache) { if (v.t < cutoff) _apCache.delete(k); }
 }, 300000).unref();
+
+// [LIVE-TRUST-SIGNAL] عدّاد حقيقي 100% — بيزيد قيمته مرة واحدة بس كل
+// مرة السيرفر فعلاً بيسأل Duffel عن سعر جديد (مش عند كل طلب من
+// المتصفح، وليس لما الرد جاي من الكاش). مفتاح Redis بينتهي تلقائياً
+// بعد 25 ساعة (يعني بيتصفّر لوحده كل يوم من غير أي مهمة مجدولة
+// منفصلة). لو Redis مش متاح، الدالة بترجع null بهدوء والواجهة
+// الأمامية بتخفي القسم ده تماماً بدل ما تعرض صفر أو رقم مختلق.
+async function incrementDailyPriceCheckCounter() {
+  if (!redis || redis.status !== 'ready') return;
+  try {
+    const key = 'daily_price_checks:' + new Date().toISOString().slice(0, 10);
+    const count = await redis.incr(key);
+    if (count === 1) await redis.expire(key, 25 * 60 * 60);
+  } catch (e) { /* عداد تجميلي — أي فشل هنا أبداً مايوقفش السعر نفسه */ }
+}
+async function getDailyPriceCheckCount() {
+  if (!redis || redis.status !== 'ready') return null;
+  try {
+    const key = 'daily_price_checks:' + new Date().toISOString().slice(0, 10);
+    const v = await redis.get(key);
+    return v ? parseInt(v, 10) : 0;
+  } catch (e) { return null; }
+}
 
 module.exports = (app) => {
 app.get('/debug/raw', requireAdmin, rateLimit('pay', 10, 60000), async (req, res) => {
@@ -60,6 +84,18 @@ app.get('/debug/raw', requireAdmin, rateLimit('pay', 10, 60000), async (req, res
   }
 });
 
+// [SEARCH-CACHE] كاش قصير جداً (90 ثانية بس) لنفس البحث بالظبط —
+// بيحمي من حالات زي دبل كليك على زرار البحث، أو أكتر من مستخدم
+// بيدوّر على نفس المسار/التاريخ في نفس اللحظة تقريباً، من غير ما
+// يضربوا Duffel مرتين لنفس الحاجة بالظبط. المدة قصيرة جداً عمداً —
+// عروض Duffel بتتغيّر وبتنتهي صلاحيتها، فمكانش آمن نخليها كاش
+// طويل زي أسعار route-price التقديرية.
+const _searchCache = new Map();
+setInterval(() => {
+  const cutoff = Date.now() - 90000;
+  for (const [k, v] of _searchCache) { if (v.t < cutoff) _searchCache.delete(k); }
+}, 90000).unref();
+
 app.post('/search', rateLimit('search', 30, 60000), async (req, res) => {
   try {
     const {
@@ -68,6 +104,12 @@ app.post('/search', rateLimit('search', 30, 60000), async (req, res) => {
       adults = 1, children = 0, infants = 0,
       slices: bodySlices,
     } = req.body;
+
+    const searchCacheKey = JSON.stringify({ origin, destination, departure_date, return_date, cabin_class, adults, children, infants, bodySlices });
+    const cachedSearch = _searchCache.get(searchCacheKey);
+    if (cachedSearch && (Date.now() - cachedSearch.t) < 90000) {
+      return res.json(cachedSearch.data);
+    }
 
     const passengers = [];
     for (let i = 0; i < adults; i++) passengers.push({ type: 'adult' });
@@ -102,7 +144,10 @@ app.post('/search', rateLimit('search', 30, 60000), async (req, res) => {
     const ticketTiers = await getTicketProfitTiers();
     const offers = (result.data?.offers || []).map((o) => normalizeOffer(o, ticketTiers));
 
-    res.json({ ok: true, offer_request_id: result.data?.id, offers, total: offers.length });
+    const responseData = { ok: true, offer_request_id: result.data?.id, offers, total: offers.length };
+    _searchCache.set(searchCacheKey, { t: Date.now(), data: responseData });
+    res.json(responseData);
+    incrementDailyPriceCheckCounter(); // بعد إرسال الرد — أبداً ميأخرش وقت استجابة البحث نفسه
 
   } catch (err) {
     res.status(err.status || 500).json({ ok: false, error: err.message, details: err.details });
@@ -114,7 +159,14 @@ app.get('/route-price', rateLimit('route-price', 60, 60000), async (req, res) =>
     const { from, to } = req.query;
     if (!from || !to) return res.status(400).json({ ok: false, error: 'from und to sind erforderlich' });
 
-    const cacheKey = 'route_price_' + from.toUpperCase() + '_' + to.toUpperCase();
+    // [LAST-MINUTE-SUPPORT] اختياري تماماً — لو ماتبعتش days_ahead، السلوك
+    // زي ما كان بالظبط (21 يوم). لو اتبعت (زي صفحة Last Minute اللي
+    // بتحتاج تاريخ قريب حقيقي فعلاً، مش تقديري بعيد)، بيتقيّد بين يوم
+    // واحد و90 يوم عشان مايتستخدمش لإرهاق Duffel بتواريخ عشوائية.
+    // مفتاح كاش منفصل تماماً — سعر تاريخ قريب مختلف فعلياً عن السعر
+    // التقديري العادي، مش بديل له.
+    const daysAhead = req.query.days_ahead ? Math.max(1, Math.min(90, parseInt(req.query.days_ahead, 10) || 21)) : 21;
+    const cacheKey = 'route_price_' + from.toUpperCase() + '_' + to.toUpperCase() + (daysAhead !== 21 ? '_d' + daysAhead : '');
     const cached = await getAdminConfig(cacheKey, null);
     // [PRICE-CACHE-EXPAND] كانت 6 ساعات — يعني كل يوم بيحصل 4 لحظات
     // "cache miss جماعي" (كل الوجهات الاثنتي عشر بتتطلب مرة واحدة مع
@@ -129,14 +181,16 @@ app.get('/route-price', rateLimit('route-price', 60, 60000), async (req, res) =>
       // than the one that actually produced this price.
       // [ROUTE-INSIGHTS] insights defaults to null for entries cached
       // before this field existed — safe fallback, never a crash.
-      return res.json({ ok: true, price: cached.price, currency: cached.currency, departure_date: cached.departure_date, insights: cached.insights || null, cached: true });
+      const checksToday = await getDailyPriceCheckCount();
+      return res.json({ ok: true, price: cached.price, currency: cached.currency, departure_date: cached.departure_date, insights: cached.insights || null, cached: true, checksToday, checkedAt: cached.fetchedAt });
     }
 
     // A representative near-future date — NOT today, which would surface
     // artificially high last-minute fares that don't reflect a typical
-    // "from" price for the route.
+    // "from" price for the route. (Unless days_ahead was explicitly
+    // requested — then that IS the point, e.g. the Last Minute page.)
     const searchDate = new Date();
-    searchDate.setDate(searchDate.getDate() + 21);
+    searchDate.setDate(searchDate.getDate() + daysAhead);
     const departure_date = searchDate.toISOString().slice(0, 10);
 
     const result = await duffel('POST', '/air/offer_requests?return_offers=true', {
@@ -194,7 +248,9 @@ app.get('/route-price', rateLimit('route-price', 60, 60000), async (req, res) =>
     } : null;
 
     await setAdminConfig(cacheKey, { price: cheapest, currency: offers[0].total_currency || 'EUR', departure_date, insights, fetchedAt: new Date().toISOString() });
-    res.json({ ok: true, price: cheapest, currency: offers[0].total_currency || 'EUR', departure_date, insights, cached: false });
+    await incrementDailyPriceCheckCounter();
+    const checksToday = await getDailyPriceCheckCount();
+    res.json({ ok: true, price: cheapest, currency: offers[0].total_currency || 'EUR', departure_date, insights, cached: false, checksToday, checkedAt: new Date().toISOString() });
   } catch (err) {
     // Fail soft — a route page should still render (without a price) if
     // Duffel is briefly unavailable, never show a broken page.
