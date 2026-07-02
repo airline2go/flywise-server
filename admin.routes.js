@@ -12,6 +12,7 @@ const supa = require('./supabase');
 const rateLimit = require('./rateLimit');
 const { requireAdmin } = require('./auth');
 const duffel = require('./duffel');
+const { duffelAttempt } = require('./duffel');
 const {
   DEFAULT_TICKET_TIERS, DEFAULT_ANCILLARY_TIERS, DEFAULT_INVOICE_CONFIG,
   getAdminConfig, setAdminConfig, clearConfigCacheKeys,
@@ -473,18 +474,21 @@ app.post('/admin/route-pages/health-check-batch', requireAdmin, async (req, res)
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const BATCH_SIZE = 10;
 
-    // نبدأ بالمسارات اللي لسه ما اتفحصتش خالص (NULL)، وبعدين الأقدم
-    // فحصاً — مش دايماً نفس الأوائل كل مرة.
+    // [ONLY-UNCHECKED-FIX] بس المسارات اللي معندهاش last_health_check_at
+    // خالص (NULL) — أي مسار اتفحص قبل كده وطلع سليم، أبداً مش هيترجع
+    // يتفحص تاني في أي تشغيل جاي، مهما كان بعيد. المسارات "الميتة"
+    // مستبعدة أصلاً (status != dead) فمش هتترجع تتفحص تاني هي كمان.
+    // يعني تشغيل الأداة دي كذا مرة على مدار الوقت آمن 100% — هتفحص
+    // بس اللي جديد فعلاً (زي مسارات اتضافت بعدين بالإنشاء بالجملة).
     const { data: batch, error: fetchErr } = await supa.from('route_pages')
       .select('id, origin_iata, destination_iata, status')
       .neq('status', 'dead')
-      .order('last_health_check_at', { ascending: true, nullsFirst: true })
+      .is('last_health_check_at', null)
       .limit(BATCH_SIZE);
     if (fetchErr) throw new Error(fetchErr.message);
 
     if (!batch || !batch.length) {
-      const { count } = await supa.from('route_pages').select('id', { count: 'exact', head: true }).neq('status', 'dead');
-      return res.json({ ok: true, checked: 0, dead: 0, remaining: 0, message: 'كل المسارات اتفحصت بالفعل' });
+      return res.json({ ok: true, checked: 0, dead: 0, remaining: 0, message: 'كل المسارات اتفحصت بالفعل — مفيش مسارات جديدة محتاجة فحص' });
     }
 
     const searchDate = new Date();
@@ -493,7 +497,11 @@ app.post('/admin/route-pages/health-check-batch', requireAdmin, async (req, res)
 
     async function checkOne(route) {
       try {
-        const result = await duffel('POST', '/air/offer_requests?return_offers=true', {
+        // [HEALTH-CHECK-ISOLATION] duffelAttempt مباشرة، مش duffel() —
+        // عشان فشل مسار فاضي (طبيعي جداً هنا) مايتسجّلش على الـ
+        // circuit breaker المشترك ويوقف الخدمة عن عملاء حقيقيين
+        // بيدوروا في نفس اللحظة.
+        const result = await duffelAttempt('POST', '/air/offer_requests?return_offers=true', {
           data: {
             slices: [{ origin: route.origin_iata, destination: route.destination_iata, departure_date }],
             passengers: [{ type: 'adult' }],
@@ -511,13 +519,16 @@ app.post('/admin/route-pages/health-check-batch', requireAdmin, async (req, res)
       }
     }
 
-    // دفعات فرعية صغيرة (3 في المرة) — نفس أسلوب تحميل أسعار الصفحة
-    // الرئيسية، عشان مانضربش Duffel بـ10 طلبات مرة واحدة بالظبط.
+    // [RATE-LIMIT-FIX] كانت 3 متزامنين من غير أي فاصل — ده اللي ضرب
+    // Duffel بسرعة كبيرة وشغّل الـ circuit breaker. دلوقتي 2 بس في
+    // المرة، مع فاصل نص ثانية بين كل دفعة فرعية — أبطأ شوية بس أأمن
+    // بكتير على استقرار الموقع للعملاء الحقيقيين.
     const results = [];
-    for (let i = 0; i < batch.length; i += 3) {
-      const sub = batch.slice(i, i + 3);
+    for (let i = 0; i < batch.length; i += 2) {
+      const sub = batch.slice(i, i + 2);
       const subResults = await Promise.all(sub.map(checkOne));
       results.push(...subResults);
+      if (i + 2 < batch.length) await new Promise((r) => setTimeout(r, 500));
     }
 
     let deadCount = 0;

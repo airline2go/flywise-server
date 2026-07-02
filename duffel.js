@@ -138,3 +138,10 @@ function getDuffelCircuitStatus() {
 
 module.exports = duffel;
 module.exports.getDuffelCircuitStatus = getDuffelCircuitStatus;
+// [HEALTH-CHECK-ISOLATION] duffelAttempt بيعمل نفس الطلب (بحماية
+// timeout) بس من غير ما يسجّل نجاح/فشل على الـ circuit breaker
+// المشترك — مخصص لأدوات التشخيص الإدارية (زي فحص صحة المسارات) اللي
+// طبيعي جداً تقابل مسارات فاضية أو أخطاء متكررة، وده مش لازم يتفسّر
+// كـ"Duffel واقع" ويوقف الخدمة عن العملاء الحقيقيين اللي بيدوروا في
+// نفس اللحظة.
+module.exports.duffelAttempt = duffelAttempt;
