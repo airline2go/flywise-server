@@ -5,12 +5,12 @@
 // 5 دقائق)، /debug/raw (تشخيصي، محمي بالأدمن).
 // ═══════════════════════════════════════════════════════════════
 
-const log = require('../utils/log');
-const rateLimit = require('../middleware/rateLimit');
-const { requireAdmin } = require('../middleware/auth');
-const duffel = require('../services/duffel');
-const { getAdminConfig, setAdminConfig, getTicketProfitTiers, computeTieredMargin } = require('../services/adminConfig');
-const { normalizeOffer } = require('../services/normalizeOffer');
+const log = require('./log');
+const rateLimit = require('./rateLimit');
+const { requireAdmin } = require('./auth');
+const duffel = require('./duffel');
+const { getAdminConfig, setAdminConfig, getTicketProfitTiers, computeTieredMargin } = require('./adminConfig');
+const { normalizeOffer } = require('./normalizeOffer');
 
 // [MEMORY-LEAK-FIX] كاش 5 دقائق لبحث المطارات — بينضف نفسه دوري
 // كل 5 دقائق عشان مايتراكمش مصطلحات بحث قديمة للأبد.
@@ -116,7 +116,13 @@ app.get('/route-price', rateLimit('route-price', 60, 60000), async (req, res) =>
 
     const cacheKey = 'route_price_' + from.toUpperCase() + '_' + to.toUpperCase();
     const cached = await getAdminConfig(cacheKey, null);
-    if (cached && cached.fetchedAt && (Date.now() - new Date(cached.fetchedAt).getTime()) < 6 * 60 * 60 * 1000) {
+    // [PRICE-CACHE-EXPAND] كانت 6 ساعات — يعني كل يوم بيحصل 4 لحظات
+    // "cache miss جماعي" (كل الوجهات الاثنتي عشر بتتطلب مرة واحدة مع
+    // بعض من Duffel، كل طلب بياخد 2-3.5 ثانية وبيتباطأ كل ما الطلبات
+    // المتزامنة زادت). سعر "ابتداءً من" تقديري أصلاً، مش سعر لحظي دقيق
+    // للعميل — مش محتاج يتحدث كل 6 ساعات، 24 ساعة كافية جداً وبتقلل
+    // لحظات الازدحام دي لمرة واحدة يومياً بدل 4.
+    if (cached && cached.fetchedAt && (Date.now() - new Date(cached.fetchedAt).getTime()) < 24 * 60 * 60 * 1000) {
       // [DATE-MATCH-FIX] Return the EXACT date this cached price was
       // computed for — never recomputed as "today + 21" on a cache hit,
       // which could point a few hours/days later to a different date
