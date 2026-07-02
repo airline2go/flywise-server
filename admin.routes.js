@@ -299,12 +299,149 @@ app.post('/admin/route-pages/backfill-locations', requireAdmin, async (req, res)
   }
 });
 
+// [MISSING-ROUTES-MATRIX] بترجع بس المسارات الموجودة فعلاً ضمن مجموعة
+// مطارات محددة (مش كل قاعدة البيانات) — الفرونت إند هو اللي بيقارن
+// دي مع كل التوليفات الممكنة نظرياً عشان يوري "مين موجود ومين ناقص".
+// محدودة بـ 40 كود كحد أقصى (40×39=1560 توليفة ممكنة) عشان الجدول
+// يفضل قابل للقراءة فعلياً على الشاشة.
+app.get('/admin/route-pages/matrix', requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const codes = (req.query.codes || '').split(',').map((c) => c.trim().toUpperCase()).filter(Boolean);
+    if (codes.length < 2) return res.status(400).json({ ok: false, error: 'محتاج كودين على الأقل' });
+    if (codes.length > 40) return res.status(400).json({ ok: false, error: 'الحد الأقصى 40 مطار للمصفوفة الواحدة' });
+
+    const { data, error } = await supa.from('route_pages')
+      .select('origin_iata, destination_iata, status, slug')
+      .in('origin_iata', codes)
+      .in('destination_iata', codes);
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, existing: data || [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// [ADMIN-SCALE-FIX] كانت بتجيب كل المسارات دفعة واحدة (select('*') من
+// غير أي حد أقصى) — مع آلاف المسارات ده هيبقى رد ضخم بطيء، والمتصفح
+// هيتجمد وهو بيرسم آلاف الصفوف مرة واحدة. دلوقتي:
+// - `q`: بحث نصي على اسم المدينة (مصدر أو وجهة) أو كود IATA
+// - `status`: فلترة (published/draft) — اختياري
+// - `page`, `limit`: صفحات حقيقية من قاعدة البيانات (مش كل شيء ثم قص من الفرونت إند)
+// النتيجة برضو بترجع `total` عشان الواجهة تقدر تبني أرقام الصفحات.
 app.get('/admin/route-pages', requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { data, error } = await supa.from('route_pages').select('*').order('created_at', { ascending: false });
+    const q = (req.query.q || '').trim();
+    const statusFilter = req.query.status;
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const from = (page - 1) * limit;
+    const to = from + limit - 1;
+
+    let query = supa.from('route_pages').select('*', { count: 'exact' });
+    if (statusFilter === 'published' || statusFilter === 'draft') {
+      query = query.eq('status', statusFilter);
+    }
+    if (q) {
+      // بحث على أي عمود من الخمسة دول — يغطي البحث بالاسم أو بكود المطار
+      const esc = q.replace(/[%_]/g, '\\$&');
+      query = query.or(
+        `origin_city.ilike.%${esc}%,destination_city.ilike.%${esc}%,origin_iata.ilike.%${esc}%,destination_iata.ilike.%${esc}%,slug.ilike.%${esc}%`
+      );
+    }
+    query = query.order('created_at', { ascending: false }).range(from, to);
+
+    const { data, error, count } = await query;
     if (error) throw new Error(error.message);
-    res.json({ ok: true, routes: data || [] });
+    res.json({ ok: true, routes: data || [], total: count || 0, page, limit, totalPages: Math.max(1, Math.ceil((count || 0) / limit)) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// [BULK-CREATE] بيستقبل قائمة مطارات (كل واحد ببياناته الحقيقية الجاية
+// من نفس بحث المطارات اللي فورم الإنشاء الفردي بيستخدمه بالظبط —
+// مفيش أي بيانات مُخترعة أو استعلام خارجي جديد هنا) ويولّد كل
+// التوليفات الممكنة بينهم. أي زوج موجود فعلاً بيتجاهل تلقائياً (نفس
+// منطق فحص التكرار). المسارات الجديدة بتتعمل كـ"مسودة" دايماً — أبداً
+// منشورة تلقائياً — عشان لو حصل غلط في قائمة كبيرة، الأدمن يقدر يراجع
+// ويحذف قبل ما أي حاجة تظهر للزوار.
+app.post('/admin/route-pages/bulk-create', requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { airports, bothDirections } = req.body;
+    if (!Array.isArray(airports) || airports.length < 2) {
+      return res.status(400).json({ ok: false, error: 'محتاج مطارين على الأقل' });
+    }
+    if (airports.length > 60) {
+      return res.status(400).json({ ok: false, error: 'الحد الأقصى 60 مطار في المرة الواحدة (عشان الأداء) — قسّم القائمة على دفعات' });
+    }
+    for (const a of airports) {
+      if (!a || !a.code || !a.city) {
+        return res.status(400).json({ ok: false, error: 'كل مطار لازم يكون ليه كود ومدينة (اخترهم من نتائج البحث بس)' });
+      }
+    }
+
+    // توليد كل التوليفات الممكنة (من غير نفس المطار مع نفسه)
+    const pairs = [];
+    for (let i = 0; i < airports.length; i++) {
+      for (let j = 0; j < airports.length; j++) {
+        if (i === j) continue;
+        if (!bothDirections && j < i) continue; // اتجاه واحد بس: كل زوج مرة واحدة
+        pairs.push([airports[i], airports[j]]);
+      }
+    }
+
+    // فحص الموجود فعلاً بطلب واحد بدل ما نسأل عن كل زوج لوحده
+    const { data: existingRoutes, error: existErr } = await supa.from('route_pages').select('origin_iata, destination_iata');
+    if (existErr) throw new Error(existErr.message);
+    const existingSet = new Set((existingRoutes || []).map((r) => r.origin_iata + '_' + r.destination_iata));
+
+    const toInsert = [];
+    const usedSlugs = new Set();
+    let skippedExisting = 0;
+    for (const [o, d] of pairs) {
+      const oCode = o.code.toUpperCase(), dCode = d.code.toUpperCase();
+      const pairKey = oCode + '_' + dCode;
+      if (existingSet.has(pairKey)) { skippedExisting++; continue; }
+
+      let baseSlug = slugify(o.city + '-' + d.city);
+      let slug = baseSlug, n = 2;
+      while (usedSlugs.has(slug)) { slug = baseSlug + '-' + (n++); }
+      usedSlugs.add(slug);
+
+      let distance_km = null, haul_type = null;
+      if (o.lat != null && o.lng != null && d.lat != null && d.lng != null) {
+        distance_km = haversineDistanceKm(Number(o.lat), Number(o.lng), Number(d.lat), Number(d.lng));
+        haul_type = classifyHaul(distance_km);
+      }
+
+      toInsert.push({
+        slug,
+        origin_iata: oCode, destination_iata: dCode,
+        origin_city: o.city, destination_city: d.city,
+        origin_city_slug: slugify(o.city), destination_city_slug: slugify(d.city),
+        origin_lat: o.lat != null ? Number(o.lat) : null,
+        origin_lng: o.lng != null ? Number(o.lng) : null,
+        destination_lat: d.lat != null ? Number(d.lat) : null,
+        destination_lng: d.lng != null ? Number(d.lng) : null,
+        origin_country: o.country || null,
+        destination_country: d.country || null,
+        distance_km, haul_type,
+        status: 'draft', // [SAFE-DEFAULT] أبداً منشور تلقائياً — الأدمن بيراجع وينشر يدوياً
+      });
+    }
+
+    if (!toInsert.length) {
+      return res.json({ ok: true, created: 0, skippedExisting, message: 'كل التوليفات دي موجودة بالفعل — مفيش حاجة جديدة اتعملت' });
+    }
+
+    const { data: inserted, error: insertErr } = await supa.from('route_pages').insert(toInsert).select('id');
+    if (insertErr) throw new Error(insertErr.message);
+
+    log('info', 'bulk_route_pages_created', { count: inserted.length, skippedExisting });
+    res.json({ ok: true, created: inserted.length, skippedExisting, totalPairs: pairs.length });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
