@@ -590,6 +590,46 @@ app.put('/admin/route-pages/:id', requireAdmin, async (req, res) => {
   }
 });
 
+// [BULK-PUBLISH] نشر كل المسودات دفعة واحدة — نفس بالظبط اللي بيحصل
+// لما تنشر مسار واحد يدوي (تفعيل صفحات الدول والمدن المرتبطة)، بس
+// بكفاءة أعلى: كل دولة/مدينة بتتفعّل مرة واحدة بس حتى لو عشرات
+// المسارات بتشاركها، مش مرة لكل مسار.
+app.post('/admin/route-pages/publish-all-drafts', requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+
+    const { data: drafts, error: fetchErr } = await supa.from('route_pages')
+      .select('id, origin_iata, destination_iata, origin_city, destination_city, origin_city_slug, destination_city_slug, origin_country, destination_country')
+      .eq('status', 'draft');
+    if (fetchErr) throw new Error(fetchErr.message);
+    if (!drafts || !drafts.length) {
+      return res.json({ ok: true, published: 0, message: 'مفيش مسودات خالص حالياً' });
+    }
+
+    const ids = drafts.map((d) => d.id);
+    const { error: updateErr } = await supa.from('route_pages')
+      .update({ status: 'published', updated_at: new Date().toISOString() })
+      .in('id', ids);
+    if (updateErr) throw new Error(updateErr.message);
+
+    // تجميع كل الدول/المدن الفريدة قبل التفعيل — لو 500 مسار كلهم من
+    // برلين، برلين بتتفعّل مرة واحدة بس مش 500 مرة.
+    const countriesSeen = new Set();
+    const citiesSeen = new Set();
+    for (const d of drafts) {
+      if (d.origin_country && !countriesSeen.has(d.origin_country)) { countriesSeen.add(d.origin_country); ensureCountryExists(d.origin_country); }
+      if (d.destination_country && !countriesSeen.has(d.destination_country)) { countriesSeen.add(d.destination_country); ensureCountryExists(d.destination_country); }
+      if (d.origin_city_slug && !citiesSeen.has(d.origin_city_slug)) { citiesSeen.add(d.origin_city_slug); ensureCityExists(d.origin_city_slug, d.origin_city, d.origin_country, d.origin_iata); }
+      if (d.destination_city_slug && !citiesSeen.has(d.destination_city_slug)) { citiesSeen.add(d.destination_city_slug); ensureCityExists(d.destination_city_slug, d.destination_city, d.destination_country, d.destination_iata); }
+    }
+
+    log('info', 'bulk_published_drafts', { count: drafts.length });
+    res.json({ ok: true, published: drafts.length });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.delete('/admin/route-pages/:id', requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
