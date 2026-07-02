@@ -105,9 +105,17 @@ function applyGlobalMiddleware(app) {
   // 7) [CORS-WHITELIST] دومينات الموقع بس، مش مفتوح للجميع
   app.use((req, res, next) => {
     const origin = req.headers.origin;
-    if (origin && env.ALLOWED_ORIGINS.includes(origin)) {
+    // [CORS-DEBUG-FIX] تطبيع بسيط (شيل / في الآخر لو موجودة) عشان أي
+    // فرق تافه بين الدومين المسجّل والدومين الحقيقي (زي / زيادة من
+    // إعادة توجيه) ميرفضش الطلب من غير داعي. ولو الأصل مرفوض فعلاً،
+    // بنسجّله في اللوج — عشان أي مشكلة CORS جاية تتشخّص فوراً من
+    // اللوج، مش بتخمين وتجربة روابط واحد واحد.
+    const normalizedOrigin = origin ? origin.replace(/\/+$/, '') : null;
+    if (normalizedOrigin && env.ALLOWED_ORIGINS.includes(normalizedOrigin)) {
       res.header('Access-Control-Allow-Origin', origin);
       res.header('Vary', 'Origin');
+    } else if (normalizedOrigin) {
+      log('warn', 'cors_origin_rejected', { origin, allowed: env.ALLOWED_ORIGINS });
     }
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
