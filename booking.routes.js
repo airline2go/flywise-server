@@ -462,10 +462,24 @@ app.post('/price-preview', rateLimit('pay', 30, 60000), attachUserIfPresent, asy
 
 // ─── [#4] GET /booking-status/:sessionId ──────────────────
 // Lets the frontend recover state after a refresh / reopened browser.
+// [SLOW-CONFIRM-POLL-FIX] Also now the endpoint the frontend polls while
+// /confirm-payment is still in flight for this session (see app.js
+// checkStripeReturn/pollBookingStatus) — this lookup is a plain in-memory
+// Map read, zero calls to Stripe or Duffel, so it's safe to poll
+// frequently without adding load anywhere the original slow_request
+// warnings were coming from. error/refunded are forwarded so a failed
+// outcome can be explained accurately without a second heavy round trip.
 app.get('/booking-status/:sessionId', (req, res) => {
   const s = getBookingStatus(req.params.sessionId);
   if (!s) return res.json({ ok: true, status: 'unknown' });
-  res.json({ ok: true, status: s.status, order_id: s.order_id || null, booking_reference: s.booking_reference || null });
+  res.json({
+    ok: true,
+    status: s.status,
+    order_id: s.order_id || null,
+    booking_reference: s.booking_reference || null,
+    error: s.error || null,
+    refunded: !!s.refunded,
+  });
 });
 
 // ─── GET /booking-confirmation ──────────────────────────────
