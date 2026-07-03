@@ -28,6 +28,13 @@ module.exports = {
   SENTRY_DSN: process.env.SENTRY_DSN,
   NODE_ENV: process.env.NODE_ENV || 'production',
 
+  // [BLOG-AI-SEO] Optional — only used to strengthen a blog post's meta
+  // description when it comes out too thin from the deterministic rules
+  // in admin_routes.js. If this isn't set in Render, that step is simply
+  // skipped and the deterministic (rule-based) meta description is used
+  // as-is — never a hard failure, never blocks publishing.
+  ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+
   REDIS_URL: process.env.REDIS_URL,
 
   ALLOWED_ORIGINS: (process.env.ALLOWED_ORIGINS || 'https://airpiv.com,https://www.airpiv.com')

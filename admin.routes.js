@@ -116,25 +116,157 @@ app.get('/admin/blog-posts', requireAdmin, async (req, res) => {
   }
 });
 
-function autoFormatContent(raw) {
+// [BLOG-CONTENT-LINKS] Turns any bare URL sitting in the article's text
+// into a real clickable link — previously a pasted link (e.g. a route
+// page URL recommended inside the article) just rendered as plain,
+// unclickable text. Skips anything already inside an attribute (href=",
+// src=', etc. — the negative lookbehind) so existing <a>/<img> tags in
+// hand-written HTML content are never touched twice. For Airpiv's own
+// /flights/<slug> route links specifically, looks up the real city
+// names from route_pages ONCE per unique slug (never per-occurrence)
+// so the link reads as "Berlin → Paris" instead of the raw URL; falls
+// back to a capitalised guess from the slug itself if the route isn't
+// found (or the database is briefly unreachable) rather than failing.
+async function linkifyContent(html) {
+  const urlRe = /(?<!["'=])(https?:\/\/[^\s<>"']+)/g;
+  const matches = [...html.matchAll(urlRe)];
+  if (!matches.length) return html;
+
+  const routeRe = /^https?:\/\/(?:www\.)?airpiv\.com\/flights\/([a-z0-9-]+)\/?$/i;
+  const slugs = new Set();
+  for (const m of matches) {
+    const rm = m[0].match(routeRe);
+    if (rm) slugs.add(rm[1].toLowerCase());
+  }
+  const labels = {};
+  if (slugs.size && supa) {
+    try {
+      const { data } = await supa.from('route_pages')
+        .select('slug,origin_city,destination_city')
+        .in('slug', Array.from(slugs));
+      (data || []).forEach((r) => { labels[r.slug] = r.origin_city + ' → ' + r.destination_city; });
+    } catch (e) { /* falls through to the per-link slug-guess fallback below */ }
+  }
+
+  let result = '';
+  let lastIndex = 0;
+  for (const m of matches) {
+    const url = m[0];
+    result += html.slice(lastIndex, m.index);
+    const rm = url.match(routeRe);
+    let label = url;
+    if (rm) {
+      const slug = rm[1].toLowerCase();
+      label = labels[slug] || ('Flug ' + slug.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' → '));
+    }
+    result += '<a href="' + url + '">' + label + '</a>';
+    lastIndex = m.index + url.length;
+  }
+  result += html.slice(lastIndex);
+  return result;
+}
+
+async function autoFormatContent(raw) {
   if (!raw) return raw;
   const hasHtmlTags = /<(p|h1|h2|h3|h4|ul|ol|li|strong|em|a|br|div|blockquote)[\s>]/i.test(raw);
-  if (hasHtmlTags) return raw;
-  return raw
+  const html = hasHtmlTags ? raw : raw
     .split(/\n\s*\n/) // blank line = paragraph break
     .map((block) => block.trim())
     .filter(Boolean)
     .map((block) => '<p>' + block.replace(/\n/g, '<br>') + '</p>') // single newline within a paragraph = line break
     .join('\n');
+  return linkifyContent(html);
+}
+
+function stripTags(s) { return String(s || '').replace(/<[^>]+>/g, '').trim(); }
+function plainTextFrom(html) { return String(html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(); }
+function truncateAtWordBoundary(s, max) {
+  if (s.length <= max) return s;
+  let cut = s.slice(0, max);
+  const lastSpace = cut.lastIndexOf(' ');
+  if (lastSpace > 40) cut = cut.slice(0, lastSpace); // never chop a very short first word off
+  return cut.trim() + '…';
+}
+
+// [BLOG-AI-SEO] Only called for a meta description the deterministic
+// rules already flagged as too thin — never the sole thing standing
+// between a post and a usable one. If ANTHROPIC_API_KEY isn't set in
+// Render, or the call fails/times out for any reason, this quietly
+// returns null and the deterministic version (already SEO-reasonable
+// on its own — real content, truncated at a clean word boundary) ships
+// instead. Publishing a post never depends on this call succeeding.
+async function aiSeoDescription(title, plainText) {
+  if (!env.ANTHROPIC_API_KEY) return null;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 12000);
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-5',
+        max_tokens: 200,
+        messages: [{
+          role: 'user',
+          content: 'Schreibe eine SEO-optimierte Meta-Description auf Deutsch (exakt 120–160 Zeichen, ansprechend, mit klarem Nutzenversprechen, keine Anführungszeichen, kein reines Wiederholen des Titels) für diesen Blogartikel.\n\nTitel: ' + title + '\n\nInhalt (Auszug): ' + plainText.slice(0, 1500) + '\n\nAntworte NUR mit der fertigen Meta-Description, sonst nichts.',
+        }],
+      }),
+      signal: ctrl.signal,
+    });
+    if (!resp.ok) return null;
+    const json = await resp.json();
+    const text = json.content && json.content[0] && json.content[0].text;
+    return text ? text.trim().replace(/^["']|["']$/g, '') : null;
+  } catch (e) {
+    log('warn', 'ai_seo_failed', { error: e.message });
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// [BLOG-SEO-SYSTEM] Title is defensively stripped of any stray HTML tags
+// here — the one concrete bug this whole system was built to fix: an
+// admin wrapping the title line itself in <h2> tags (out of habit from
+// writing the article body) previously stored and displayed the raw
+// tags as literal visible text. Meta description and excerpt fall back
+// to a clean, word-boundary-truncated first paragraph when not given —
+// and only reach for the AI rewrite above if that fallback still comes
+// out too thin to be a real SEO meta description.
+async function deriveSeoFields(rawTitle, contentHtml, providedMeta, providedExcerpt) {
+  const title = stripTags(rawTitle);
+  const plain = plainTextFrom(contentHtml);
+  const firstParagraphMatch = contentHtml.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+  const firstParagraphPlain = firstParagraphMatch ? plainTextFrom(firstParagraphMatch[1]) : plain;
+
+  let excerpt = stripTags(providedExcerpt) || truncateAtWordBoundary(firstParagraphPlain, 155);
+  let metaDescription = stripTags(providedMeta) || truncateAtWordBoundary(firstParagraphPlain, 155);
+
+  if (!metaDescription || metaDescription.length < 70) {
+    const improved = await aiSeoDescription(title, plain);
+    if (improved && improved.length >= 50) {
+      metaDescription = improved;
+      if (!providedExcerpt) excerpt = truncateAtWordBoundary(improved, 155);
+    }
+  }
+
+  return { title, excerpt, meta_description: metaDescription };
 }
 
 app.post('/admin/blog-posts', requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { title, meta_description, excerpt, content, cover_image_url, author, status } = req.body;
-    if (!title || !content) return res.status(400).json({ ok: false, error: 'Titel und Inhalt sind erforderlich' });
+    const { title: rawTitle, meta_description, excerpt, content: rawContent, cover_image_url, author, status } = req.body;
+    if (!rawTitle || !rawContent) return res.status(400).json({ ok: false, error: 'Titel und Inhalt sind erforderlich' });
 
-    let baseSlug = slugify(req.body.slug || title);
+    const content = await autoFormatContent(rawContent);
+    const seo = await deriveSeoFields(rawTitle, content, meta_description, excerpt);
+
+    let baseSlug = slugify(req.body.slug || seo.title);
     let slug = baseSlug;
     for (let attempt = 2; attempt <= 21; attempt++) {
       const { data: existing } = await supa.from('blog_posts').select('id').eq('slug', slug).maybeSingle();
@@ -144,10 +276,10 @@ app.post('/admin/blog-posts', requireAdmin, async (req, res) => {
 
     const isPublishing = status === 'published';
     const { data, error } = await supa.from('blog_posts').insert({
-      slug, title,
-      meta_description: meta_description || null,
-      excerpt: excerpt || null,
-      content: autoFormatContent(content),
+      slug, title: seo.title,
+      meta_description: seo.meta_description || null,
+      excerpt: seo.excerpt || null,
+      content,
       cover_image_url: cover_image_url || null,
       author: author || 'Airpiv Team',
       status: isPublishing ? 'published' : 'draft',
@@ -167,14 +299,27 @@ app.put('/admin/blog-posts/:id', requireAdmin, async (req, res) => {
     if (fetchErr) throw new Error(fetchErr.message);
     if (!existing) return res.status(404).json({ ok: false, error: 'Beitrag nicht gefunden' });
 
-    const { title, meta_description, excerpt, content, cover_image_url, author, status } = req.body;
+    const { title, meta_description, excerpt, content: rawContent, cover_image_url, author, status } = req.body;
     const update = {
       updated_at: new Date().toISOString(),
     };
-    if (title != null) update.title = title;
-    if (meta_description != null) update.meta_description = meta_description;
-    if (excerpt != null) update.excerpt = excerpt;
-    if (content != null) update.content = autoFormatContent(content);
+
+    const contentChanged = rawContent != null;
+    const content = contentChanged ? await autoFormatContent(rawContent) : existing.content;
+    if (title != null || contentChanged) {
+      // [BLOG-SEO-SYSTEM] Re-derive whenever the title or content actually
+      // changed — an edited post gets the same tag-stripping and SEO
+      // strengthening a brand-new one does, not just whatever was saved
+      // the first time.
+      const seo = await deriveSeoFields(title != null ? title : existing.title, content, meta_description, excerpt);
+      update.title = seo.title;
+      update.meta_description = seo.meta_description || null;
+      update.excerpt = seo.excerpt || null;
+    } else {
+      if (meta_description != null) update.meta_description = stripTags(meta_description) || null;
+      if (excerpt != null) update.excerpt = stripTags(excerpt) || null;
+    }
+    if (contentChanged) update.content = content;
     if (cover_image_url != null) update.cover_image_url = cover_image_url;
     if (author != null) update.author = author;
     if (status != null) {
@@ -728,35 +873,6 @@ app.post('/admin/route-pages/publish-all-drafts', requireAdmin, async (req, res)
 
     log('info', 'bulk_published_drafts', { count: drafts.length });
     res.json({ ok: true, published: drafts.length });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-// [RESET-HEALTH-CHECK] بيمسح تاريخ الفحص (last_health_check_at) لكل
-// المسارات، ويرجّع أي مسار "ميت" لحالة "مسودة" — عشان يتفحصوا من
-// الأول. **مهم جداً تستخدمه بعد ما تفعّل Duffel في وضع Production**:
-// في وضع Test، Duffel بيرجّع عروض وهمية (شركة طيران اختبارية) حتى
-// للمسارات اللي مفيهاش رحلات حقيقية خالص، فأي فحص اتعمل في وضع Test
-// نتيجته مش موثوقة — وبما إن الأداة مصممة عمداً متفحصش نفس المسار
-// مرتين، لازم تصفير الفحوصات القديمة يدوياً بعد التفعيل عشان الفحص
-// الجديد يبقى حقيقي 100%.
-app.post('/admin/route-pages/reset-health-checks', requireAdmin, async (req, res) => {
-  try {
-    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-
-    const { error: clearErr, count: clearedCount } = await supa.from('route_pages')
-      .update({ last_health_check_at: null }, { count: 'exact' })
-      .not('last_health_check_at', 'is', null);
-    if (clearErr) throw new Error(clearErr.message);
-
-    const { error: reviveErr, count: revivedCount } = await supa.from('route_pages')
-      .update({ status: 'draft' }, { count: 'exact' })
-      .eq('status', 'dead');
-    if (reviveErr) throw new Error(reviveErr.message);
-
-    log('info', 'route_health_checks_reset', { cleared: clearedCount, revived: revivedCount });
-    res.json({ ok: true, cleared: clearedCount || 0, revived: revivedCount || 0 });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
