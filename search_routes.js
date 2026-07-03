@@ -134,13 +134,9 @@ app.post('/search', rateLimit('search', 30, 60000), async (req, res) => {
       if (return_date) slices.push({ origin: destination, destination: origin, departure_date: return_date });
     }
 
-    // [SUPPLIER-TIMEOUT] كان بيستنى القيمة الافتراضية من Duffel (20 ثانية)
-    // لكل شركة طيران قبل ما يرجّع أي حاجة — لو شركة واحدة بطيئة، البحث
-    // كله كان بينتظرها. 8 ثواني كافية لغالبية شركات الطيران، والعميل
-    // بيشوف نتيجة أسرع بكتير حتى لو فاتت شركة نادرة بطيئة جداً.
     const result = await duffel('POST', '/air/offer_requests?return_offers=true&supplier_timeout=8000', {
       data: { slices, passengers, cabin_class },
-    });
+    }, null, ROUTE_PRICE_DUFFEL_OPTS);
 
     // [PRICING-FIX] Fetch the tiers ONCE for this whole search response —
     // a single search can return dozens of offers, and they all share the
@@ -158,31 +154,41 @@ app.post('/search', rateLimit('search', 30, 60000), async (req, res) => {
   }
 });
 
-// [ROUTE-PRICE-FETCH] Does the actual live Duffel lookup + margin +
-// insights computation, writes the result to the cache, and returns it.
-// Extracted so it can be called two different ways from the route
-// handler below: awaited directly (only when there is no cached price at
-// all yet for this route — the one truly first-time case), or fired
-// without awaiting as a background refresh while a stale cached price is
-// already being served to the customer instantly.
+// [ROUTE-PRICE-TIMEOUT-FIX] supplier_timeout=8000 tells Duffel itself to
+// stop waiting on slow airlines after 8s and return whatever it has —
+// but our OWN client-side abort timer was still the generic 20s used
+// for slower operations like order creation. If Duffel took anywhere
+// close to that 20s despite being told to give up at 8s, our timer
+// aborted, the call got retried as "transient", and a SECOND up-to-20s
+// attempt started — a real ~32.8s case seen in production logs. Passing
+// a matching timeoutMs here (8s + a realistic buffer for network/
+// processing overhead) keeps a single attempt's worst case close to
+// what supplier_timeout already promised, and even the rare retried
+// case stays well under half of what it could reach before.
+const ROUTE_PRICE_DUFFEL_OPTS = { timeoutMs: 12000 };
+
 async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
+  // A representative near-future date — NOT today, which would surface
+  // artificially high last-minute fares that don't reflect a typical
+  // "from" price for the route. (Unless days_ahead was explicitly
+  // requested — then that IS the point, e.g. the Last Minute page.)
   const searchDate = new Date();
   searchDate.setDate(searchDate.getDate() + daysAhead);
   const departure_date = searchDate.toISOString().slice(0, 10);
 
-  // [SUPPLIER-TIMEOUT] نفس الفكرة زي /search — 8 ثواني بدل الـ20 الافتراضية،
-  // فأي محاولة (سواء العميل الوحيد اللي بينتظر فعلياً، أو التحديث في
-  // الخلفية) بتخلص أسرع بكتير.
   const result = await duffel('POST', '/air/offer_requests?return_offers=true&supplier_timeout=8000', {
     data: {
       slices: [{ origin: from.toUpperCase(), destination: to.toUpperCase(), departure_date }],
       passengers: [{ type: 'adult' }],
       cabin_class: 'economy',
     },
-  });
+  }, null, ROUTE_PRICE_DUFFEL_OPTS);
 
   const offers = result.data?.offers || [];
-  if (!offers.length) return { price: null, currency: null, departure_date: null, insights: null };
+  if (!offers.length) {
+    const empty = { ok: true, price: null, currency: null, departure_date: null, insights: null };
+    return empty;
+  }
 
   const ticketTiers = await getTicketProfitTiers();
   let cheapest = null;
@@ -228,7 +234,8 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
   const currency = offers[0].total_currency || 'EUR';
   await setAdminConfig(cacheKey, { price: cheapest, currency, departure_date, insights, fetchedAt: new Date().toISOString() });
   await incrementDailyPriceCheckCounter();
-  return { price: cheapest, currency, departure_date, insights };
+  const checksToday = await getDailyPriceCheckCount();
+  return { ok: true, price: cheapest, currency, departure_date, insights, cached: false, checksToday, checkedAt: new Date().toISOString() };
 }
 
 app.get('/route-price', rateLimit('route-price', 60, 60000), async (req, res) => {
@@ -245,44 +252,27 @@ app.get('/route-price', rateLimit('route-price', 60, 60000), async (req, res) =>
     const daysAhead = req.query.days_ahead ? Math.max(1, Math.min(90, parseInt(req.query.days_ahead, 10) || 21)) : 21;
     const cacheKey = 'route_price_' + from.toUpperCase() + '_' + to.toUpperCase() + (daysAhead !== 21 ? '_d' + daysAhead : '');
     const cached = await getAdminConfig(cacheKey, null);
-    const FRESH_MS = 12 * 60 * 60 * 1000; // [PRICE-CACHE-12H] كانت 24 ساعة — رجّعناها لـ12 عشان السعر يتحدث مرتين يومياً بدل مرة، من غير ما نرجع لمشكلة الازدحام الأصلية (6 ساعات = 4 مرات يومياً)
-    const age = cached && cached.fetchedAt ? Date.now() - new Date(cached.fetchedAt).getTime() : Infinity;
+    const cacheAgeMs = cached && cached.fetchedAt ? (Date.now() - new Date(cached.fetchedAt).getTime()) : Infinity;
 
-    if (cached && age < FRESH_MS) {
-      // [DATE-MATCH-FIX] Return the EXACT date this cached price was
-      // computed for — never recomputed as "today + 21" on a cache hit,
-      // which could point a few hours/days later to a different date
-      // than the one that actually produced this price.
-      // [ROUTE-INSIGHTS] insights defaults to null for entries cached
-      // before this field existed — safe fallback, never a crash.
+    // [PRICE-CACHE-STALE-WHILE-REVALIDATE] Fresh cache (<12h): return
+    // immediately, unchanged fast path. Stale cache (cached but ≥12h
+    // old): respond immediately with the stale price so the visitor
+    // never waits, then refresh it in the background for next time.
+    // Only a route that has NEVER been priced before falls through to a
+    // true blocking live call — a one-time cost per route, ever.
+    if (cached && cacheAgeMs < 12 * 60 * 60 * 1000) {
       const checksToday = await getDailyPriceCheckCount();
       return res.json({ ok: true, price: cached.price, currency: cached.currency, departure_date: cached.departure_date, insights: cached.insights || null, cached: true, checksToday, checkedAt: cached.fetchedAt });
     }
-
     if (cached) {
-      // [STALE-WHILE-REVALIDATE] Cached price exists but has aged past
-      // the freshness window — a real customer on a route page should
-      // never be the one stuck waiting on a live Duffel call (which can
-      // take 10+ seconds, worse if a transient error triggers a retry).
-      // Serve the still-reasonable stale price immediately, then refresh
-      // it in the background (not awaited) so the NEXT visitor gets a
-      // fresh price at full speed too. Errors here are only logged —
-      // the response to this customer has already been sent.
       const checksToday = await getDailyPriceCheckCount();
       res.json({ ok: true, price: cached.price, currency: cached.currency, departure_date: cached.departure_date, insights: cached.insights || null, cached: true, stale: true, checksToday, checkedAt: cached.fetchedAt });
-      fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey).catch((err) => {
-        log('warn', 'route_price_background_refresh_failed', { from, to, error: err.message });
-      });
+      fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey).catch((e) => log('warn', 'route_price_revalidate_failed', { error: e.message }));
       return;
     }
 
-    // No cached price at all yet for this route — genuinely the first
-    // time anyone has ever priced it, so (and only so) this one request
-    // waits on the live Duffel call. Every visitor after this one hits
-    // the fast cached path above.
     const fresh = await fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey);
-    const checksToday = await getDailyPriceCheckCount();
-    res.json({ ok: true, price: fresh.price, currency: fresh.currency, departure_date: fresh.departure_date, insights: fresh.insights, cached: false, checksToday, checkedAt: new Date().toISOString() });
+    res.json(fresh);
   } catch (err) {
     // Fail soft — a route page should still render (without a price) if
     // Duffel is briefly unavailable, never show a broken page.

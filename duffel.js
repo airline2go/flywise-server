@@ -14,7 +14,7 @@ const Sentry = require('./sentry');
 
 const DUFFEL_TIMEOUT_MS = 20000;
 
-async function duffelAttempt(method, path, body, extraHeaders) {
+async function duffelAttempt(method, path, body, extraHeaders, timeoutMs) {
   if (!env.DUFFEL_TOKEN) throw new Error('DUFFEL_TOKEN غير موجود في Environment Variables');
 
   const opts = {
@@ -29,7 +29,7 @@ async function duffelAttempt(method, path, body, extraHeaders) {
   if (body) opts.body = JSON.stringify(body);
 
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), DUFFEL_TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs || DUFFEL_TIMEOUT_MS);
   opts.signal = ctrl.signal;
 
   let res;
@@ -106,17 +106,18 @@ function duffelCircuitRecordFailure() {
 // timeout بتاعنا، أو 5xx من عند Duffel) — خطأ 4xx (طلب غلط، مسار
 // غير صحيح، عرض منتهي) هيفشل بنفس الطريقة تاني، فإعادة المحاولة
 // هتستهلك حصة Duffel وتزود التأخير من غير أي فايدة.
-async function duffel(method, path, body = null, extraHeaders = null) {
+async function duffel(method, path, body = null, extraHeaders = null, options = null) {
   if (!duffelCircuitAllow()) {
     const err = new Error('Duffel ist vorübergehend nicht erreichbar — bitte in Kürze erneut versuchen');
     err.status = 503;
     throw err;
   }
+  const timeoutMs = (options && options.timeoutMs) || DUFFEL_TIMEOUT_MS;
   const maxAttempts = 2;
   let lastErr;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const result = await duffelAttempt(method, path, body, extraHeaders);
+      const result = await duffelAttempt(method, path, body, extraHeaders, timeoutMs);
       duffelCircuitRecordSuccess();
       return result;
     } catch (e) {
