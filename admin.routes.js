@@ -166,16 +166,50 @@ async function linkifyContent(html) {
   return result;
 }
 
+// [MARKDOWN-LITE-FIX] الإصلاح الجذري لمشكلة "## بتظهر كنص خام" — قبل
+// كده لو المحتوى مفيهوش HTML أصلاً، كل سطر كان بيتحول لـ<p> عادي من
+// غير أي فهم لـ##/-/1. الفانكشن دي بتحول:
+//   # إلى ######  → <h2> أو <h3> حقيقية (أبداً <h1> — عنوان المقال
+//                    نفسه هو الـH1 الوحيد المسموح في الصفحة)
+//   - نص / * نص     → <ul><li> حقيقية
+//   1. نص           → <ol><li> حقيقية
+function convertMarkdownLite(raw) {
+  const lines = String(raw || '').replace(/\r\n/g, '\n').split('\n');
+  const out = [];
+  let listType = null;
+  let para = [];
+  function closeList() { if (listType) { out.push('</' + listType + '>'); listType = null; } }
+  function flushPara() { if (para.length) { out.push('<p>' + para.join('<br>') + '</p>'); para = []; } }
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) { flushPara(); closeList(); continue; }
+    let m = line.match(/^(#{1,6})\s+(.+)$/);
+    if (m) { flushPara(); closeList(); const tag = m[1].length <= 2 ? 'h2' : 'h3'; out.push('<' + tag + '>' + m[2].trim() + '</' + tag + '>'); continue; }
+    m = line.match(/^[-*]\s+(.+)$/);
+    if (m) { flushPara(); if (listType !== 'ul') { closeList(); out.push('<ul>'); listType = 'ul'; } out.push('<li>' + m[1].trim() + '</li>'); continue; }
+    m = line.match(/^\d+[.)]\s+(.+)$/);
+    if (m) { flushPara(); if (listType !== 'ol') { closeList(); out.push('<ol>'); listType = 'ol'; } out.push('<li>' + m[1].trim() + '</li>'); continue; }
+    closeList();
+    para.push(line);
+  }
+  flushPara(); closeList();
+  return out.join('\n');
+}
+
+// [SINGLE-H1-FIX] أي <h1> جوه المحتوى (HTML خام يدوي) بيتحول لـ<h2> —
+// عنوان المقال نفسه هو الـH1 الوحيد المسموح في الصفحة كلها (مطلب سيو
+// أساسي: صفحة فيها أكتر من H1 بتلخبط محركات البحث).
+function demoteH1(html) {
+  return html.replace(/<h1(\s[^>]*)?>/gi, '<h2$1>').replace(/<\/h1>/gi, '</h2>');
+}
+
 async function autoFormatContent(raw) {
   if (!raw) return raw;
-  const hasHtmlTags = /<(p|h1|h2|h3|h4|ul|ol|li|strong|em|a|br|div|blockquote)[\s>]/i.test(raw);
-  const html = hasHtmlTags ? raw : raw
-    .split(/\n\s*\n/) // blank line = paragraph break
-    .map((block) => block.trim())
-    .filter(Boolean)
-    .map((block) => '<p>' + block.replace(/\n/g, '<br>') + '</p>') // single newline within a paragraph = line break
-    .join('\n');
-  return linkifyContent(html);
+  const hasBlockTags = /<(p|h1|h2|h3|h4|ul|ol|li|blockquote|table)[\s>]/i.test(raw);
+  // لو المحتوى فيه HTML حقيقي بالفعل (فقرات/عناوين متعمدة)، بنحترمه
+  // كامل زي ما هو. غير كده، بنمرره على تحويل الـMarkdown الخفيف.
+  const html = hasBlockTags ? raw : convertMarkdownLite(raw);
+  return linkifyContent(demoteH1(html));
 }
 
 function stripTags(s) { return String(s || '').replace(/<[^>]+>/g, '').trim(); }
