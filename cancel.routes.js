@@ -62,12 +62,43 @@ app.post('/cancel-quote', rateLimit('cancel', 15, 60000), async (req, res) => {
     if (!order_id) return res.status(400).json({ ok: false, error: 'order_id مطلوب' });
     const cancelReq = await duffel('POST', '/air/order_cancellations', { data: { order_id } });
     const d = cancelReq.data || {};
+    const duffelRefundAmount = parseFloat(d.refund_amount || 0);
+
+    // [REFUND-BREAKDOWN] العميل لازم يشوف التفصيل ده *قبل* ما يأكد
+    // الإلغاء، مش يفاجأ برقم نهائي مجهول. نفس المعادلة المُتأكد منها
+    // فعليًا في /cancel-confirm بالضبط — يعني الرقم اللي بيشوفه هنا
+    // مضمون يطابق اللي هيتنفذ فعليًا لو أكد.
+    //   airline_fee         = غرامة شركة الطيران (الجزء من الصافي اللي مش هيرجع)
+    //   airpiv_service_fee  = رسوم خدمة Airpiv (هامشنا الأصلي على الحجز، غير قابل للاسترداد)
+    //   final_refund_amount = المبلغ الفعلي اللي هيترد للعميل لو أكد
+    let breakdown = null;
+    if (supa) {
+      const { data: bookingRow } = await supa.from('bookings')
+        .select('duffel_amount,customer_paid,currency')
+        .eq('duffel_order_id', order_id).maybeSingle();
+      if (bookingRow) {
+        const duffelAmount = Number(bookingRow.duffel_amount) || 0;
+        const customerPaid = Number(bookingRow.customer_paid) || 0;
+        const airlineFee = Math.max(0, Math.round((duffelAmount - duffelRefundAmount) * 100) / 100);
+        const airpivServiceFee = Math.max(0, Math.round((customerPaid - duffelAmount) * 100) / 100);
+        const finalRefundAmount = Math.max(0, Math.round((customerPaid - airlineFee - airpivServiceFee) * 100) / 100);
+        breakdown = {
+          ticket_price: customerPaid,
+          airline_fee: airlineFee,
+          airpiv_service_fee: airpivServiceFee,
+          final_refund_amount: finalRefundAmount,
+          currency: bookingRow.currency || d.refund_currency || 'EUR',
+        };
+      }
+    }
+
     res.json({
       ok: true,
       cancellation_id: d.id,
       refund_amount: d.refund_amount,
       refund_currency: d.refund_currency,
       expires_at: d.expires_at,
+      breakdown,
     });
   } catch (err) {
     res.status(err.status || 500).json({ ok: false, error: err.message, details: err.details });
@@ -338,9 +369,17 @@ app.post('/cancel-confirm', rateLimit('cancel', 10, 60000), async (req, res) => 
       refund_currency: refundCurrency,
       stripe_refund_issued: stripeRefundIssued,
       stripe_refund_error: stripeRefundError,
+      breakdown: bookingRowForLoyalty ? {
+        ticket_price: Number(bookingRowForLoyalty.customer_paid) || 0,
+        airline_fee: Math.max(0, Math.round(((Number(bookingRowForLoyalty.duffel_amount) || 0) - duffelRefundAmount) * 100) / 100),
+        airpiv_service_fee: Math.max(0, Math.round(((Number(bookingRowForLoyalty.customer_paid) || 0) - (Number(bookingRowForLoyalty.duffel_amount) || 0)) * 100) / 100),
+        final_refund_amount: actualRefundToCustomer || duffelRefundAmount,
+        currency: refundCurrency,
+      } : null,
     });
   } catch (err) {
     res.status(err.status || 500).json({ ok: false, error: err.message, details: err.details });
   }
 });
 };
+
