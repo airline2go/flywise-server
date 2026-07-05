@@ -263,6 +263,60 @@ async function aiSeoDescription(title, plainText) {
   }
 }
 
+// [BLOG-AUTO-TRANSLATE] Fully automatic German→English translation of a
+// blog post — title, HTML content (tags/attributes preserved exactly,
+// only the human-readable text inside them translated), and meta
+// description, in one Claude call returning structured JSON. Never blocks
+// saving/publishing the German post: if ANTHROPIC_API_KEY is missing, the
+// call fails, times out, or the response isn't valid JSON, this quietly
+// returns null and the post simply has no English version yet — the
+// German post itself is entirely unaffected either way.
+async function translateBlogPostToEnglish(title, contentHtml, metaDescription) {
+  if (!env.ANTHROPIC_API_KEY) return null;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 30000);
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-5',
+        max_tokens: 4000,
+        messages: [{
+          role: 'user',
+          content: 'Übersetze diesen deutschen Blogartikel ins Englische (natürliches, professionelles Reise-Blog-Englisch, keine wörtliche Wort-für-Wort-Übersetzung).\n\n' +
+            'WICHTIG: Im "content_html" Feld müssen ALLE HTML-Tags und Attribute (z.B. <h2>, <ul>, <li>, <a href="...">) exakt unverändert erhalten bleiben — übersetze NUR den lesbaren Text zwischen den Tags, niemals die Tags oder URLs selbst.\n\n' +
+            'Antworte NUR mit einem validen JSON-Objekt, ohne Markdown-Codeblock, in genau dieser Form:\n' +
+            '{"title_en": "...", "content_html_en": "...", "meta_description_en": "..."}\n\n' +
+            'Titel: ' + title + '\n\nMeta-Description: ' + (metaDescription || '') + '\n\nInhalt (HTML):\n' + contentHtml,
+        }],
+      }),
+      signal: ctrl.signal,
+    });
+    if (!resp.ok) return null;
+    const json = await resp.json();
+    const text = json.content && json.content[0] && json.content[0].text;
+    if (!text) return null;
+    const cleaned = text.trim().replace(/^```json\s*/i, '').replace(/```\s*$/, '');
+    const parsed = JSON.parse(cleaned);
+    if (!parsed.title_en || !parsed.content_html_en) return null;
+    return {
+      title_en: parsed.title_en.trim(),
+      content_en: parsed.content_html_en.trim(),
+      meta_description_en: parsed.meta_description_en ? parsed.meta_description_en.trim() : null,
+    };
+  } catch (e) {
+    log('warn', 'blog_auto_translate_failed', { error: e.message });
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // [BLOG-SEO-SYSTEM] Title is defensively stripped of any stray HTML tags
 // here — the one concrete bug this whole system was built to fix: an
 // admin wrapping the title line itself in <h2> tags (out of habit from
@@ -308,12 +362,31 @@ app.post('/admin/blog-posts', requireAdmin, async (req, res) => {
       slug = baseSlug + '-' + attempt;
     }
 
+    // [BLOG-AUTO-TRANSLATE] English slug lives in its own namespace
+    // (slug_en) — collision-checked separately from the German slug
+    // column, since the two languages' URL spaces never overlap.
+    const translation = await translateBlogPostToEnglish(seo.title, content, seo.meta_description);
+    let slugEn = null;
+    if (translation) {
+      let baseSlugEn = slugify(translation.title_en);
+      slugEn = baseSlugEn;
+      for (let attempt = 2; attempt <= 21; attempt++) {
+        const { data: existingEn } = await supa.from('blog_posts').select('id').eq('slug_en', slugEn).maybeSingle();
+        if (!existingEn) break;
+        slugEn = baseSlugEn + '-' + attempt;
+      }
+    }
+
     const isPublishing = status === 'published';
     const { data, error } = await supa.from('blog_posts').insert({
       slug, title: seo.title,
       meta_description: seo.meta_description || null,
       excerpt: seo.excerpt || null,
       content,
+      slug_en: slugEn,
+      title_en: translation ? translation.title_en : null,
+      content_en: translation ? translation.content_en : null,
+      meta_description_en: translation ? translation.meta_description_en : null,
       cover_image_url: cover_image_url || null,
       author: author || 'Airpiv Team',
       status: isPublishing ? 'published' : 'draft',
@@ -349,6 +422,29 @@ app.put('/admin/blog-posts/:id', requireAdmin, async (req, res) => {
       update.title = seo.title;
       update.meta_description = seo.meta_description || null;
       update.excerpt = seo.excerpt || null;
+
+      // [BLOG-AUTO-TRANSLATE] Only re-translates when the German title or
+      // content actually changed — editing just the cover image or author
+      // shouldn't burn an API call and rewrite a perfectly good existing
+      // English version. Keeps the ORIGINAL slug_en (an English URL
+      // already indexed by Google shouldn't move just because the title
+      // was tweaked slightly) — only title_en/content_en/meta get updated.
+      const translation = await translateBlogPostToEnglish(seo.title, content, seo.meta_description);
+      if (translation) {
+        update.title_en = translation.title_en;
+        update.content_en = translation.content_en;
+        update.meta_description_en = translation.meta_description_en;
+        if (!existing.slug_en) {
+          let baseSlugEn = slugify(translation.title_en);
+          let slugEn = baseSlugEn;
+          for (let attempt = 2; attempt <= 21; attempt++) {
+            const { data: existingEn } = await supa.from('blog_posts').select('id').eq('slug_en', slugEn).maybeSingle();
+            if (!existingEn) break;
+            slugEn = baseSlugEn + '-' + attempt;
+          }
+          update.slug_en = slugEn;
+        }
+      }
     } else {
       if (meta_description != null) update.meta_description = stripTags(meta_description) || null;
       if (excerpt != null) update.excerpt = stripTags(excerpt) || null;
