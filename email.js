@@ -50,6 +50,18 @@ function buildOrderSummaryForEmail(order, money) {
   const paxById = {};
   (order.passengers || []).forEach((p) => { paxById[p.id] = `${p.given_name || ''} ${p.family_name || ''}`.trim(); });
 
+  // [TICKET-NUMBER] رقم التذكرة الرسمي (نفس الظاهر في تذكرة Duffel) —
+  // بيانه الحقيقية بتربط تذكرة بمسافر معيّن عن طريق passenger_id. لو
+  // الشكل ده مش موجود لأي سبب، بنرجع لمطابقة بالترتيب (بافتراض إن
+  // documents وpassengers بنفس الترتيب) — وأي احتمال عدم تطابق، الأسلم
+  // نعرض القائمة من غير اسم بدل ما نربط اسم غلط برقم غلط.
+  const ticketByPax = {};
+  const tickets = (order.documents || []).filter((d) => (d.type || '').toLowerCase().includes('ticket'));
+  tickets.forEach((doc, i) => {
+    const name = doc.passenger_id ? paxById[doc.passenger_id] : (order.passengers && order.passengers[i] ? `${order.passengers[i].given_name || ''} ${order.passengers[i].family_name || ''}`.trim() : '');
+    if (name && doc.unique_identifier) ticketByPax[name] = doc.unique_identifier;
+  });
+
   const seatServiceByKey = {};
   (order.services || []).forEach((svc) => {
     if (!(svc.type || '').toLowerCase().includes('seat')) return;
@@ -69,12 +81,28 @@ function buildOrderSummaryForEmail(order, money) {
         });
       }
     });
+    // [DUFFEL-TICKET-PARITY] بيانات حقيقية من Duffel، نفس اللي ظاهر في
+    // التذكرة الرسمية بتاعتهم لكل قطعة طيران (الصالة، نوع الطائرة،
+    // الحقائب المضمّنة لكل راكب على هذا الطيران بالتحديد). عمدًا من
+    // غير رقم التذكرة نفسه — طلب صريح إنه معلومة شخصية حساسة، مش هتظهر
+    // في الإيميل.
+    const baggageByPax = {};
+    (s.passengers || []).forEach((sp) => {
+      const name = paxById[sp.passenger_id] || '';
+      const bags = (sp.baggages || []).map((b) => ({ type: b.type, quantity: b.quantity || 1 }));
+      if (name && bags.length) baggageByPax[name] = bags;
+    });
     return {
       from: s.origin?.iata_code || '', to: s.destination?.iata_code || '',
+      fromName: s.origin?.name || '', toName: s.destination?.name || '',
+      fromCity: s.origin?.city_name || (s.origin && s.origin.city && s.origin.city.name) || '',
+      toCity: s.destination?.city_name || (s.destination && s.destination.city && s.destination.city.name) || '',
+      fromTerminal: s.origin_terminal || null, toTerminal: s.destination_terminal || null,
       dep: s.departing_at ? new Date(s.departing_at) : null, arr: s.arriving_at ? new Date(s.arriving_at) : null,
       dur: isoMinSrv(s.duration), al: s.marketing_carrier?.name || '',
       fn: `${s.marketing_carrier?.iata_code || ''}${s.marketing_carrier_flight_number || ''}`,
-      seats,
+      aircraft: s.aircraft?.name || null,
+      seats, baggageByPax,
     };
   }
   // [MULTICITY-FIX] Previously only ever read slices[0] (outbound) and
@@ -94,6 +122,7 @@ function buildOrderSummaryForEmail(order, money) {
   const slices = order.slices || [];
   const legs = slices.map((slice, i) => ({
     legNumber: i + 1,
+    nonStop: (slice.segments || []).length <= 1,
     segs: (slice.segments || []).map(mapSeg),
   }));
   const allSeats = legs.flatMap((leg) => leg.segs).flatMap((s) => s.seats);
@@ -150,7 +179,7 @@ function buildOrderSummaryForEmail(order, money) {
   }
 
   return {
-    legs, allSeats, purchasedBags,
+    legs, allSeats, purchasedBags, ticketByPax,
     ticketPrice: Math.round(ticketPrice * 100) / 100,
     bagsPrice: Math.round(bagsPrice * 100) / 100,
     seatsPrice: Math.round(seatsPrice * 100) / 100,
@@ -180,34 +209,59 @@ async function sendBookingConfirmationEmail(to, data) {
   const summary = data.orderSummary || null;
 
   function segRow(seg) {
+    // [DUFFEL-TICKET-PARITY] نفس معلومات "Terminal" ونوع الطائرة الظاهرة
+    // في تذكرة Duffel الرسمية — بس لو Duffel رجّعهم فعليًا (بعض المطارات/
+    // شركات الطيران مش دايمًا بترجع صالة محددة، فمفيش داعي نظهر "—" في
+    // كل مرة لو المعلومة أصلاً غير متاحة).
+    const fromCityAirport = seg.fromCity && seg.fromName ? `${seg.fromCity} · ${seg.fromName}` : (seg.fromName || '');
+    const toCityAirport = seg.toCity && seg.toName ? `${seg.toCity} · ${seg.toName}` : (seg.toName || '');
+    const fromLbl = seg.fromTerminal ? `${seg.from} · Terminal ${seg.fromTerminal}` : seg.from;
+    const toLbl = seg.toTerminal ? `${seg.to} · Terminal ${seg.toTerminal}` : seg.to;
+    const baggageLines = Object.keys(seg.baggageByPax || {}).map((name) => {
+      const parts = seg.baggageByPax[name].map((b) => {
+        const label = b.type === 'checked' ? 'Aufgabegepäck' : 'Handgepäck';
+        return b.quantity > 1 ? `${b.quantity}× ${label}` : label;
+      });
+      return `<div style="font-size:11px;color:#8fa4b4;margin-top:2px">🧳 ${name}: ${parts.join(', ')}</div>`;
+    }).join('');
     return `
     <tr>
       <td style="padding:10px 0;border-bottom:1px solid #eef1f4">
         <table width="100%" cellpadding="0" cellspacing="0"><tr>
-          <td style="width:80px;vertical-align:top">
+          <td style="width:100px;vertical-align:top">
             <div style="font-size:15px;font-weight:700;color:#101d2c">${fmtTime(seg.dep)}</div>
-            <div style="font-size:11px;color:#8fa4b4">${seg.from}</div>
+            <div style="font-size:11px;color:#8fa4b4">${fromLbl}</div>
+            ${fromCityAirport ? `<div style="font-size:10px;color:#8fa4b4">${fromCityAirport}</div>` : ''}
             <div style="font-size:10px;color:#8fa4b4;margin-top:1px">${fmtDate(seg.dep)}</div>
           </td>
           <td style="text-align:center;vertical-align:top;color:#8fa4b4;font-size:11px;padding:0 8px">
             <div>${durStr(seg.dur)}</div>
             <div style="border-top:1px dashed #c8d4de;margin:4px 0"></div>
             <div>${seg.al} ${seg.fn}</div>
+            ${seg.aircraft ? `<div style="font-size:10px;margin-top:1px">${seg.aircraft}</div>` : ''}
           </td>
-          <td style="width:80px;text-align:right;vertical-align:top">
+          <td style="width:100px;text-align:right;vertical-align:top">
             <div style="font-size:15px;font-weight:700;color:#101d2c">${fmtTime(seg.arr)}</div>
-            <div style="font-size:11px;color:#8fa4b4">${seg.to}</div>
+            <div style="font-size:11px;color:#8fa4b4">${toLbl}</div>
+            ${toCityAirport ? `<div style="font-size:10px;color:#8fa4b4">${toCityAirport}</div>` : ''}
             <div style="font-size:10px;color:#8fa4b4;margin-top:1px">${fmtDate(seg.arr)}</div>
           </td>
         </tr></table>
+        ${baggageLines}
       </td>
     </tr>`;
   }
 
-  function segsBlock(segs, label) {
+  function segsBlock(segs, label, nonStop) {
     if (!segs || !segs.length) return '';
+    // [DUFFEL-TICKET-PARITY] "Non-stop" (أو عدد التوقفات) بجانب عنوان
+    // القطعة — محسوبة فعليًا من عدد القطع الحقيقي عند Duffel لهذا الاتجاه،
+    // مش افتراض. مسافة واحدة توقف أو أكتر بتتحسب تلقائيًا (segs.length - 1).
+    const stopsLabel = nonStop === true ? 'Non-stop' : (segs.length > 1 ? `${segs.length - 1} Zwischenstopp${segs.length > 2 ? 's' : ''}` : '');
     return `
-    <div style="font-size:11px;font-weight:700;color:#8fa4b4;letter-spacing:.05em;text-transform:uppercase;margin:14px 0 6px">${label}</div>
+    <div style="font-size:11px;font-weight:700;color:#8fa4b4;letter-spacing:.05em;text-transform:uppercase;margin:14px 0 6px;display:flex;justify-content:space-between">
+      <span>${label}</span>${stopsLabel ? `<span style="text-transform:none;letter-spacing:0">${stopsLabel}</span>` : ''}
+    </div>
     <table width="100%" cellpadding="0" cellspacing="0">${segs.map(segRow).join('')}</table>`;
   }
 
@@ -224,6 +278,7 @@ async function sendBookingConfirmationEmail(to, data) {
   let flightHtml = '';
   let bagsHtml = '';
   let seatsHtml = '';
+  let ticketsHtml = '';
   let priceHtml = '';
 
   if (summary) {
@@ -236,10 +291,10 @@ async function sendBookingConfirmationEmail(to, data) {
     // price that caused), not the round-trip label itself.
     const legsArr = summary.legs || [];
     if (legsArr.length > 2) {
-      flightHtml = legsArr.map((leg) => segsBlock(leg.segs, 'Flug ' + leg.legNumber)).join('');
+      flightHtml = legsArr.map((leg) => segsBlock(leg.segs, 'Flug ' + leg.legNumber, leg.nonStop)).join('');
     } else {
-      flightHtml = segsBlock(legsArr[0] && legsArr[0].segs, legsArr[1] && legsArr[1].segs && legsArr[1].segs.length ? 'Hinflug' : 'Flug') +
-                   segsBlock(legsArr[1] && legsArr[1].segs, 'Rückflug');
+      flightHtml = segsBlock(legsArr[0] && legsArr[0].segs, legsArr[1] && legsArr[1].segs && legsArr[1].segs.length ? 'Hinflug' : 'Flug', legsArr[0] && legsArr[0].nonStop) +
+                   segsBlock(legsArr[1] && legsArr[1].segs, 'Rückflug', legsArr[1] && legsArr[1].nonStop);
     }
 
     if (summary.purchasedBags && summary.purchasedBags.length) {
@@ -258,6 +313,16 @@ async function sendBookingConfirmationEmail(to, data) {
       ${summary.allSeats.map((s) => `
         <div style="font-size:13px;color:#46586c;padding:4px 0;display:flex;justify-content:space-between">
           <span>${s.passenger || 'Reisende/r'}</span><strong style="font-family:monospace;color:#0FB5A0">${s.designator}</strong>
+        </div>`).join('')}`;
+    }
+
+    const ticketEntries = Object.keys(summary.ticketByPax || {});
+    if (ticketEntries.length) {
+      ticketsHtml = `
+      <div style="font-size:11px;font-weight:700;color:#8fa4b4;letter-spacing:.05em;text-transform:uppercase;margin:14px 0 6px">🎫 Ticketnummern</div>
+      ${ticketEntries.map((name) => `
+        <div style="font-size:13px;color:#46586c;padding:4px 0;display:flex;justify-content:space-between">
+          <span>${name}</span><strong style="font-family:monospace;color:#101d2c">${summary.ticketByPax[name]}</strong>
         </div>`).join('')}`;
     }
 
@@ -296,6 +361,7 @@ async function sendBookingConfirmationEmail(to, data) {
 
       ${bagsHtml}
       ${seatsHtml}
+      ${ticketsHtml}
 
       <div style="font-size:11px;font-weight:700;color:#8fa4b4;letter-spacing:.05em;text-transform:uppercase;margin:14px 0 6px">💰 Preisübersicht</div>
       ${priceHtml}
