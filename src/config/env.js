@@ -41,4 +41,11 @@ module.exports = {
     .split(',').map((s) => s.trim()).filter(Boolean),
 
   ADMIN_TOKEN: process.env.ADMIN_TOKEN,
+
+  // [AUTO-REBUILD] Optional — flywise-app's Render "Deploy Hook" URL. When
+  // set, publishing/editing/deleting a city, country, airport, route, or
+  // blog post fires this hook so the frontend's SSG build picks up the
+  // change without waiting for the next code push. If unset, this feature
+  // is simply skipped — never a hard failure, never blocks the admin action.
+  RENDER_DEPLOY_HOOK_URL: process.env.RENDER_DEPLOY_HOOK_URL,
 };
