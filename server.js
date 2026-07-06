@@ -22,13 +22,13 @@
  */
 
 // ─── [1] Sentry — أول حاجة تتحمّل ─────────────────────────
-const Sentry = require('./sentry');
+const Sentry = require('./src/clients/sentry');
 
 const express = require('express');
 const app = express();
-const env = require('./env');
-const log = require('./log');
-const supa = require('./supabase');
+const env = require('./src/config/env');
+const log = require('./src/utils/log');
+const supa = require('./src/clients/supabase');
 
 // ─── [2] حماية الكراش ──────────────────────────────────────
 process.on('unhandledRejection', (reason, promise) => {
@@ -69,7 +69,7 @@ process.on('uncaughtException', (err) => {
 })();
 
 // ─── [4] Webhooks — لازم قبل express.json() ────────────────
-require('./webhooks.routes')(app);
+require('./src/routes/webhooks.routes')(app);
 
 // ─── [5] express.json() + الـ middleware العام ─────────────
 // [LONG-ARTICLE-FIX] كان 256kb — كافي لمعظم الطلبات، بس مقال طويل جدًا
@@ -79,20 +79,20 @@ require('./webhooks.routes')(app);
 // غير منطقية (باقي الروتات الحساسة كحجم زي الدفع مش متأثرة، بتستخدم
 // نفس الميدلوير العام ده بس بأجسام صغيرة جدًا أصلاً).
 app.use(express.json({ limit: '2mb' }));
-require('./globalMiddleware')(app);
+require('./src/middleware/globalMiddleware')(app);
 
 // ─── [6] باقي كل الروتات ────────────────────────────────────
-require('./health.routes')(app);
-require('./search.routes')(app);
-require('./booking.routes')(app);
-require('./cancel.routes')(app);
-require('./alerts.routes')(app);
-require('./contact.routes')(app);
-require('./auth.routes')(app);
-require('./loyalty.routes')(app);
-require('./promo.routes')(app);
-require('./content.routes')(app);
-require('./admin.routes')(app);
+require('./src/routes/health.routes')(app);
+require('./src/routes/search.routes')(app);
+require('./src/routes/booking.routes')(app);
+require('./src/routes/cancel.routes')(app);
+require('./src/routes/alerts.routes')(app);
+require('./src/routes/contact.routes')(app);
+require('./src/routes/auth.routes')(app);
+require('./src/routes/loyalty.routes')(app);
+require('./src/routes/promo.routes')(app);
+require('./src/routes/content.routes')(app);
+require('./src/routes/admin.routes')(app);
 
 // ─── [7] معالج الأخطاء الموحّد ───────────────────────────────
 if (env.SENTRY_DSN) {
@@ -120,6 +120,14 @@ function gracefulShutdown(signal) {
     process.exit(1);
   }, 25000).unref();
 }
-const server = app.listen(env.PORT, () => console.log(`✅ Airpiv Server running on port ${env.PORT}`));
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+let server;
+if (require.main === module) {
+  server = app.listen(env.PORT, () => console.log(`✅ Airpiv Server running on port ${env.PORT}`));
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+}
+
+// [TEST-SUITE] Exported so tests can drive the app via supertest without
+// binding a real port — has zero effect on production, which always runs
+// via `node server.js` (require.main === module) and listens exactly as before.
+module.exports = app;
