@@ -5,8 +5,9 @@ name: CI Checks (Backend)
 # syntax error (a stray bracket, an unclosed string) before Render
 # tries to deploy it and the whole API goes down. npm test runs the
 # real Jest/Supertest suite added once the repo grew past
-# syntax-checking alone. The eslint step is non-blocking (continue-on-error)
-# so it surfaces issues without risking a false-positive break.
+# syntax-checking alone. The eslint and npm audit steps are
+# non-blocking (continue-on-error) so they surface issues without
+# risking a false-positive break.
 on:
   push:
     branches: [main]
@@ -44,4 +45,8 @@ jobs:
 
       - name: Lint (non-blocking)
         run: npx eslint .
+        continue-on-error: true
+
+      - name: Dependency vulnerability audit (non-blocking)
+        run: npm audit --omit=dev
         continue-on-error: true

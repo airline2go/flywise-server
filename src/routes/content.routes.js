@@ -147,6 +147,21 @@ app.get('/countries/:code', async (req, res) => {
   }
 });
 
+// ─── GET /cities ───────────────────────────────────────────────
+// [CITY-PAGES] Public list of published cities — mirrors GET /countries
+// exactly. Only cities with at least one real route actually exist here
+// (see ensureCityExists), so this never returns an empty/thin entry.
+app.get('/cities', async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { data, error } = await supa.from('cities').select('city_slug,name').eq('status', 'published').order('name', { ascending: true });
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, cities: data || [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ─── GET /cities/:slug ──────────────────────────────────────────
 // [CITY-PAGES] Single city plus every published route that touches it
 // (as origin OR destination) — what the public city.html page renders.
