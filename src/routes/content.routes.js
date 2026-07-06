@@ -43,6 +43,55 @@ app.get('/blog-posts/:slug', async (req, res) => {
   }
 });
 
+// ─── GET /blog-posts-en ─────────────────────────────────────────
+// [EN-BLOG] English list — same blog_posts table, filtered to rows that
+// have an English translation (slug_en set) and are published. Mirrors
+// GET /blog-posts, aliased to the same field names so the public
+// /en/blog listing page and the SSG build's blog-posts-en fetch need no
+// language-specific handling.
+app.get('/blog-posts-en', async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
+    const { data, error } = await supa.from('blog_posts')
+      .select('slug:slug_en,title:title_en,excerpt:meta_description_en,cover_image_url,author,published_at')
+      .eq('status', 'published')
+      .not('slug_en', 'is', null)
+      .order('published_at', { ascending: false })
+      .limit(limit);
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, posts: data || [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── GET /blog-posts-en/:slug ───────────────────────────────────
+// [EN-BLOG] Single published post by its English slug, looked up on the
+// same row as the German post. Mirrors GET /blog-posts/:slug (same
+// view-count bump), remapped onto the shared slug/title/content/excerpt
+// field names the public post-detail page and the SSG build expect.
+app.get('/blog-posts-en/:slug', async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { data, error } = await supa.from('blog_posts').select('*').eq('slug_en', req.params.slug).eq('status', 'published').maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) return res.status(404).json({ ok: false, error: 'Beitrag nicht gefunden' });
+    supa.from('blog_posts').update({ views_count: (data.views_count || 0) + 1 }).eq('id', data.id)
+      .then(({ error: e }) => { if (e) log('warn', 'blog_view_count_failed', { error: e.message }); });
+    const post = Object.assign({}, data, {
+      slug: data.slug_en,
+      title: data.title_en,
+      content: data.content_en,
+      excerpt: data.meta_description_en || data.excerpt,
+      meta_description: data.meta_description_en,
+    });
+    res.json({ ok: true, post });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/sitemap-routes.xml', async (req, res) => {
   try {
     if (!supa) return res.status(503).send('');
