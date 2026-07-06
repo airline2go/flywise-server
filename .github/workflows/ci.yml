@@ -1,11 +1,12 @@
 name: CI Checks (Backend)
 
 # [CI-PIPELINE-FIX] Runs on every push/PR to main in the
-# flywise-server (backend) repo. Just node --check on server.js —
-# catches a syntax error (a stray bracket, an unclosed string) before
-# Render tries to deploy it and the whole API goes down. No
-# dependencies to install for this check; if the repo later grows a
-# real test suite, add an `npm ci && npm test` step above this one.
+# flywise-server (backend) repo. node --check on server.js catches a
+# syntax error (a stray bracket, an unclosed string) before Render
+# tries to deploy it and the whole API goes down. npm test runs the
+# real Jest/Supertest suite added once the repo grew past
+# syntax-checking alone. The eslint step is non-blocking (continue-on-error)
+# so it surfaces issues without risking a false-positive break.
 on:
   push:
     branches: [main]
@@ -24,3 +25,23 @@ jobs:
 
       - name: Check server.js syntax
         run: node --check server.js
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run test suite
+        run: npm test
+
+      - name: Lint (non-blocking)
+        run: npx eslint .
+        continue-on-error: true
