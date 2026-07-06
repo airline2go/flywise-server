@@ -6,6 +6,7 @@ jest.mock('../src/clients/supabase', () => {
       select: () => builder,
       eq: () => builder,
       neq: () => builder,
+      not: () => builder,
       or: () => builder,
       order: () => builder,
       limit: () => builder,
@@ -82,6 +83,63 @@ describe('GET /cities/:slug', () => {
     expect(res.status).toBe(200);
     expect(res.body.city.city_slug).toBe('berlin');
     expect(res.body.routes).toHaveLength(1);
+  });
+});
+
+describe('GET /blog-posts-en', () => {
+  test('returns the published English post list', async () => {
+    supa.__setResponse('blog_posts', { result: { data: [{ slug: 'hello-world', title: 'Hello World', excerpt: 'A test post.' }], error: null } });
+    const app = buildApp();
+    const res = await request(app).get('/blog-posts-en');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, posts: [{ slug: 'hello-world', title: 'Hello World', excerpt: 'A test post.' }] });
+  });
+
+  test('returns an empty list rather than an error when there are no English posts yet', async () => {
+    supa.__setResponse('blog_posts', { result: { data: null, error: null } });
+    const app = buildApp();
+    const res = await request(app).get('/blog-posts-en');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, posts: [] });
+  });
+});
+
+describe('GET /blog-posts-en/:slug', () => {
+  test('404s when no post has that English slug', async () => {
+    supa.__setResponse('blog_posts', { maybeSingle: { data: null, error: null } });
+    const app = buildApp();
+    const res = await request(app).get('/blog-posts-en/nowhere');
+    expect(res.status).toBe(404);
+  });
+
+  test('returns the post remapped onto the shared field names', async () => {
+    supa.__setResponse('blog_posts', {
+      maybeSingle: {
+        data: {
+          id: 1,
+          slug: 'hallo-welt',
+          slug_en: 'hello-world',
+          title_en: 'Hello World',
+          content_en: '<p>Hi.</p>',
+          meta_description_en: 'A test post.',
+          author: 'Airpiv Team',
+          published_at: '2026-01-01T00:00:00Z',
+          views_count: 5,
+        },
+        error: null,
+      },
+    });
+    const app = buildApp();
+    const res = await request(app).get('/blog-posts-en/hello-world');
+    expect(res.status).toBe(200);
+    expect(res.body.post).toEqual(expect.objectContaining({
+      slug: 'hello-world',
+      title: 'Hello World',
+      content: '<p>Hi.</p>',
+      excerpt: 'A test post.',
+      meta_description: 'A test post.',
+      author: 'Airpiv Team',
+    }));
   });
 });
 
