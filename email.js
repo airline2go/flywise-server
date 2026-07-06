@@ -7,10 +7,22 @@
 
 const env = require('./env');
 const log = require('./log');
+const { buildTicketPdf } = require('./ticketPdf');
 
-async function sendEmail(to, subject, htmlContent) {
+// [PDF-ATTACHMENT] `attachments` هي array اختيارية [{name, content}]
+// حيث content هو base64. لو مش موجودة، السلوك القديم زي ما هو
+// بالضبط — استدعاءات sendEmail الحالية (زي تأكيد الإلغاء) مش
+// متأثرة خالص.
+async function sendEmail(to, subject, htmlContent, attachments) {
   if (!env.BREVO_API_KEY) { log('warn', 'email_not_configured', { to }); return false; }
   try {
+    const payload = {
+      sender: { name: env.BREVO_SENDER_NAME, email: env.BREVO_SENDER_EMAIL },
+      to: [{ email: to }],
+      subject,
+      htmlContent,
+    };
+    if (Array.isArray(attachments) && attachments.length) payload.attachment = attachments;
     const res = await fetch('https://api.brevo.com/v3/smtp/email', {
       method: 'POST',
       headers: {
@@ -18,12 +30,7 @@ async function sendEmail(to, subject, htmlContent) {
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },
-      body: JSON.stringify({
-        sender: { name: env.BREVO_SENDER_NAME, email: env.BREVO_SENDER_EMAIL },
-        to: [{ email: to }],
-        subject,
-        htmlContent,
-      }),
+      body: JSON.stringify(payload),
     });
     if (!res.ok) {
       const errBody = await res.text();
@@ -371,7 +378,48 @@ async function sendBookingConfirmationEmail(to, data) {
       </p>
     </div>
   </div>`;
-  return sendEmail(to, `Buchungsbestätigung ${data.bookingRef || ''} · Airpiv`, html);
+  // [PDF-TICKET] بنبني التذكرة الرسمية (PDF) من نفس بيانات summary
+  // اللي بنينا منها الإيميل بالظبط — مفيش منطق مكرر، فمفيش احتمال
+  // يختلف الـPDF عن الإيميل في أي رقم أو تفصيلة. لو فشل توليد الـPDF
+  // لأي سبب، الإيميل نفسه لازم يتبعت زي ما هو من غير المرفق — تأكيد
+  // الحجز نفسه أهم من إرفاق ملف.
+  let attachments;
+  if (summary) {
+    try {
+      const legsForPdf = (summary.legs || []).map((leg) => ({
+        segs: (leg.segs || []).map((seg) => ({
+          from: seg.from, to: seg.to,
+          fromLabel: seg.fromCity && seg.fromName ? `${seg.from} · ${seg.fromCity}` : seg.from,
+          toLabel: seg.toCity && seg.toName ? `${seg.to} · ${seg.toCity}` : seg.to,
+          fromTerminal: seg.fromTerminal, toTerminal: seg.toTerminal,
+          dep: seg.dep, arr: seg.arr, dur: seg.dur, al: seg.al, fn: seg.fn,
+          aircraft: seg.aircraft, baggageByPax: seg.baggageByPax,
+        })),
+      }));
+      const passengersForPdf = (data.passengers || []).map((p) => ({
+        name: `${p.given_name || ''} ${p.family_name || ''}`.trim(),
+        dob: p.born_on || null,
+        gender: p.gender === 'f' ? 'Weiblich' : p.gender === 'm' ? 'Männlich' : null,
+      }));
+      const priceRows = [{ label: 'Flugticket', value: fmtMoney(summary.ticketPrice, summary.currency) }];
+      if (summary.bagsPrice > 0) priceRows.push({ label: 'Gepäck', value: '+ ' + fmtMoney(summary.bagsPrice, summary.currency) });
+      if (summary.seatsPrice > 0) priceRows.push({ label: 'Sitzplätze', value: '+ ' + fmtMoney(summary.seatsPrice, summary.currency) });
+      if (summary.loyaltyDiscount > 0) priceRows.push({ label: 'Treueguthaben verwendet', value: '− ' + fmtMoney(summary.loyaltyDiscount, summary.currency) });
+      const grandTotalForPdf = Math.round((summary.ticketPrice + summary.bagsPrice + summary.seatsPrice - summary.discountAmount) * 100) / 100;
+      priceRows.push({ label: 'Gesamtbetrag', value: fmtMoney(grandTotalForPdf, summary.currency), bold: true });
+
+      const pdfBuffer = await buildTicketPdf({
+        bookingRef: data.bookingRef, legs: legsForPdf,
+        passengers: passengersForPdf, ticketByPax: summary.ticketByPax,
+        priceRows,
+      });
+      attachments = [{ name: `Airpiv-${data.bookingRef || 'Ticket'}.pdf`, content: pdfBuffer.toString('base64') }];
+    } catch (e) {
+      log('warn', 'ticket_pdf_generation_failed', { error: e.message, bookingRef: data.bookingRef });
+    }
+  }
+
+  return sendEmail(to, `Buchungsbestätigung ${data.bookingRef || ''} · Airpiv`, html, attachments);
 }
 
 
