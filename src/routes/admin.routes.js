@@ -23,6 +23,7 @@ const {
 } = require('../services/adminConfig');
 const { getLoyaltyConfig } = require('../services/loyalty');
 const { haversineDistanceKm, classifyHaul, ensureCountryExists, ensureCityExists } = require('../services/routePages');
+const triggerRebuild = require('../utils/triggerRebuild');
 
 module.exports = (app) => {
 
@@ -393,6 +394,7 @@ app.post('/admin/blog-posts', requireAdmin, async (req, res) => {
       published_at: isPublishing ? new Date().toISOString() : null,
     }).select().maybeSingle();
     if (error) throw new Error(error.message);
+    if (isPublishing) triggerRebuild();
     res.json({ ok: true, post: data });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -462,6 +464,7 @@ app.put('/admin/blog-posts/:id', requireAdmin, async (req, res) => {
     // would break any link already shared/indexed by Google for this post.
     const { data, error } = await supa.from('blog_posts').update(update).eq('id', req.params.id).select().maybeSingle();
     if (error) throw new Error(error.message);
+    if (data && data.status === 'published') triggerRebuild();
     res.json({ ok: true, post: data });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -473,6 +476,7 @@ app.delete('/admin/blog-posts/:id', requireAdmin, async (req, res) => {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { error } = await supa.from('blog_posts').delete().eq('id', req.params.id);
     if (error) throw new Error(error.message);
+    triggerRebuild();
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -913,6 +917,7 @@ app.post('/admin/route-pages', requireAdmin, async (req, res) => {
       if (destination_country) ensureCountryExists(destination_country);
       ensureCityExists(originCitySlug, origin_city, origin_country, origin_iata.toUpperCase());
       ensureCityExists(destCitySlug, destination_city, destination_country, destination_iata.toUpperCase());
+      triggerRebuild();
     }
     res.json({ ok: true, route: data });
   } catch (err) {
@@ -961,6 +966,7 @@ app.put('/admin/route-pages/:id', requireAdmin, async (req, res) => {
       if (data.destination_country) ensureCountryExists(data.destination_country);
       if (data.origin_city_slug) ensureCityExists(data.origin_city_slug, data.origin_city, data.origin_country, data.origin_iata);
       if (data.destination_city_slug) ensureCityExists(data.destination_city_slug, data.destination_city, data.destination_country, data.destination_iata);
+      triggerRebuild();
     }
     res.json({ ok: true, route: data });
   } catch (err) {
@@ -1001,6 +1007,7 @@ app.post('/admin/route-pages/publish-all-drafts', requireAdmin, async (req, res)
       if (d.destination_city_slug && !citiesSeen.has(d.destination_city_slug)) { citiesSeen.add(d.destination_city_slug); ensureCityExists(d.destination_city_slug, d.destination_city, d.destination_country, d.destination_iata); }
     }
 
+    triggerRebuild();
     log('info', 'bulk_published_drafts', { count: drafts.length });
     res.json({ ok: true, published: drafts.length });
   } catch (err) {
@@ -1013,6 +1020,7 @@ app.delete('/admin/route-pages/:id', requireAdmin, async (req, res) => {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { error } = await supa.from('route_pages').delete().eq('id', req.params.id);
     if (error) throw new Error(error.message);
+    triggerRebuild();
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
