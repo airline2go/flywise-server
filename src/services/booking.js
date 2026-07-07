@@ -614,6 +614,27 @@ async function bookFromSession(session_id, session) {
   };
 }
 
+// [IDOR-FIX] Shared ownership check for every order/booking-scoped
+// endpoint (cancel, booking-confirmation, GET /order/:id, add-services).
+// This deliberately does NOT require a logged-in caller — guest
+// checkout has no account to check against, and knowledge of the
+// order_id/session_id is the accepted "manage my booking" capability
+// for guests, same as every airline's own guest-booking-lookup flow.
+// What it DOES close: a *different logged-in* user can no longer act
+// on an account-linked booking that isn't theirs just by guessing/
+// leaking its order_id — if the booking has a user_id and the caller
+// is authenticated, the two must match.
+// Returns { allowed: true, bookingRow } or { allowed: false, bookingRow }.
+async function checkOrderOwnership(duffelOrderId, callerUserId) {
+  if (!supa || !duffelOrderId) return { allowed: true, bookingRow: null };
+  const { data: bookingRow } = await supa.from('bookings')
+    .select('user_id').eq('duffel_order_id', duffelOrderId).maybeSingle();
+  if (bookingRow && bookingRow.user_id && callerUserId && bookingRow.user_id !== callerUserId) {
+    return { allowed: false, bookingRow };
+  }
+  return { allowed: true, bookingRow };
+}
+
 module.exports = {
   attachPassengerIds,
   validateServices,
@@ -623,4 +644,5 @@ module.exports = {
   computeAuthoritativePricing,
   bookFromSession,
   inFlight,
+  checkOrderOwnership,
 };

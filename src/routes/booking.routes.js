@@ -18,7 +18,7 @@ const duffel = require('../services/duffel');
 const { getTicketProfitTiers, getAncillaryProfitTiers, computeTieredMargin, recordBookingFailureEvent } = require('../services/adminConfig');
 const { normalizeOffer } = require('../services/normalizeOffer');
 const { rememberBooking, getPendingBooking, setBookingStatus, getBookingStatus } = require('../services/pendingBookings');
-const { computeAuthoritativePricing, bookFromSession, inFlight } = require('../services/booking');
+const { computeAuthoritativePricing, bookFromSession, inFlight, checkOrderOwnership } = require('../services/booking');
 
 module.exports = (app) => {
 
@@ -501,7 +501,7 @@ app.get('/booking-status/:sessionId', (req, res) => {
 // live order (the real flight: segments, baggage, seat selections),
 // so every confirmation screen — immediate or revisited later — shows
 // the exact same numbers and details.
-app.get('/booking-confirmation', rateLimit('order-status', 30, 60000), async (req, res) => {
+app.get('/booking-confirmation', attachUserIfPresent, rateLimit('order-status', 30, 60000), async (req, res) => {
   try {
     const { session_id, order_id } = req.query;
     if (!session_id && !order_id) return res.status(400).json({ ok: false, error: 'session_id oder order_id erforderlich' });
@@ -513,6 +513,15 @@ app.get('/booking-confirmation', rateLimit('order-status', 30, 60000), async (re
       q = session_id ? q.eq('stripe_session_id', session_id) : q.eq('duffel_order_id', order_id);
       const { data } = await q.maybeSingle();
       bookingRow = data || null;
+    }
+
+    // [IDOR-FIX] Guest checkout has no account, so a valid session_id/
+    // order_id alone remains sufficient for guests (same "manage my
+    // booking via reference" model every airline/OTA uses) — this only
+    // blocks a *different logged-in* user from viewing an account-linked
+    // booking that isn't theirs.
+    if (bookingRow && bookingRow.user_id && req.userId && bookingRow.user_id !== req.userId) {
+      return res.status(403).json({ ok: false, error: 'Nicht autorisiert' });
     }
 
     // 2) Resolve the Duffel order id (from our record, or directly if the
@@ -638,12 +647,19 @@ app.post('/confirm-payment', rateLimit('pay', 20, 60000), async (req, res) => {
   }
 });
 
-app.post('/add-services', rateLimit('pay', 10, 60000), async (req, res) => {
+app.post('/add-services', attachUserIfPresent, rateLimit('pay', 10, 60000), async (req, res) => {
   try {
     if (!stripe) return res.status(500).json({ ok: false, error: 'Stripe ist nicht konfiguriert' });
     const { order_id, services, success_url, cancel_url, route_label } = req.body;
     if (!order_id) return res.status(400).json({ ok: false, error: 'order_id مطلوب' });
     if (!Array.isArray(services) || !services.length) return res.status(400).json({ ok: false, error: 'services مطلوب' });
+    // [IDOR-FIX] Blocks a different logged-in user from starting a paid
+    // checkout that would add services to an account-linked booking that
+    // isn't theirs (the actual Duffel order change only applies after
+    // payment, in /confirm-add-services, but this is the point where the
+    // target order_id is chosen — the right place to gate it).
+    const ownership = await checkOrderOwnership(order_id, req.userId);
+    if (!ownership.allowed) return res.status(403).json({ ok: false, error: 'Nicht autorisiert' });
 
     // 1) Fetch the order to get offer_id and available services
     const orderRes = await duffel('GET', `/air/orders/${order_id}`);
@@ -785,8 +801,10 @@ app.post('/order', rateLimit('order', 15, 60000), async (req, res) => {
 });
 
 // ─── GET /order/:id ───────────────────────────────────────
-app.get('/order/:id', rateLimit('order-status', 30, 60000), async (req, res) => {
+app.get('/order/:id', attachUserIfPresent, rateLimit('order-status', 30, 60000), async (req, res) => {
   try {
+    const ownership = await checkOrderOwnership(req.params.id, req.userId);
+    if (!ownership.allowed) return res.status(403).json({ ok: false, error: 'Nicht autorisiert' });
     const result = await duffel('GET', `/air/orders/${req.params.id}`);
     res.json({ ok: true, order: result.data });
   } catch (err) {
