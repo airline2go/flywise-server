@@ -219,3 +219,33 @@ describe('POST /admin/invoices/issue', () => {
     }));
   });
 });
+
+describe('rate limiting on requireAdmin-protected routes', () => {
+  test('blocks further requests from the same IP once the shared admin bucket is exhausted', async () => {
+    const app = buildApp();
+    const ip = '10.9.9.9';
+    let lastStatus;
+    for (let i = 0; i < 121; i++) {
+      const res = await request(app).get('/admin/profit-tiers').set(AUTH).set('X-Forwarded-For', ip);
+      lastStatus = res.status;
+    }
+    expect(lastStatus).toBe(429);
+  });
+
+  test('is scoped per-IP, not global', async () => {
+    const app = buildApp();
+    const res = await request(app).get('/admin/profit-tiers').set(AUTH).set('X-Forwarded-For', '10.9.9.10');
+    expect(res.status).toBe(200);
+  });
+
+  test('throttles even a request with an invalid token, before requireAdmin runs', async () => {
+    const app = buildApp();
+    const ip = '10.9.9.11';
+    let lastStatus;
+    for (let i = 0; i < 121; i++) {
+      const res = await request(app).get('/admin/profit-tiers').set('Authorization', 'Bearer wrong-token').set('X-Forwarded-For', ip);
+      lastStatus = res.status;
+    }
+    expect(lastStatus).toBe(429);
+  });
+});
