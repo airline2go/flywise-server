@@ -14,13 +14,20 @@ const duffel = require('../services/duffel');
 const { recordCancellationEvent, recordSyncFailureEvent } = require('../services/adminConfig');
 const { reverseLoyaltyForBooking } = require('../services/loyalty');
 const { sendCancellationEmail } = require('../services/email');
+const { attachUserIfPresent } = require('../middleware/auth');
+const { checkOrderOwnership } = require('../services/booking');
 
 module.exports = (app) => {
 
-app.post('/cancel', rateLimit('cancel', 10, 60000), async (req, res) => {
+app.post('/cancel', attachUserIfPresent, rateLimit('cancel', 10, 60000), async (req, res) => {
   try {
     const { order_id } = req.body;
     if (!order_id) return res.status(400).json({ ok: false, error: 'order_id مطلوب' });
+    // [IDOR-FIX] Blocks a different logged-in user from cancelling an
+    // account-linked booking that isn't theirs. Guest bookings (no
+    // user_id) are unaffected — see checkOrderOwnership's own comment.
+    const ownership = await checkOrderOwnership(order_id, req.userId);
+    if (!ownership.allowed) return res.status(403).json({ ok: false, error: 'Nicht autorisiert' });
 
     const cancelReq = await duffel('POST', '/air/order_cancellations', { data: { order_id } });
     const confirmed = await duffel('POST', `/air/order_cancellations/${cancelReq.data?.id}/actions/confirm`, {});
@@ -56,10 +63,12 @@ app.post('/cancel', rateLimit('cancel', 10, 60000), async (req, res) => {
 // ─── POST /cancel-quote ───────────────────────────────────
 // Duffel step 1: create a pending cancellation → returns the REAL refund amount
 // and conditions for this order, WITHOUT actually cancelling yet.
-app.post('/cancel-quote', rateLimit('cancel', 15, 60000), async (req, res) => {
+app.post('/cancel-quote', attachUserIfPresent, rateLimit('cancel', 15, 60000), async (req, res) => {
   try {
     const { order_id } = req.body;
     if (!order_id) return res.status(400).json({ ok: false, error: 'order_id مطلوب' });
+    const ownership = await checkOrderOwnership(order_id, req.userId);
+    if (!ownership.allowed) return res.status(403).json({ ok: false, error: 'Nicht autorisiert' });
     const cancelReq = await duffel('POST', '/air/order_cancellations', { data: { order_id } });
     const d = cancelReq.data || {};
     const duffelRefundAmount = parseFloat(d.refund_amount || 0);
@@ -107,10 +116,21 @@ app.post('/cancel-quote', rateLimit('cancel', 15, 60000), async (req, res) => {
 
 // ─── POST /cancel-confirm ─────────────────────────────────
 // Duffel step 2: confirm the pending cancellation (executes refund).
-app.post('/cancel-confirm', rateLimit('cancel', 10, 60000), async (req, res) => {
+app.post('/cancel-confirm', attachUserIfPresent, rateLimit('cancel', 10, 60000), async (req, res) => {
   try {
     const { cancellation_id, order_id: order_id_from_client } = req.body;
     if (!cancellation_id) return res.status(400).json({ ok: false, error: 'cancellation_id مطلوب' });
+    // [IDOR-FIX] order_id is now required (previously optional, used only
+    // as a post-hoc fallback) specifically so this ownership check can't
+    // be bypassed by simply omitting it — checked with the client-supplied
+    // order_id, before Duffel executes the actual cancellation+refund,
+    // since the authoritative order_id only comes back from Duffel's own
+    // response *after* this call, too late to gate on. The frontend
+    // already sends this value (it's the same order_id /cancel-quote was
+    // called with moments earlier).
+    if (!order_id_from_client) return res.status(400).json({ ok: false, error: 'order_id مطلوب' });
+    const ownership = await checkOrderOwnership(order_id_from_client, req.userId);
+    if (!ownership.allowed) return res.status(403).json({ ok: false, error: 'Nicht autorisiert' });
     const confirmed = await duffel('POST', `/air/order_cancellations/${cancellation_id}/actions/confirm`, {});
 
     // [REFUND-DIAGNOSTIC] Logs Duffel's RAW response fields exactly as

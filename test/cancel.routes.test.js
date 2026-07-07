@@ -1,5 +1,6 @@
 jest.mock('../src/clients/supabase', () => {
   const responses = {}; // table -> { maybeSingle: {data,error}, result: {data,error} }
+  const mockGetUser = jest.fn();
   function makeBuilder(table) {
     const cfg = responses[table] || {};
     const builder = {
@@ -16,6 +17,8 @@ jest.mock('../src/clients/supabase', () => {
   }
   return {
     from: jest.fn((table) => makeBuilder(table)),
+    auth: { getUser: mockGetUser },
+    __mockGetUser: mockGetUser,
     __setResponse: (table, cfg) => { responses[table] = cfg; },
     __reset: () => { for (const k of Object.keys(responses)) delete responses[k]; },
   };
@@ -45,9 +48,15 @@ function buildApp() {
   return app;
 }
 
+function authAs(userId) {
+  supa.__mockGetUser.mockResolvedValue({ data: { user: { id: userId, email: null } }, error: null });
+  return { Authorization: 'Bearer valid-token' };
+}
+
 beforeEach(() => {
   supa.__reset();
   supa.from.mockClear();
+  supa.__mockGetUser.mockReset().mockResolvedValue({ data: null, error: { message: 'invalid token' } });
   stripe.refunds.create.mockClear();
   stripe.refunds.create.mockResolvedValue({});
   mockDuffelFn.mockReset();
@@ -61,7 +70,7 @@ describe('POST /cancel-quote — refund breakdown math', () => {
     supa.__setResponse('bookings', { maybeSingle: { data: { duffel_amount: 100, customer_paid: 120, currency: 'EUR' }, error: null } });
 
     const app = buildApp();
-    const res = await request(app).post('/cancel-quote').send({ order_id: 'ord_1' });
+    const res = await request(app).post('/cancel-quote').set('X-Forwarded-For', '10.0.0.1').send({ order_id: 'ord_1' });
 
     expect(res.status).toBe(200);
     expect(res.body.breakdown).toEqual({
@@ -103,7 +112,7 @@ describe('POST /cancel-confirm — proportional Stripe refund', () => {
     mockBookingRow({});
 
     const app = buildApp();
-    const res = await request(app).post('/cancel-confirm').send({ cancellation_id: 'cxl_1' });
+    const res = await request(app).post('/cancel-confirm').set('X-Forwarded-For', '10.0.0.2').send({ cancellation_id: 'cxl_1', order_id: 'ord_1' });
 
     expect(res.status).toBe(200);
     // refundRatio = 50/100 = 0.5; actualRefundToCustomer = min(50, 120) = 50
@@ -131,7 +140,7 @@ describe('POST /cancel-confirm — proportional Stripe refund', () => {
     mockBookingRow({});
 
     const app = buildApp();
-    const res = await request(app).post('/cancel-confirm').send({ cancellation_id: 'cxl_1' });
+    const res = await request(app).post('/cancel-confirm').set('X-Forwarded-For', '10.0.0.3').send({ cancellation_id: 'cxl_1', order_id: 'ord_1' });
 
     expect(res.status).toBe(200);
     expect(stripe.refunds.create).not.toHaveBeenCalled();
@@ -147,7 +156,7 @@ describe('POST /cancel-confirm — proportional Stripe refund', () => {
     mockBookingRow({ duffel_amount: 100, customer_paid: 120 });
 
     const app = buildApp();
-    const res = await request(app).post('/cancel-confirm').send({ cancellation_id: 'cxl_1' });
+    const res = await request(app).post('/cancel-confirm').set('X-Forwarded-For', '10.0.0.4').send({ cancellation_id: 'cxl_1', order_id: 'ord_1' });
 
     expect(res.status).toBe(200);
     expect(stripe.refunds.create).toHaveBeenCalledWith({ payment_intent: 'pi_1', amount: 12000 });
@@ -162,7 +171,7 @@ describe('POST /cancel-confirm — proportional Stripe refund', () => {
     stripe.refunds.create.mockRejectedValueOnce(new Error('card_declined'));
 
     const app = buildApp();
-    const res = await request(app).post('/cancel-confirm').send({ cancellation_id: 'cxl_1' });
+    const res = await request(app).post('/cancel-confirm').set('X-Forwarded-For', '10.0.0.5').send({ cancellation_id: 'cxl_1', order_id: 'ord_1' });
 
     expect(res.status).toBe(200);
     expect(res.body.stripe_refund_issued).toBe(false);
@@ -171,10 +180,80 @@ describe('POST /cancel-confirm — proportional Stripe refund', () => {
 
   test('missing cancellation_id is rejected before any Duffel/Stripe call', async () => {
     const app = buildApp();
-    const res = await request(app).post('/cancel-confirm').send({});
+    const res = await request(app).post('/cancel-confirm').set('X-Forwarded-For', '10.0.0.6').send({});
 
     expect(res.status).toBe(400);
     expect(mockDuffelFn).not.toHaveBeenCalled();
     expect(stripe.refunds.create).not.toHaveBeenCalled();
+  });
+
+  test('missing order_id is rejected before any Duffel/Stripe call', async () => {
+    const app = buildApp();
+    const res = await request(app).post('/cancel-confirm').set('X-Forwarded-For', '10.0.0.7').send({ cancellation_id: 'cxl_1' });
+
+    expect(res.status).toBe(400);
+    expect(mockDuffelFn).not.toHaveBeenCalled();
+    expect(stripe.refunds.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('IDOR protection — a logged-in user cannot act on another account\'s booking', () => {
+  test('POST /cancel is rejected when the order belongs to a different account', async () => {
+    const headers = authAs('attacker');
+    supa.__setResponse('bookings', { maybeSingle: { data: { user_id: 'victim' }, error: null } });
+
+    const app = buildApp();
+    const res = await request(app).post('/cancel').set('X-Forwarded-For', '10.0.0.8').set(headers).send({ order_id: 'ord_1' });
+
+    expect(res.status).toBe(403);
+    expect(mockDuffelFn).not.toHaveBeenCalled();
+  });
+
+  test('POST /cancel-quote is rejected when the order belongs to a different account', async () => {
+    const headers = authAs('attacker');
+    supa.__setResponse('bookings', { maybeSingle: { data: { user_id: 'victim' }, error: null } });
+
+    const app = buildApp();
+    const res = await request(app).post('/cancel-quote').set('X-Forwarded-For', '10.0.0.9').set(headers).send({ order_id: 'ord_1' });
+
+    expect(res.status).toBe(403);
+    expect(mockDuffelFn).not.toHaveBeenCalled();
+  });
+
+  test('POST /cancel-confirm is rejected when the order belongs to a different account (no refund/cancellation executed)', async () => {
+    const headers = authAs('attacker');
+    supa.__setResponse('bookings', { maybeSingle: { data: { user_id: 'victim' }, error: null } });
+
+    const app = buildApp();
+    const res = await request(app).post('/cancel-confirm').set('X-Forwarded-For', '10.0.0.10').set(headers).send({ cancellation_id: 'cxl_1', order_id: 'ord_1' });
+
+    expect(res.status).toBe(403);
+    expect(mockDuffelFn).not.toHaveBeenCalled();
+    expect(stripe.refunds.create).not.toHaveBeenCalled();
+  });
+
+  test('an unauthenticated caller (guest checkout) is still allowed to cancel a guest booking (no user_id)', async () => {
+    supa.__setResponse('bookings', { maybeSingle: { data: { user_id: null }, error: null } });
+    mockDuffelFn
+      .mockResolvedValueOnce({ data: { id: 'cxl_1' } })
+      .mockResolvedValueOnce({ data: { refund_amount: null } });
+
+    const app = buildApp();
+    const res = await request(app).post('/cancel').set('X-Forwarded-For', '10.0.0.11').send({ order_id: 'ord_1' });
+
+    expect(res.status).toBe(200);
+  });
+
+  test('the account owner themself can still cancel their own booking', async () => {
+    const headers = authAs('owner');
+    supa.__setResponse('bookings', { maybeSingle: { data: { user_id: 'owner' }, error: null } });
+    mockDuffelFn
+      .mockResolvedValueOnce({ data: { id: 'cxl_1' } })
+      .mockResolvedValueOnce({ data: { refund_amount: null } });
+
+    const app = buildApp();
+    const res = await request(app).post('/cancel').set('X-Forwarded-For', '10.0.0.12').set(headers).send({ order_id: 'ord_1' });
+
+    expect(res.status).toBe(200);
   });
 });
