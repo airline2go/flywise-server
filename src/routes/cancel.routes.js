@@ -13,6 +13,7 @@ const rateLimit = require('../middleware/rateLimit');
 const duffel = require('../services/duffel');
 const { recordCancellationEvent, recordSyncFailureEvent } = require('../services/adminConfig');
 const { reverseLoyaltyForBooking } = require('../services/loyalty');
+const { reverseReferralForBooking } = require('../services/referrals');
 const { sendCancellationEmail } = require('../services/email');
 const { attachUserIfPresent } = require('../middleware/auth');
 const { checkOrderOwnership } = require('../services/booking');
@@ -329,6 +330,13 @@ app.post('/cancel-confirm', attachUserIfPresent, rateLimit('cancel', 10, 60000),
           });
       }
     }
+
+    // [REFERRAL-REBUILD] If this booking was tied to a referral (this
+    // customer was themselves referred, and this was the trip that would
+    // have triggered a payout), reverse any reward already paid and mark
+    // the referral cancelled so it's never paid later. A safe no-op for
+    // every booking with no referral attached — never blocks the response.
+    reverseReferralForBooking(order_id).catch((e) => log('warn', 'referral_reverse_call_failed', { order_id, error: e.message }));
 
     // [SYNC-FAILURE-NOTIFY] The cancellation with Duffel has ALREADY
     // succeeded by this point — that's the part that matters financially

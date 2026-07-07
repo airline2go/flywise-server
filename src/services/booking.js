@@ -15,6 +15,7 @@ const log = require('../utils/log');
 const duffel = require('./duffel');
 const { computeTieredMargin, getTicketProfitTiers, getAncillaryProfitTiers } = require('./adminConfig');
 const { computeLoyaltyDiscount, applyLoyaltyForBooking } = require('./loyalty');
+const { attachBookingIfReferred } = require('./referrals');
 const { sendBookingConfirmationEmail, buildOrderSummaryForEmail } = require('./email');
 const { getPendingBooking, markPendingBooked, setBookingStatus } = require('./pendingBookings');
 
@@ -514,6 +515,16 @@ async function bookFromSession(session_id, session) {
             .then(function(){}, function(e){ log('warn', 'loyalty_points_persist_failed', { order_id: orderId, error: e.message }); });
         }
       } catch (e) { log('warn', 'loyalty_apply_call_failed', { error: e.message }); }
+
+      // [REFERRAL-REBUILD] If this customer was themselves referred by
+      // someone, and this is their first confirmed booking, attach it —
+      // using result.data (the just-confirmed Duffel order) for the real
+      // departure date. Never blocks the booking response; a failure here
+      // only means a referral reward is delayed, never that the booking
+      // itself is affected.
+      if (orderId) {
+        attachBookingIfReferred(booking.user_id, orderId, result.data).catch((e) => log('warn', 'referral_attach_call_failed', { error: e.message }));
+      }
     }
   }
 

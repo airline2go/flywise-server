@@ -90,6 +90,7 @@ require('./src/routes/alerts.routes')(app);
 require('./src/routes/contact.routes')(app);
 require('./src/routes/auth.routes')(app);
 require('./src/routes/loyalty.routes')(app);
+require('./src/routes/referral.routes')(app);
 require('./src/routes/promo.routes')(app);
 require('./src/routes/content.routes')(app);
 require('./src/routes/admin.routes')(app);
