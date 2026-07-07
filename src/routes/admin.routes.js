@@ -37,7 +37,7 @@ app.post('/admin/login', rateLimit('admin_login', 10, 60000), (req, res) => {
   res.json({ ok: true, token: env.ADMIN_TOKEN });
 });
 
-app.get('/admin/maintenance', requireAdmin, async (req, res) => {
+app.get('/admin/maintenance', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     const maint = await getAdminConfig('maintenance_mode', { enabled: false, message: '' });
     res.json({ ok: true, enabled: !!maint.enabled, message: maint.message || '' });
@@ -45,7 +45,7 @@ app.get('/admin/maintenance', requireAdmin, async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
-app.post('/admin/maintenance', requireAdmin, async (req, res) => {
+app.post('/admin/maintenance', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     const enabled = !!(req.body && req.body.enabled);
     const message = (req.body && typeof req.body.message === 'string') ? req.body.message.slice(0, 500) : '';
@@ -57,7 +57,7 @@ app.post('/admin/maintenance', requireAdmin, async (req, res) => {
   }
 });
 
-app.get('/admin/stats', requireAdmin, async (req, res) => {
+app.get('/admin/stats', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     // [PROFIT-PERIOD-FIX] Optional date-range filter on created_at —
@@ -106,7 +106,7 @@ function slugify(title) {
   return s || ('post-' + Math.random().toString(36).slice(2, 8));
 }
 
-app.get('/admin/blog-posts', requireAdmin, async (req, res) => {
+app.get('/admin/blog-posts', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { data, error } = await supa.from('blog_posts').select('*').order('created_at', { ascending: false });
@@ -346,7 +346,7 @@ async function deriveSeoFields(rawTitle, contentHtml, providedMeta, providedExce
   return { title, excerpt, meta_description: metaDescription };
 }
 
-app.post('/admin/blog-posts', requireAdmin, async (req, res) => {
+app.post('/admin/blog-posts', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { title: rawTitle, meta_description, excerpt, content: rawContent, cover_image_url, author, status } = req.body;
@@ -401,7 +401,7 @@ app.post('/admin/blog-posts', requireAdmin, async (req, res) => {
   }
 });
 
-app.put('/admin/blog-posts/:id', requireAdmin, async (req, res) => {
+app.put('/admin/blog-posts/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { data: existing, error: fetchErr } = await supa.from('blog_posts').select('*').eq('id', req.params.id).maybeSingle();
@@ -471,7 +471,7 @@ app.put('/admin/blog-posts/:id', requireAdmin, async (req, res) => {
   }
 });
 
-app.delete('/admin/blog-posts/:id', requireAdmin, async (req, res) => {
+app.delete('/admin/blog-posts/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { error } = await supa.from('blog_posts').delete().eq('id', req.params.id);
@@ -483,7 +483,7 @@ app.delete('/admin/blog-posts/:id', requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/admin/route-pages/clear-price-cache', requireAdmin, async (req, res) => {
+app.post('/admin/route-pages/clear-price-cache', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { data, error } = await supa.from('admin_config').select('key').like('key', 'route_price_%');
@@ -500,7 +500,7 @@ app.post('/admin/route-pages/clear-price-cache', requireAdmin, async (req, res) 
   }
 });
 
-app.post('/admin/route-pages/backfill-locations', requireAdmin, async (req, res) => {
+app.post('/admin/route-pages/backfill-locations', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { data: routes, error } = await supa.from('route_pages').select('*').eq('status', 'published');
@@ -584,7 +584,7 @@ app.post('/admin/route-pages/backfill-locations', requireAdmin, async (req, res)
 // دي مع كل التوليفات الممكنة نظرياً عشان يوري "مين موجود ومين ناقص".
 // محدودة بـ 40 كود كحد أقصى (40×39=1560 توليفة ممكنة) عشان الجدول
 // يفضل قابل للقراءة فعلياً على الشاشة.
-app.get('/admin/route-pages/matrix', requireAdmin, async (req, res) => {
+app.get('/admin/route-pages/matrix', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const codes = (req.query.codes || '').split(',').map((c) => c.trim().toUpperCase()).filter(Boolean);
@@ -609,7 +609,7 @@ app.get('/admin/route-pages/matrix', requireAdmin, async (req, res) => {
 // - `status`: فلترة (published/draft) — اختياري
 // - `page`, `limit`: صفحات حقيقية من قاعدة البيانات (مش كل شيء ثم قص من الفرونت إند)
 // النتيجة برضو بترجع `total` عشان الواجهة تقدر تبني أرقام الصفحات.
-app.get('/admin/route-pages', requireAdmin, async (req, res) => {
+app.get('/admin/route-pages', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const q = (req.query.q || '').trim();
@@ -647,7 +647,7 @@ app.get('/admin/route-pages', requireAdmin, async (req, res) => {
 // منطق فحص التكرار). المسارات الجديدة بتتعمل كـ"مسودة" دايماً — أبداً
 // منشورة تلقائياً — عشان لو حصل غلط في قائمة كبيرة، الأدمن يقدر يراجع
 // ويحذف قبل ما أي حاجة تظهر للزوار.
-app.post('/admin/route-pages/bulk-create', requireAdmin, async (req, res) => {
+app.post('/admin/route-pages/bulk-create', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { airports, bothDirections } = req.body;
@@ -748,7 +748,7 @@ app.post('/admin/route-pages/bulk-create', requireAdmin, async (req, res) => {
 // عشان الطلب الواحد مايستغرقش وقت طويل يخلي المتصفح يستنى أو الطلب
 // يفشل بـ timeout؛ الواجهة الأمامية هي اللي بتنده على الـ endpoint
 // ده بشكل متكرر لحد ما كل المسارات تتفحص.
-app.post('/admin/route-pages/health-check-batch', requireAdmin, async (req, res) => {
+app.post('/admin/route-pages/health-check-batch', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const BATCH_SIZE = 10;
@@ -829,7 +829,7 @@ app.post('/admin/route-pages/health-check-batch', requireAdmin, async (req, res)
   }
 });
 
-app.post('/admin/route-pages', requireAdmin, async (req, res) => {
+app.post('/admin/route-pages', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status, origin_lat, origin_lng, destination_lat, destination_lng, origin_country, destination_country, custom_title, custom_meta_description, custom_faq } = req.body;
@@ -925,7 +925,7 @@ app.post('/admin/route-pages', requireAdmin, async (req, res) => {
   }
 });
 
-app.put('/admin/route-pages/:id', requireAdmin, async (req, res) => {
+app.put('/admin/route-pages/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status, origin_lat, origin_lng, destination_lat, destination_lng, origin_country, destination_country, custom_title, custom_meta_description, custom_faq } = req.body;
@@ -978,7 +978,7 @@ app.put('/admin/route-pages/:id', requireAdmin, async (req, res) => {
 // لما تنشر مسار واحد يدوي (تفعيل صفحات الدول والمدن المرتبطة)، بس
 // بكفاءة أعلى: كل دولة/مدينة بتتفعّل مرة واحدة بس حتى لو عشرات
 // المسارات بتشاركها، مش مرة لكل مسار.
-app.post('/admin/route-pages/publish-all-drafts', requireAdmin, async (req, res) => {
+app.post('/admin/route-pages/publish-all-drafts', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
 
@@ -1015,7 +1015,7 @@ app.post('/admin/route-pages/publish-all-drafts', requireAdmin, async (req, res)
   }
 });
 
-app.delete('/admin/route-pages/:id', requireAdmin, async (req, res) => {
+app.delete('/admin/route-pages/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { error } = await supa.from('route_pages').delete().eq('id', req.params.id);
@@ -1027,7 +1027,7 @@ app.delete('/admin/route-pages/:id', requireAdmin, async (req, res) => {
   }
 });
 
-app.get('/admin/error-logs', requireAdmin, async (req, res) => {
+app.get('/admin/error-logs', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     let query = supa.from('error_logs').select('*').order('created_at', { ascending: false }).limit(200);
@@ -1041,7 +1041,7 @@ app.get('/admin/error-logs', requireAdmin, async (req, res) => {
   }
 });
 
-app.delete('/admin/error-logs', requireAdmin, async (req, res) => {
+app.delete('/admin/error-logs', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { error } = await supa.from('error_logs').delete().neq('id', '00000000-0000-0000-0000-000000000000');
@@ -1052,7 +1052,7 @@ app.delete('/admin/error-logs', requireAdmin, async (req, res) => {
   }
 });
 
-app.get('/admin/cancellations', requireAdmin, async (req, res) => {
+app.get('/admin/cancellations', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     const events = await getAdminConfig('cancellation_events', []);
     let bookingsByOrderId = {};
@@ -1068,7 +1068,7 @@ app.get('/admin/cancellations', requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/admin/cancellations/mark-read', requireAdmin, async (req, res) => {
+app.post('/admin/cancellations/mark-read', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     await markCancellationsRead();
     res.json({ ok: true });
@@ -1077,7 +1077,7 @@ app.post('/admin/cancellations/mark-read', requireAdmin, async (req, res) => {
   }
 });
 
-app.get('/admin/booking-failures', requireAdmin, async (req, res) => {
+app.get('/admin/booking-failures', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     const events = await getAdminConfig('booking_failure_events', []);
     res.json({ ok: true, events, unreadCount: events.filter((e) => !e.read).length });
@@ -1086,7 +1086,7 @@ app.get('/admin/booking-failures', requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/admin/booking-failures/mark-read', requireAdmin, async (req, res) => {
+app.post('/admin/booking-failures/mark-read', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     await markBookingFailuresRead();
     res.json({ ok: true });
@@ -1095,7 +1095,7 @@ app.post('/admin/booking-failures/mark-read', requireAdmin, async (req, res) => 
   }
 });
 
-app.get('/admin/sync-failures', requireAdmin, async (req, res) => {
+app.get('/admin/sync-failures', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     const events = await getAdminConfig('sync_failure_events', []);
     let bookingsByOrderId = {};
@@ -1111,7 +1111,7 @@ app.get('/admin/sync-failures', requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/admin/sync-failures/mark-read', requireAdmin, async (req, res) => {
+app.post('/admin/sync-failures/mark-read', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     await markSyncFailuresRead();
     res.json({ ok: true });
@@ -1120,7 +1120,7 @@ app.post('/admin/sync-failures/mark-read', requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/admin/sync-failures/:order_id/resolve', requireAdmin, async (req, res) => {
+app.post('/admin/sync-failures/:order_id/resolve', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { error } = await supa.from('bookings').update({ status: 'cancelled' }).eq('duffel_order_id', req.params.order_id);
@@ -1131,7 +1131,7 @@ app.post('/admin/sync-failures/:order_id/resolve', requireAdmin, async (req, res
   }
 });
 
-app.get('/admin/bookings', requireAdmin, async (req, res) => {
+app.get('/admin/bookings', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
@@ -1145,7 +1145,7 @@ app.get('/admin/bookings', requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/admin/bookings/:id/cancel', requireAdmin, async (req, res) => {
+app.post('/admin/bookings/:id/cancel', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { error } = await supa.from('bookings').update({ status: 'cancelled' }).eq('id', req.params.id);
@@ -1156,7 +1156,7 @@ app.post('/admin/bookings/:id/cancel', requireAdmin, async (req, res) => {
   }
 });
 
-app.get('/admin/profit-tiers', requireAdmin, async (req, res) => {
+app.get('/admin/profit-tiers', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     const tiers = await getAdminConfig('ticket_profit_tiers', DEFAULT_TICKET_TIERS);
     res.json({ ok: true, tiers });
@@ -1164,7 +1164,7 @@ app.get('/admin/profit-tiers', requireAdmin, async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
-app.post('/admin/profit-tiers', requireAdmin, async (req, res) => {
+app.post('/admin/profit-tiers', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     const tiers = validateTiersPayload(req.body && req.body.tiers);
     await setAdminConfig('ticket_profit_tiers', tiers);
@@ -1175,7 +1175,7 @@ app.post('/admin/profit-tiers', requireAdmin, async (req, res) => {
   }
 });
 
-app.get('/admin/ancillary-margin', requireAdmin, async (req, res) => {
+app.get('/admin/ancillary-margin', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     const tiers = await getAdminConfig('ancillary_profit_tiers', DEFAULT_ANCILLARY_TIERS);
     res.json({ ok: true, tiers });
@@ -1183,7 +1183,7 @@ app.get('/admin/ancillary-margin', requireAdmin, async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
-app.post('/admin/ancillary-margin', requireAdmin, async (req, res) => {
+app.post('/admin/ancillary-margin', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     const tiers = validateTiersPayload(req.body && req.body.tiers);
     await setAdminConfig('ancillary_profit_tiers', tiers);
@@ -1211,7 +1211,7 @@ function validateTiersPayload(tiers) {
   });
 }
 
-app.get('/admin/promos', requireAdmin, async (req, res) => {
+app.get('/admin/promos', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { data, error } = await supa.from('promo_codes').select('*').order('created_at', { ascending: false });
@@ -1222,7 +1222,7 @@ app.get('/admin/promos', requireAdmin, async (req, res) => {
   }
 });
 
-app.get('/admin/promos/usage-log', requireAdmin, async (req, res) => {
+app.get('/admin/promos/usage-log', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
@@ -1238,7 +1238,7 @@ app.get('/admin/promos/usage-log', requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/admin/promos', requireAdmin, async (req, res) => {
+app.post('/admin/promos', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { code, type, value, max_uses, expires_at } = req.body || {};
@@ -1265,7 +1265,7 @@ app.post('/admin/promos', requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/admin/promos/:id/toggle', requireAdmin, async (req, res) => {
+app.post('/admin/promos/:id/toggle', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { data: row } = await supa.from('promo_codes').select('active').eq('id', req.params.id).maybeSingle();
@@ -1278,7 +1278,7 @@ app.post('/admin/promos/:id/toggle', requireAdmin, async (req, res) => {
   }
 });
 
-app.delete('/admin/promos/:id', requireAdmin, async (req, res) => {
+app.delete('/admin/promos/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { error } = await supa.from('promo_codes').delete().eq('id', req.params.id);
@@ -1289,7 +1289,7 @@ app.delete('/admin/promos/:id', requireAdmin, async (req, res) => {
   }
 });
 
-app.get('/admin/invoice-config', requireAdmin, async (req, res) => {
+app.get('/admin/invoice-config', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     const cfg = await getAdminConfig('invoice_config', DEFAULT_INVOICE_CONFIG);
     res.json({ ok: true, config: cfg });
@@ -1297,7 +1297,7 @@ app.get('/admin/invoice-config', requireAdmin, async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
-app.post('/admin/invoice-config', requireAdmin, async (req, res) => {
+app.post('/admin/invoice-config', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     const incoming = req.body || {};
     const cfg = {
@@ -1315,7 +1315,7 @@ app.post('/admin/invoice-config', requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/admin/invoices/issue', requireAdmin, async (req, res) => {
+app.post('/admin/invoices/issue', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { booking_id, booking_reference, customer_name, customer_address, amount, currency, fields } = req.body || {};
@@ -1339,7 +1339,7 @@ app.post('/admin/invoices/issue', requireAdmin, async (req, res) => {
   }
 });
 
-app.get('/admin/invoices', requireAdmin, async (req, res) => {
+app.get('/admin/invoices', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const limit = Math.min(parseInt(req.query.limit, 10) || 200, 1000);
@@ -1351,7 +1351,7 @@ app.get('/admin/invoices', requireAdmin, async (req, res) => {
   }
 });
 
-app.get('/admin/invoices/:invoiceNumber', requireAdmin, async (req, res) => {
+app.get('/admin/invoices/:invoiceNumber', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { data, error } = await supa.from('invoices').select('*').eq('invoice_number', req.params.invoiceNumber).maybeSingle();
@@ -1363,7 +1363,7 @@ app.get('/admin/invoices/:invoiceNumber', requireAdmin, async (req, res) => {
   }
 });
 
-app.get('/admin/loyalty-config', requireAdmin, async (req, res) => {
+app.get('/admin/loyalty-config', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     const cfg = await getLoyaltyConfig();
     res.json({ ok: true, config: cfg });
@@ -1371,7 +1371,7 @@ app.get('/admin/loyalty-config', requireAdmin, async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
-app.post('/admin/loyalty-config', requireAdmin, async (req, res) => {
+app.post('/admin/loyalty-config', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     const incoming = req.body || {};
     const welcomeCreditEur = Number(incoming.welcomeCreditEur);
@@ -1404,7 +1404,7 @@ app.post('/admin/loyalty-config', requireAdmin, async (req, res) => {
   }
 });
 
-app.get('/admin/pricing-preview', requireAdmin, async (req, res) => {
+app.get('/admin/pricing-preview', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     const price = Number(req.query.price) || 0;
     const kind = req.query.kind === 'ancillary' ? 'ancillary' : 'ticket';
