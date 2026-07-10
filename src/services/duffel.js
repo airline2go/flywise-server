@@ -11,6 +11,7 @@
 const env = require('../config/env');
 const log = require('../utils/log');
 const Sentry = require('../clients/sentry');
+const { recordApiLog } = require('./apiLogs');
 
 const DUFFEL_TIMEOUT_MS = 20000;
 
@@ -107,9 +108,17 @@ function duffelCircuitRecordFailure() {
 // غير صحيح، عرض منتهي) هيفشل بنفس الطريقة تاني، فإعادة المحاولة
 // هتستهلك حصة Duffel وتزود التأخير من غير أي فايدة.
 async function duffel(method, path, body = null, extraHeaders = null, options = null) {
+  // [API-COST-MONITORING] Timed across the whole logical call, including
+  // any retries below — retries are an implementation detail, not a
+  // second billable-feeling event, so exactly ONE log row comes out of
+  // one duffel() invocation regardless of how many attempts it took.
+  const startedAt = Date.now();
+  const logContext = (options && options.logContext) || null;
+
   if (!duffelCircuitAllow()) {
     const err = new Error('Duffel ist vorübergehend nicht erreichbar — bitte in Kürze erneut versuchen');
     err.status = 503;
+    recordApiLog({ method, path, statusCode: 503, success: false, durationMs: Date.now() - startedAt, logContext });
     throw err;
   }
   const timeoutMs = (options && options.timeoutMs) || DUFFEL_TIMEOUT_MS;
@@ -119,12 +128,14 @@ async function duffel(method, path, body = null, extraHeaders = null, options = 
     try {
       const result = await duffelAttempt(method, path, body, extraHeaders, timeoutMs);
       duffelCircuitRecordSuccess();
+      recordApiLog({ method, path, statusCode: 200, success: true, durationMs: Date.now() - startedAt, logContext });
       return result;
     } catch (e) {
       lastErr = e;
       const transient = !e.status || e.status >= 500;
       if (!transient || attempt === maxAttempts) {
         duffelCircuitRecordFailure();
+        recordApiLog({ method, path, statusCode: e.status || null, success: false, durationMs: Date.now() - startedAt, logContext });
         throw e;
       }
       await new Promise((r) => setTimeout(r, 300 * attempt));

@@ -1481,4 +1481,85 @@ app.get('/admin/pricing-preview', rateLimit('admin', 120, 60000), requireAdmin, 
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+
+// [API-COST-MONITORING] Owner-only, same tier as margins — usage/cost
+// data isn't something a staff account needs to see day-to-day.
+const DEFAULT_API_COST_CONFIG = { costPerRequestEur: 0, dailyRequestAlertThreshold: 1000 };
+
+app.get('/admin/api-cost-config', rateLimit('admin', 120, 60000), requireFullAdmin, async (req, res) => {
+  try {
+    const cfg = await getAdminConfig('api_cost_config', DEFAULT_API_COST_CONFIG);
+    res.json({ ok: true, config: cfg });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+app.post('/admin/api-cost-config', rateLimit('admin', 120, 60000), requireFullAdmin, async (req, res) => {
+  try {
+    const incoming = req.body || {};
+    const cfg = {
+      costPerRequestEur: Number.isFinite(Number(incoming.costPerRequestEur)) ? Math.max(0, Number(incoming.costPerRequestEur)) : DEFAULT_API_COST_CONFIG.costPerRequestEur,
+      dailyRequestAlertThreshold: Number.isFinite(Number(incoming.dailyRequestAlertThreshold)) ? Math.max(1, parseInt(incoming.dailyRequestAlertThreshold, 10)) : DEFAULT_API_COST_CONFIG.dailyRequestAlertThreshold,
+    };
+    await setAdminConfig('api_cost_config', cfg);
+    res.json({ ok: true, config: cfg });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// [API-COST-MONITORING] Bounded aggregation, never an unbounded table
+// scan: category/success counts use index-backed head-count queries;
+// the "top routes" ranking fetches a capped, route-tagged slice of raw
+// rows and groups it in Node — mirrors how /admin/stats and the Reports
+// page already aggregate bounded data in JS rather than needing raw SQL.
+app.get('/admin/api-logs/stats', rateLimit('admin', 120, 60000), requireFullAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const from = req.query.from ? new Date(req.query.from) : new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const to = req.query.to ? new Date(req.query.to) : new Date();
+    const fromIso = from.toISOString();
+    const toIso = to.toISOString();
+
+    function countQuery(extra) {
+      let q = supa.from('api_logs').select('id', { count: 'exact', head: true }).gte('created_at', fromIso).lte('created_at', toIso);
+      if (extra) q = extra(q);
+      return q;
+    }
+
+    const [totalRes, searchRes, bookingRes, otherRes, successRes, errorRes, routesRes] = await Promise.all([
+      countQuery(),
+      countQuery((q) => q.eq('category', 'search')),
+      countQuery((q) => q.eq('category', 'booking')),
+      countQuery((q) => q.eq('category', 'other')),
+      countQuery((q) => q.eq('success', true)),
+      countQuery((q) => q.eq('success', false)),
+      supa.from('api_logs').select('route_origin,route_destination')
+        .gte('created_at', fromIso).lte('created_at', toIso)
+        .not('route_origin', 'is', null).limit(2000),
+    ]);
+    if (totalRes.error) throw new Error(totalRes.error.message);
+
+    const routeCounts = {};
+    (routesRes.data || []).forEach((r) => {
+      const key = r.route_origin + '_' + r.route_destination;
+      if (!routeCounts[key]) routeCounts[key] = { origin: r.route_origin, destination: r.route_destination, count: 0 };
+      routeCounts[key].count++;
+    });
+    const topRoutes = Object.values(routeCounts).sort((a, b) => b.count - a.count).slice(0, 10);
+
+    res.json({
+      ok: true,
+      from: fromIso, to: toIso,
+      totalRequests: totalRes.count || 0,
+      byCategory: { search: searchRes.count || 0, booking: bookingRes.count || 0, other: otherRes.count || 0 },
+      successCount: successRes.count || 0,
+      errorCount: errorRes.count || 0,
+      topRoutes,
+      circuit: duffel.getDuffelCircuitStatus(),
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 };

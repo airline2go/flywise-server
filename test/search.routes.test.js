@@ -177,6 +177,88 @@ describe('GET /route-price', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual(expect.objectContaining({ ok: true, price: null }));
   });
+
+  test('a fresh Duffel call includes the cheapest/fastest/bestValue offers object and tags the Duffel call with route logContext', async () => {
+    mockGetAdminConfig.mockResolvedValue(null);
+    mockDuffelFn.mockResolvedValue({
+      data: {
+        id: 'orq_7',
+        offers: [
+          { id: 'cheap', total_amount: '49.00', total_currency: 'EUR', slices: [{ duration: 'PT5H', segments: [{ marketing_carrier: { name: 'A' } }, { marketing_carrier: { name: 'A' } }] }] },
+          { id: 'fast', total_amount: '199.00', total_currency: 'EUR', slices: [{ duration: 'PT1H30M', segments: [{ marketing_carrier: { name: 'B' } }] }] },
+        ],
+      },
+    });
+    const res = await request(app).get('/route-price?from=ber&to=cdg');
+    expect(res.status).toBe(200);
+    expect(res.body.offers).toBeTruthy();
+    expect(res.body.offers.cheapest).toEqual(expect.objectContaining({ price: expect.any(Number) }));
+    expect(res.body.offers.fastest).toEqual(expect.objectContaining({ price: expect.any(Number) }));
+    expect(res.body.offers.bestValue).toBeTruthy();
+    expect(mockDuffelFn).toHaveBeenCalledWith('POST', expect.any(String), expect.any(Object), null,
+      expect.objectContaining({ logContext: { route_origin: 'BER', route_destination: 'CDG' } }));
+  });
+
+  test('a cached response threads the stored offers object through unchanged', async () => {
+    mockGetAdminConfig.mockResolvedValue({
+      price: 49, currency: 'EUR', departure_date: '2026-08-01', insights: null,
+      offers: { cheapest: { id: 'x', price: 49 }, fastest: { id: 'x', price: 49 }, bestValue: { id: 'x', price: 49 } },
+      fetchedAt: new Date().toISOString(),
+    });
+    const res = await request(app).get('/route-price?from=MUC&to=PMI');
+    expect(res.status).toBe(200);
+    expect(res.body.offers).toEqual({ cheapest: { id: 'x', price: 49 }, fastest: { id: 'x', price: 49 }, bestValue: { id: 'x', price: 49 } });
+  });
+});
+
+// [3-OFFER-CACHE] selectRouteOffers() — picks cheapest/fastest/best-value
+// from one already-fetched offer set, never a second Duffel call.
+describe('selectRouteOffers', () => {
+  const { selectRouteOffers } = require('../src/routes/search.routes');
+
+  test('picks the correct cheapest, fastest, and best-value offer from a 3-offer set', () => {
+    const priced = [
+      { id: 'cheap', price: 49, durationMin: 300, stops: 1, airline: 'A' },
+      { id: 'fast', price: 199, durationMin: 90, stops: 0, airline: 'B' },
+      { id: 'balanced', price: 89, durationMin: 150, stops: 0, airline: 'C' },
+    ];
+    const result = selectRouteOffers(priced);
+    expect(result.cheapest.id).toBe('cheap');
+    expect(result.fastest.id).toBe('fast');
+    // balanced offer: mid-price, short-ish duration, zero stops — should
+    // beat both the cheap-but-slow-and-1-stop and the fast-but-expensive one.
+    expect(result.bestValue.id).toBe('balanced');
+  });
+
+  test('falls back to cheapest for fastest/bestValue when no offer has a parseable duration', () => {
+    const priced = [
+      { id: 'a', price: 50, durationMin: null, stops: null, airline: null },
+      { id: 'b', price: 30, durationMin: null, stops: null, airline: null },
+    ];
+    const result = selectRouteOffers(priced);
+    expect(result.cheapest.id).toBe('b');
+    expect(result.fastest.id).toBe('b');
+    expect(result.bestValue.id).toBe('b');
+  });
+
+  test('excludes durationless offers from fastest/bestValue but keeps them eligible for cheapest', () => {
+    const priced = [
+      { id: 'cheap-no-duration', price: 20, durationMin: null, stops: null, airline: null },
+      { id: 'only-timed', price: 100, durationMin: 200, stops: 0, airline: 'X' },
+    ];
+    const result = selectRouteOffers(priced);
+    expect(result.cheapest.id).toBe('cheap-no-duration');
+    expect(result.fastest.id).toBe('only-timed');
+    expect(result.bestValue.id).toBe('only-timed');
+  });
+
+  test('a single offer wins all three categories', () => {
+    const priced = [{ id: 'only', price: 75, durationMin: 120, stops: 0, airline: 'Z' }];
+    const result = selectRouteOffers(priced);
+    expect(result.cheapest.id).toBe('only');
+    expect(result.fastest.id).toBe('only');
+    expect(result.bestValue.id).toBe('only');
+  });
 });
 
 // [ROUTE-REFRESH-TIER] warmRoutePricesOnce() — the proactive background
