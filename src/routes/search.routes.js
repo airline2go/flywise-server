@@ -45,6 +45,171 @@ async function getDailyPriceCheckCount() {
   } catch (e) { return null; }
 }
 
+// [ROUTE-PRICE-TIMEOUT-FIX] supplier_timeout=8000 tells Duffel itself to
+// stop waiting on slow airlines after 8s and return whatever it has —
+// but our OWN client-side abort timer was still the generic 20s used
+// for slower operations like order creation. If Duffel took anywhere
+// close to that 20s despite being told to give up at 8s, our timer
+// aborted, the call got retried as "transient", and a SECOND up-to-20s
+// attempt started — a real ~32.8s case seen in production logs. Passing
+// a matching timeoutMs here (8s + a realistic buffer for network/
+// processing overhead) keeps a single attempt's worst case close to
+// what supplier_timeout already promised, and even the rare retried
+// case stays well under half of what it could reach before.
+const ROUTE_PRICE_DUFFEL_OPTS = { timeoutMs: 12000 };
+
+async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
+  // A representative near-future date — NOT today, which would surface
+  // artificially high last-minute fares that don't reflect a typical
+  // "from" price for the route. (Unless days_ahead was explicitly
+  // requested — then that IS the point, e.g. the Last Minute page.)
+  const searchDate = new Date();
+  searchDate.setDate(searchDate.getDate() + daysAhead);
+  const departure_date = searchDate.toISOString().slice(0, 10);
+
+  const result = await duffel('POST', '/air/offer_requests?return_offers=true&supplier_timeout=8000', {
+    data: {
+      slices: [{ origin: from.toUpperCase(), destination: to.toUpperCase(), departure_date }],
+      passengers: [{ type: 'adult' }],
+      cabin_class: 'economy',
+    },
+  }, null, ROUTE_PRICE_DUFFEL_OPTS);
+
+  const offers = result.data?.offers || [];
+  if (!offers.length) {
+    const empty = { ok: true, price: null, currency: null, departure_date: null, insights: null };
+    return empty;
+  }
+
+  const ticketTiers = await getTicketProfitTiers();
+  let cheapest = null;
+  for (const o of offers) {
+    const netPrice = parseFloat(o.total_amount || 0);
+    const margin = computeTieredMargin(netPrice, ticketTiers);
+    const customerPrice = Math.round((netPrice + margin) * 100) / 100;
+    if (cheapest === null || customerPrice < cheapest) cheapest = customerPrice;
+  }
+
+  // [ROUTE-INSIGHTS] Real flight facts pulled from the SAME Duffel
+  // offers already fetched above for pricing — duration, stop count,
+  // and actual operating airlines for this specific route. Previously
+  // every field except total_amount was discarded. These are the
+  // figures the route page's new "Route Insights" section displays —
+  // every one computed from real data for this exact origin/
+  // destination pair, never invented or generic boilerplate.
+  function isoMinutesToHours(iso) {
+    const m = String(iso || '').match(/PT(?:(\d+)H)?(?:(\d+)M)?/);
+    if (!m) return null;
+    return (parseInt(m[1] || 0, 10) * 60) + parseInt(m[2] || 0, 10);
+  }
+  const durations = [];
+  const stopCounts = [];
+  const airlines = new Set();
+  for (const o of offers) {
+    const slice = (o.slices || [])[0];
+    if (!slice) continue;
+    const durMin = isoMinutesToHours(slice.duration);
+    if (durMin != null) durations.push(durMin);
+    const segs = slice.segments || [];
+    stopCounts.push(Math.max(0, segs.length - 1));
+    segs.forEach((s) => { if (s.marketing_carrier?.name) airlines.add(s.marketing_carrier.name); });
+  }
+  const insights = durations.length ? {
+    avgDurationMin: Math.round(durations.reduce((a, b) => a + b, 0) / durations.length),
+    minDurationMin: Math.min(...durations),
+    directAvailable: stopCounts.some((s) => s === 0),
+    allDirect: stopCounts.every((s) => s === 0),
+    airlines: Array.from(airlines).slice(0, 8), // cap — purely defensive, real routes rarely exceed this
+  } : null;
+
+  const currency = offers[0].total_currency || 'EUR';
+  await setAdminConfig(cacheKey, { price: cheapest, currency, departure_date, insights, fetchedAt: new Date().toISOString() });
+  await incrementDailyPriceCheckCounter();
+  const checksToday = await getDailyPriceCheckCount();
+  return { ok: true, price: cheapest, currency, departure_date, insights, cached: false, checksToday, checkedAt: new Date().toISOString() };
+}
+
+// [ROUTE-PRICE-WARMING] Proactively keeps the price cache full so a
+// customer clicking a route-page link — even the very first person ever
+// to visit that specific route — finds a price already there, instead
+// of being the unlucky one who triggers a live ~8-11s Duffel call.
+// Runs entirely in the background, independent of customer traffic:
+// walks the published route list, finds routes whose cached price is
+// missing or older than their OWN configured refresh_frequency, and
+// refreshes a small batch of them one at a time with a deliberate pause
+// between each — so warming the catalog never bursts Duffel with
+// concurrent requests or burns the whole rate-limit budget in one
+// sweep. Safe to run indefinitely: once the catalog is fully warm, a
+// cycle finds nothing due and does almost nothing, only picking up
+// again as routes naturally cross their own threshold.
+//
+// [ROUTE-REFRESH-TIER] refresh_frequency='none' (SEO-only) routes are
+// excluded from this query entirely — this is the actual Duffel-cost
+// control mechanism the whole route-tiering system exists for. A
+// visitor to an SEO-only route page can still trigger an on-demand
+// price via GET /route-price below; it's just never proactively kept
+// warm by this background cycle.
+const ROUTE_PRICE_WARM_BATCH_SIZE = 25; // routes refreshed per cycle — deliberately modest
+const ROUTE_PRICE_WARM_DELAY_MS = 2000; // pause between each Duffel call inside a cycle
+const ROUTE_PRICE_WARM_INTERVAL_MS = 15 * 60 * 1000; // how often a new cycle starts
+const REFRESH_FREQUENCY_MS = { '6h': 6 * 60 * 60 * 1000, '12h': 12 * 60 * 60 * 1000, '24h': 24 * 60 * 60 * 1000 };
+
+async function warmRoutePricesOnce() {
+  if (!supa) return;
+  try {
+    const { data: routes, error } = await supa.from('route_pages')
+      .select('origin_iata,destination_iata,refresh_frequency')
+      .eq('status', 'published')
+      .neq('refresh_frequency', 'none');
+    if (error || !routes || !routes.length) return;
+
+    // De-dupe origin/destination pairs — multiple route_pages rows can
+    // share the same IATA pair via different slugs/languages, possibly
+    // at different refresh_frequency values; keep the shortest interval
+    // among duplicates so no row's chosen cadence is ever under-served.
+    const byPair = new Map();
+    for (const r of routes) {
+      if (!r.origin_iata || !r.destination_iata) continue;
+      const thresholdMs = REFRESH_FREQUENCY_MS[r.refresh_frequency];
+      if (!thresholdMs) continue; // unrecognized value — skip rather than guess
+      const key = r.origin_iata.toUpperCase() + '_' + r.destination_iata.toUpperCase();
+      const existing = byPair.get(key);
+      if (!existing || thresholdMs < existing.thresholdMs) {
+        byPair.set(key, { from: r.origin_iata, to: r.destination_iata, cacheKey: 'route_price_' + key, thresholdMs });
+      }
+    }
+    const pairs = Array.from(byPair.values());
+
+    let warmedThisCycle = 0;
+    for (const p of pairs) {
+      if (warmedThisCycle >= ROUTE_PRICE_WARM_BATCH_SIZE) break;
+      let due = true;
+      try {
+        const cached = await getAdminConfig(p.cacheKey, null);
+        if (cached && cached.fetchedAt && (Date.now() - new Date(cached.fetchedAt).getTime()) < p.thresholdMs) due = false;
+      } catch (e) { /* any read error → treat as due, safe default */ }
+      if (!due) continue;
+
+      try {
+        await fetchAndCacheRoutePrice(p.from, p.to, 21, p.cacheKey);
+        log('info', 'route_price_warmed', { from: p.from, to: p.to });
+      } catch (e) {
+        log('warn', 'route_price_warm_failed', { from: p.from, to: p.to, error: e.message });
+      }
+      warmedThisCycle++;
+      await new Promise((r) => setTimeout(r, ROUTE_PRICE_WARM_DELAY_MS));
+    }
+  } catch (e) {
+    log('warn', 'route_price_warm_cycle_failed', { error: e.message });
+  }
+}
+
+// Starts ~30s after boot (lets the server finish starting up first),
+// then repeats on a fixed interval. .unref() so these timers never keep
+// the process alive on their own during shutdown.
+setTimeout(() => { warmRoutePricesOnce(); }, 30000).unref();
+setInterval(() => { warmRoutePricesOnce(); }, ROUTE_PRICE_WARM_INTERVAL_MS).unref();
+
 module.exports = (app) => {
 app.get('/debug/raw', requireAdmin, rateLimit('pay', 10, 60000), async (req, res) => {
   try {
@@ -155,157 +320,6 @@ app.post('/search', rateLimit('search', 30, 60000), async (req, res) => {
   }
 });
 
-// [ROUTE-PRICE-TIMEOUT-FIX] supplier_timeout=8000 tells Duffel itself to
-// stop waiting on slow airlines after 8s and return whatever it has —
-// but our OWN client-side abort timer was still the generic 20s used
-// for slower operations like order creation. If Duffel took anywhere
-// close to that 20s despite being told to give up at 8s, our timer
-// aborted, the call got retried as "transient", and a SECOND up-to-20s
-// attempt started — a real ~32.8s case seen in production logs. Passing
-// a matching timeoutMs here (8s + a realistic buffer for network/
-// processing overhead) keeps a single attempt's worst case close to
-// what supplier_timeout already promised, and even the rare retried
-// case stays well under half of what it could reach before.
-const ROUTE_PRICE_DUFFEL_OPTS = { timeoutMs: 12000 };
-
-async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
-  // A representative near-future date — NOT today, which would surface
-  // artificially high last-minute fares that don't reflect a typical
-  // "from" price for the route. (Unless days_ahead was explicitly
-  // requested — then that IS the point, e.g. the Last Minute page.)
-  const searchDate = new Date();
-  searchDate.setDate(searchDate.getDate() + daysAhead);
-  const departure_date = searchDate.toISOString().slice(0, 10);
-
-  const result = await duffel('POST', '/air/offer_requests?return_offers=true&supplier_timeout=8000', {
-    data: {
-      slices: [{ origin: from.toUpperCase(), destination: to.toUpperCase(), departure_date }],
-      passengers: [{ type: 'adult' }],
-      cabin_class: 'economy',
-    },
-  }, null, ROUTE_PRICE_DUFFEL_OPTS);
-
-  const offers = result.data?.offers || [];
-  if (!offers.length) {
-    const empty = { ok: true, price: null, currency: null, departure_date: null, insights: null };
-    return empty;
-  }
-
-  const ticketTiers = await getTicketProfitTiers();
-  let cheapest = null;
-  for (const o of offers) {
-    const netPrice = parseFloat(o.total_amount || 0);
-    const margin = computeTieredMargin(netPrice, ticketTiers);
-    const customerPrice = Math.round((netPrice + margin) * 100) / 100;
-    if (cheapest === null || customerPrice < cheapest) cheapest = customerPrice;
-  }
-
-  // [ROUTE-INSIGHTS] Real flight facts pulled from the SAME Duffel
-  // offers already fetched above for pricing — duration, stop count,
-  // and actual operating airlines for this specific route. Previously
-  // every field except total_amount was discarded. These are the
-  // figures the route page's new "Route Insights" section displays —
-  // every one computed from real data for this exact origin/
-  // destination pair, never invented or generic boilerplate.
-  function isoMinutesToHours(iso) {
-    const m = String(iso || '').match(/PT(?:(\d+)H)?(?:(\d+)M)?/);
-    if (!m) return null;
-    return (parseInt(m[1] || 0, 10) * 60) + parseInt(m[2] || 0, 10);
-  }
-  const durations = [];
-  const stopCounts = [];
-  const airlines = new Set();
-  for (const o of offers) {
-    const slice = (o.slices || [])[0];
-    if (!slice) continue;
-    const durMin = isoMinutesToHours(slice.duration);
-    if (durMin != null) durations.push(durMin);
-    const segs = slice.segments || [];
-    stopCounts.push(Math.max(0, segs.length - 1));
-    segs.forEach((s) => { if (s.marketing_carrier?.name) airlines.add(s.marketing_carrier.name); });
-  }
-  const insights = durations.length ? {
-    avgDurationMin: Math.round(durations.reduce((a, b) => a + b, 0) / durations.length),
-    minDurationMin: Math.min(...durations),
-    directAvailable: stopCounts.some((s) => s === 0),
-    allDirect: stopCounts.every((s) => s === 0),
-    airlines: Array.from(airlines).slice(0, 8), // cap — purely defensive, real routes rarely exceed this
-  } : null;
-
-  const currency = offers[0].total_currency || 'EUR';
-  await setAdminConfig(cacheKey, { price: cheapest, currency, departure_date, insights, fetchedAt: new Date().toISOString() });
-  await incrementDailyPriceCheckCounter();
-  const checksToday = await getDailyPriceCheckCount();
-  return { ok: true, price: cheapest, currency, departure_date, insights, cached: false, checksToday, checkedAt: new Date().toISOString() };
-}
-
-// [ROUTE-PRICE-WARMING] Proactively keeps the price cache full so a
-// customer clicking a route-page link — even the very first person ever
-// to visit that specific route — finds a price already there, instead
-// of being the unlucky one who triggers a live ~8-11s Duffel call.
-// Runs entirely in the background, independent of customer traffic:
-// walks the published route list, finds routes whose cached price is
-// missing or older than the 12h window used above, and refreshes a
-// small batch of them one at a time with a deliberate pause between
-// each — so warming the catalog never bursts Duffel with concurrent
-// requests or burns the whole rate-limit budget in one sweep. Safe to
-// run indefinitely: once the catalog is fully warm, a cycle finds
-// nothing due and does almost nothing, only picking up again as routes
-// naturally cross the 12h mark.
-const ROUTE_PRICE_WARM_BATCH_SIZE = 25; // routes refreshed per cycle — deliberately modest
-const ROUTE_PRICE_WARM_DELAY_MS = 2000; // pause between each Duffel call inside a cycle
-const ROUTE_PRICE_WARM_INTERVAL_MS = 15 * 60 * 1000; // how often a new cycle starts
-
-async function warmRoutePricesOnce() {
-  if (!supa) return;
-  try {
-    const { data: routes, error } = await supa.from('route_pages')
-      .select('origin_iata,destination_iata')
-      .eq('status', 'published');
-    if (error || !routes || !routes.length) return;
-
-    // De-dupe origin/destination pairs — multiple route_pages rows can
-    // share the same IATA pair via different slugs/languages.
-    const seen = new Set();
-    const pairs = [];
-    for (const r of routes) {
-      if (!r.origin_iata || !r.destination_iata) continue;
-      const key = r.origin_iata.toUpperCase() + '_' + r.destination_iata.toUpperCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      pairs.push({ from: r.origin_iata, to: r.destination_iata, cacheKey: 'route_price_' + key });
-    }
-
-    let warmedThisCycle = 0;
-    for (const p of pairs) {
-      if (warmedThisCycle >= ROUTE_PRICE_WARM_BATCH_SIZE) break;
-      let due = true;
-      try {
-        const cached = await getAdminConfig(p.cacheKey, null);
-        if (cached && cached.fetchedAt && (Date.now() - new Date(cached.fetchedAt).getTime()) < 12 * 60 * 60 * 1000) due = false;
-      } catch (e) { /* any read error → treat as due, safe default */ }
-      if (!due) continue;
-
-      try {
-        await fetchAndCacheRoutePrice(p.from, p.to, 21, p.cacheKey);
-        log('info', 'route_price_warmed', { from: p.from, to: p.to });
-      } catch (e) {
-        log('warn', 'route_price_warm_failed', { from: p.from, to: p.to, error: e.message });
-      }
-      warmedThisCycle++;
-      await new Promise((r) => setTimeout(r, ROUTE_PRICE_WARM_DELAY_MS));
-    }
-  } catch (e) {
-    log('warn', 'route_price_warm_cycle_failed', { error: e.message });
-  }
-}
-
-// Starts ~30s after boot (lets the server finish starting up first),
-// then repeats on a fixed interval. .unref() so these timers never keep
-// the process alive on their own during shutdown.
-setTimeout(() => { warmRoutePricesOnce(); }, 30000).unref();
-setInterval(() => { warmRoutePricesOnce(); }, ROUTE_PRICE_WARM_INTERVAL_MS).unref();
-
 app.get('/route-price', rateLimit('route-price', 60, 60000), async (req, res) => {
   try {
     const { from, to } = req.query;
@@ -407,3 +421,4 @@ app.get('/search/airports', rateLimit('airports', 60, 60000), async (req, res) =
   }
 });
 };
+module.exports.warmRoutePricesOnce = warmRoutePricesOnce;

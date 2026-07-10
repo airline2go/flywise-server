@@ -37,7 +37,18 @@ an existing one only needs whichever haven't been run yet):
    fallback — this migration is purely additive. Needed by
    `src/services/adminAuth.js` / `src/routes/admin-staff.routes.js` /
    `src/routes/admin-customers.routes.js`.
+8. `route_refresh_tier.sql` — adds `route_pages.refresh_frequency`
+   (`'none'`/`'6h'`/`'12h'`/`'24h'`) so each route can be tagged
+   SEO-only (never proactively refreshed, still price-able on-demand
+   when a real visitor loads the page) vs. Live-Pricing at a chosen
+   cadence — the mechanism `warmRoutePricesOnce()` in
+   `src/routes/search.routes.js` now reads instead of treating every
+   published route identically. One-time backfill (tracked via an
+   `admin_config` marker so re-running the file is still safe) sets
+   existing published routes to `'24h'` so nothing currently kept warm
+   silently goes stale the moment this ships.
 
-As of this writing, the first six have been run against the live database.
-`admin_staff.sql` (#7) is new and still needs to be run once before the
-admin panel's staff-accounts/credit-top-up features go live.
+As of this writing, the first seven have been run against the live
+database. `route_refresh_tier.sql` (#8) is new and still needs to be run
+once before the route-tiering admin UI has any effect on what actually
+gets refreshed.
