@@ -52,8 +52,8 @@ describe('GET /cities', () => {
     expect(res.body).toEqual({
       ok: true,
       cities: [
-        { city_slug: 'berlin', name: 'Berlin', translations: { en: 'Berlin' } },
-        { city_slug: 'paris', name: 'Paris', translations: {} },
+        { city_slug: 'berlin', name: 'Berlin', airport_codes: [], translations: { en: 'Berlin' } },
+        { city_slug: 'paris', name: 'Paris', airport_codes: [], translations: {} },
       ],
     });
   });

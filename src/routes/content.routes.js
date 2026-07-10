@@ -241,7 +241,11 @@ app.get('/countries/:code', rateLimit('content', 1000, 60000), async (req, res) 
 app.get('/cities', rateLimit('content', 1000, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { data, error } = await supa.from('cities').select('id,city_slug,name').eq('status', 'published').order('name', { ascending: true });
+    // [GEO-CMS] airport_codes included so the SSG build can resolve "which
+    // city does this IATA code belong to" client-side (a city's name
+    // translations apply to every airport serving it, e.g. LHR/LGW/STN/LTN
+    // all localize to the same "London" translations).
+    const { data, error } = await supa.from('cities').select('id,city_slug,name,airport_codes').eq('status', 'published').order('name', { ascending: true });
     if (error) throw new Error(error.message);
     const cities = data || [];
 
@@ -257,7 +261,7 @@ app.get('/cities', rateLimit('content', 1000, 60000), async (req, res) => {
       });
     }
 
-    res.json({ ok: true, cities: cities.map((c) => ({ city_slug: c.city_slug, name: c.name, translations: translationsById[c.id] || {} })) });
+    res.json({ ok: true, cities: cities.map((c) => ({ city_slug: c.city_slug, name: c.name, airport_codes: c.airport_codes || [], translations: translationsById[c.id] || {} })) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
