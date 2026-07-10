@@ -47,8 +47,16 @@ an existing one only needs whichever haven't been run yet):
    `admin_config` marker so re-running the file is still safe) sets
    existing published routes to `'24h'` so nothing currently kept warm
    silently goes stale the moment this ships.
+9. `api_logs.sql` — logs one row per logical Duffel API call (via the
+   shared `duffel()` wrapper in `src/services/duffel.js`; retries
+   collapse to a single row, and the isolated health-check path is
+   excluded), tagged with a category (`search`/`booking`/`other`) and,
+   for the route-pricing call sites only, `route_origin`/
+   `route_destination`. Powers the admin API-monitoring dashboard
+   (`GET /admin/api-logs/stats`). Server-only RLS, same as
+   `admin_activity_log`/`error_logs`.
 
 As of this writing, the first seven have been run against the live
-database. `route_refresh_tier.sql` (#8) is new and still needs to be run
-once before the route-tiering admin UI has any effect on what actually
-gets refreshed.
+database. `route_refresh_tier.sql` (#8) and `api_logs.sql` (#9) are new
+and still need to be run once before the route-tiering admin UI and the
+API-monitoring dashboard have any effect.

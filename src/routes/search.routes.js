@@ -73,7 +73,13 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
       passengers: [{ type: 'adult' }],
       cabin_class: 'economy',
     },
-  }, null, ROUTE_PRICE_DUFFEL_OPTS);
+  }, null, Object.assign({}, ROUTE_PRICE_DUFFEL_OPTS, {
+    // [API-COST-MONITORING] Only the two route-pricing call sites (this
+    // one, reached by both warming and on-demand /route-price) tag their
+    // Duffel calls with a route — every other Duffel call in the app
+    // (booking, cancellation, etc.) is intentionally left untagged.
+    logContext: { route_origin: from.toUpperCase(), route_destination: to.toUpperCase() },
+  }));
 
   const offers = result.data?.offers || [];
   if (!offers.length) {
@@ -81,14 +87,29 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
     return empty;
   }
 
+  function isoMinutesToHours(iso) {
+    const m = String(iso || '').match(/PT(?:(\d+)H)?(?:(\d+)M)?/);
+    if (!m) return null;
+    return (parseInt(m[1] || 0, 10) * 60) + parseInt(m[2] || 0, 10);
+  }
+
   const ticketTiers = await getTicketProfitTiers();
-  let cheapest = null;
-  for (const o of offers) {
+  // [3-OFFER-CACHE] One pass over the SAME offers already fetched for
+  // pricing — never a second Duffel call — retaining price/duration/
+  // stops/airline PER offer instead of only a running-minimum scalar,
+  // so cheapest/fastest/best-value can all be picked from one search.
+  const priced = offers.map((o) => {
     const netPrice = parseFloat(o.total_amount || 0);
     const margin = computeTieredMargin(netPrice, ticketTiers);
-    const customerPrice = Math.round((netPrice + margin) * 100) / 100;
-    if (cheapest === null || customerPrice < cheapest) cheapest = customerPrice;
-  }
+    const price = Math.round((netPrice + margin) * 100) / 100;
+    const slice = (o.slices || [])[0];
+    const durationMin = slice ? isoMinutesToHours(slice.duration) : null;
+    const segs = slice ? (slice.segments || []) : [];
+    const stops = slice ? Math.max(0, segs.length - 1) : null;
+    const airline = (segs[0] && segs[0].marketing_carrier && segs[0].marketing_carrier.name) || null;
+    return { id: o.id, price, durationMin, stops, airline };
+  });
+  const { cheapest, fastest, bestValue } = selectRouteOffers(priced);
 
   // [ROUTE-INSIGHTS] Real flight facts pulled from the SAME Duffel
   // offers already fetched above for pricing — duration, stop count,
@@ -97,11 +118,6 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
   // figures the route page's new "Route Insights" section displays —
   // every one computed from real data for this exact origin/
   // destination pair, never invented or generic boilerplate.
-  function isoMinutesToHours(iso) {
-    const m = String(iso || '').match(/PT(?:(\d+)H)?(?:(\d+)M)?/);
-    if (!m) return null;
-    return (parseInt(m[1] || 0, 10) * 60) + parseInt(m[2] || 0, 10);
-  }
   const durations = [];
   const stopCounts = [];
   const airlines = new Set();
@@ -123,10 +139,42 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
   } : null;
 
   const currency = offers[0].total_currency || 'EUR';
-  await setAdminConfig(cacheKey, { price: cheapest, currency, departure_date, insights, fetchedAt: new Date().toISOString() });
+  const routeOffers = { cheapest, fastest, bestValue };
+  await setAdminConfig(cacheKey, { price: cheapest.price, currency, departure_date, insights, offers: routeOffers, fetchedAt: new Date().toISOString() });
   await incrementDailyPriceCheckCounter();
   const checksToday = await getDailyPriceCheckCount();
-  return { ok: true, price: cheapest, currency, departure_date, insights, cached: false, checksToday, checkedAt: new Date().toISOString() };
+  return { ok: true, price: cheapest.price, currency, departure_date, insights, offers: routeOffers, cached: false, checksToday, checkedAt: new Date().toISOString() };
+}
+
+// [3-OFFER-CACHE] bestValue is a documented, simple heuristic — a
+// weighted, normalized score across price/duration/stops (each 0-1
+// against this search's own min/max; stops capped at 2 for the
+// normalization) — not a black box, and easily retunable via the
+// weights below. Offers with no parseable slice duration are still
+// eligible for "cheapest" but excluded from "fastest"/"bestValue"
+// (both fall back to "cheapest" if NO offer has a usable duration).
+const BEST_VALUE_WEIGHTS = { price: 0.5, duration: 0.3, stops: 0.2 };
+function selectRouteOffers(priced) {
+  const cheapest = priced.reduce((a, b) => (b.price < a.price ? b : a));
+  const withDuration = priced.filter((p) => p.durationMin != null);
+  if (!withDuration.length) return { cheapest, fastest: cheapest, bestValue: cheapest };
+
+  const fastest = withDuration.reduce((a, b) => (b.durationMin < a.durationMin ? b : a));
+
+  const prices = withDuration.map((p) => p.price);
+  const durations = withDuration.map((p) => p.durationMin);
+  const minP = Math.min(...prices), maxP = Math.max(...prices);
+  const minD = Math.min(...durations), maxD = Math.max(...durations);
+  let bestValue = withDuration[0];
+  let bestScore = Infinity;
+  for (const p of withDuration) {
+    const normPrice = maxP === minP ? 0 : (p.price - minP) / (maxP - minP);
+    const normDuration = maxD === minD ? 0 : (p.durationMin - minD) / (maxD - minD);
+    const normStops = Math.min((p.stops || 0) / 2, 1);
+    const score = normPrice * BEST_VALUE_WEIGHTS.price + normDuration * BEST_VALUE_WEIGHTS.duration + normStops * BEST_VALUE_WEIGHTS.stops;
+    if (score < bestScore) { bestScore = score; bestValue = p; }
+  }
+  return { cheapest, fastest, bestValue };
 }
 
 // [ROUTE-PRICE-WARMING] Proactively keeps the price cache full so a
@@ -344,11 +392,11 @@ app.get('/route-price', rateLimit('route-price', 60, 60000), async (req, res) =>
     // true blocking live call — a one-time cost per route, ever.
     if (cached && cacheAgeMs < 12 * 60 * 60 * 1000) {
       const checksToday = await getDailyPriceCheckCount();
-      return res.json({ ok: true, price: cached.price, currency: cached.currency, departure_date: cached.departure_date, insights: cached.insights || null, cached: true, checksToday, checkedAt: cached.fetchedAt });
+      return res.json({ ok: true, price: cached.price, currency: cached.currency, departure_date: cached.departure_date, insights: cached.insights || null, offers: cached.offers || null, cached: true, checksToday, checkedAt: cached.fetchedAt });
     }
     if (cached) {
       const checksToday = await getDailyPriceCheckCount();
-      res.json({ ok: true, price: cached.price, currency: cached.currency, departure_date: cached.departure_date, insights: cached.insights || null, cached: true, stale: true, checksToday, checkedAt: cached.fetchedAt });
+      res.json({ ok: true, price: cached.price, currency: cached.currency, departure_date: cached.departure_date, insights: cached.insights || null, offers: cached.offers || null, cached: true, stale: true, checksToday, checkedAt: cached.fetchedAt });
       fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey).catch((e) => log('warn', 'route_price_revalidate_failed', { error: e.message }));
       return;
     }
@@ -422,3 +470,4 @@ app.get('/search/airports', rateLimit('airports', 60, 60000), async (req, res) =
 });
 };
 module.exports.warmRoutePricesOnce = warmRoutePricesOnce;
+module.exports.selectRouteOffers = selectRouteOffers;

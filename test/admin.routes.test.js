@@ -11,6 +11,8 @@ jest.mock('../src/clients/supabase', () => {
       limit: () => builder,
       not: () => builder,
       in: () => builder,
+      gte: () => builder,
+      lte: () => builder,
       update: () => builder,
       insert: () => builder,
       upsert: () => builder,
@@ -45,6 +47,18 @@ function buildApp() {
 }
 
 const AUTH = { Authorization: 'Bearer test-admin-token' };
+
+// [STAFF-403-CHECK] Wires up a valid, unexpired staff session so
+// requireAdmin resolves via the session path (role: 'staff') instead of
+// the legacy ADMIN_TOKEN — used to exercise the requireFullAdmin 403
+// boundary on owner-only routes.
+function staffAuthHeaders() {
+  supa.__setResponse('admin_sessions', {
+    maybeSingle: { data: { admin_user_id: 'staff-1', role: 'staff', expires_at: new Date(Date.now() + 3600000).toISOString() }, error: null },
+  });
+  supa.__setResponse('admin_users', { maybeSingle: { data: { active: true }, error: null } });
+  return { Authorization: 'Bearer some-staff-session-token' };
+}
 
 beforeEach(() => {
   supa.__reset();
@@ -433,6 +447,96 @@ describe('PUT /admin/route-pages/bulk-refresh', () => {
     expect(res.body.updated).toBe(2);
     expect(updatedWith.refresh_frequency).toBe('24h');
     expect(updatedIds).toEqual(['id-1', 'id-2']);
+  });
+});
+
+describe('GET/POST /admin/api-cost-config', () => {
+  test('GET returns the defaults when nothing has been configured', async () => {
+    supa.__setResponse('admin_config', { maybeSingle: { data: null, error: null } });
+    const app = buildApp();
+    const res = await request(app).get('/admin/api-cost-config').set(AUTH);
+    expect(res.status).toBe(200);
+    expect(res.body.config).toEqual({ costPerRequestEur: 0, dailyRequestAlertThreshold: 1000 });
+  });
+
+  test('POST clamps a negative cost and an invalid threshold back to safe defaults', async () => {
+    const app = buildApp();
+    const res = await request(app).post('/admin/api-cost-config').set(AUTH).send({ costPerRequestEur: -5, dailyRequestAlertThreshold: 'abc' });
+    expect(res.status).toBe(200);
+    expect(res.body.config).toEqual({ costPerRequestEur: 0, dailyRequestAlertThreshold: 1000 });
+  });
+
+  test('POST accepts and echoes back valid values', async () => {
+    const app = buildApp();
+    const res = await request(app).post('/admin/api-cost-config').set(AUTH).send({ costPerRequestEur: 0.05, dailyRequestAlertThreshold: 500 });
+    expect(res.status).toBe(200);
+    expect(res.body.config).toEqual({ costPerRequestEur: 0.05, dailyRequestAlertThreshold: 500 });
+  });
+
+  test('a staff session is blocked (403) from both GET and POST', async () => {
+    const staffAuth = staffAuthHeaders();
+    const app = buildApp();
+    const getRes = await request(app).get('/admin/api-cost-config').set(staffAuth).set('X-Forwarded-For', '10.9.5.1');
+    expect(getRes.status).toBe(403);
+    const staffAuth2 = staffAuthHeaders();
+    const app2 = buildApp();
+    const postRes = await request(app2).post('/admin/api-cost-config').set(staffAuth2).set('X-Forwarded-For', '10.9.5.2').send({ costPerRequestEur: 1 });
+    expect(postRes.status).toBe(403);
+  });
+});
+
+describe('GET /admin/api-logs/stats', () => {
+  test('returns aggregated counts, ranked top routes, and circuit status', async () => {
+    const originalFrom = supa.from.getMockImplementation();
+    const ROUTE_ROWS = [
+      { route_origin: 'BER', route_destination: 'CDG' },
+      { route_origin: 'BER', route_destination: 'CDG' },
+      { route_origin: 'BER', route_destination: 'CDG' },
+      { route_origin: 'MUC', route_destination: 'PMI' },
+    ];
+    supa.from.mockImplementation((table) => {
+      if (table !== 'api_logs') return originalFrom(table);
+      return {
+        select: (cols, opts) => {
+          if (opts && opts.head) {
+            function chain(filters) {
+              return {
+                gte: () => chain(filters),
+                lte: () => chain(filters),
+                eq: (col, val) => chain(Object.assign({}, filters, { [col]: val })),
+                then: (resolve, reject) => {
+                  let count = 100; // total
+                  if (filters.category === 'search') count = 60;
+                  else if (filters.category === 'booking') count = 30;
+                  else if (filters.category === 'other') count = 10;
+                  else if (filters.success === true) count = 90;
+                  else if (filters.success === false) count = 10;
+                  return Promise.resolve({ count, data: null, error: null }).then(resolve, reject);
+                },
+              };
+            }
+            return chain({});
+          }
+          return { gte: () => ({ lte: () => ({ not: () => ({ limit: () => Promise.resolve({ data: ROUTE_ROWS, error: null }) }) }) }) };
+        },
+      };
+    });
+    const app = buildApp();
+    const res = await request(app).get('/admin/api-logs/stats').set(AUTH);
+    expect(res.status).toBe(200);
+    expect(res.body.totalRequests).toBe(100);
+    expect(res.body.byCategory).toEqual({ search: 60, booking: 30, other: 10 });
+    expect(res.body.successCount).toBe(90);
+    expect(res.body.errorCount).toBe(10);
+    expect(res.body.topRoutes[0]).toEqual({ origin: 'BER', destination: 'CDG', count: 3 });
+    expect(res.body.topRoutes[1]).toEqual({ origin: 'MUC', destination: 'PMI', count: 1 });
+    expect(res.body.circuit).toEqual(expect.objectContaining({ state: expect.any(String), consecutiveFailures: expect.any(Number) }));
+  });
+
+  test('a staff session is blocked (403)', async () => {
+    const app = buildApp();
+    const res = await request(app).get('/admin/api-logs/stats').set(staffAuthHeaders()).set('X-Forwarded-For', '10.9.5.3');
+    expect(res.status).toBe(403);
   });
 });
 
