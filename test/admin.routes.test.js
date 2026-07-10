@@ -10,6 +10,7 @@ jest.mock('../src/clients/supabase', () => {
       order: () => builder,
       limit: () => builder,
       not: () => builder,
+      in: () => builder,
       update: () => builder,
       insert: () => builder,
       upsert: () => builder,
@@ -217,6 +218,221 @@ describe('POST /admin/invoices/issue', () => {
       p_customer_name: 'Max Mustermann',
       p_amount: 199.99,
     }));
+  });
+});
+
+describe('POST/PUT /admin/route-pages — refresh_frequency validation', () => {
+  test('POST rejects an invalid refresh_frequency', async () => {
+    const app = buildApp();
+    const res = await request(app).post('/admin/route-pages').set(AUTH).send({
+      origin_iata: 'BER', destination_iata: 'CDG', origin_city: 'Berlin', destination_city: 'Paris',
+      refresh_frequency: 'hourly',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/refresh_frequency/);
+  });
+
+  test('POST accepts a valid refresh_frequency and stores it on the row', async () => {
+    supa.__setResponse('route_pages', { maybeSingle: { data: null, error: null }, result: { data: null, error: null } });
+    let insertedRow = null;
+    const originalFrom = supa.from.getMockImplementation();
+    supa.from.mockImplementation((table) => {
+      if (table === 'route_pages') {
+        return {
+          select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: null, error: null }) }), maybeSingle: () => Promise.resolve({ data: null, error: null }) }) }),
+          insert: (row) => { insertedRow = row; return { select: () => ({ maybeSingle: () => Promise.resolve({ data: { ...row, id: 'r1' }, error: null }) }) }; },
+        };
+      }
+      return originalFrom(table);
+    });
+    const app = buildApp();
+    const res = await request(app).post('/admin/route-pages').set(AUTH).send({
+      origin_iata: 'BER', destination_iata: 'CDG', origin_city: 'Berlin', destination_city: 'Paris',
+      refresh_frequency: '6h',
+    });
+    expect(res.status).toBe(200);
+    expect(insertedRow.refresh_frequency).toBe('6h');
+  });
+
+  test('POST defaults to none when refresh_frequency is omitted', async () => {
+    let insertedRow = null;
+    const originalFrom = supa.from.getMockImplementation();
+    supa.from.mockImplementation((table) => {
+      if (table === 'route_pages') {
+        return {
+          select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: null, error: null }) }), maybeSingle: () => Promise.resolve({ data: null, error: null }) }) }),
+          insert: (row) => { insertedRow = row; return { select: () => ({ maybeSingle: () => Promise.resolve({ data: { ...row, id: 'r2' }, error: null }) }) }; },
+        };
+      }
+      return originalFrom(table);
+    });
+    const app = buildApp();
+    const res = await request(app).post('/admin/route-pages').set(AUTH).send({
+      origin_iata: 'HAM', destination_iata: 'MAD', origin_city: 'Hamburg', destination_city: 'Madrid',
+    });
+    expect(res.status).toBe(200);
+    expect(insertedRow.refresh_frequency).toBe('none');
+  });
+
+  test('PUT rejects an invalid refresh_frequency', async () => {
+    const app = buildApp();
+    const res = await request(app).put('/admin/route-pages/r1').set(AUTH).send({ refresh_frequency: 'weekly' });
+    expect(res.status).toBe(400);
+  });
+
+  test('PUT passes a valid refresh_frequency through to the update', async () => {
+    let updatedWith = null;
+    const originalFrom = supa.from.getMockImplementation();
+    supa.from.mockImplementation((table) => {
+      if (table === 'route_pages') {
+        return { update: (payload) => { updatedWith = payload; return { eq: () => ({ select: () => ({ maybeSingle: () => Promise.resolve({ data: { id: 'r1', refresh_frequency: payload.refresh_frequency }, error: null }) }) }) }; } };
+      }
+      return originalFrom(table);
+    });
+    const app = buildApp();
+    const res = await request(app).put('/admin/route-pages/r1').set(AUTH).send({ refresh_frequency: '24h' });
+    expect(res.status).toBe(200);
+    expect(updatedWith.refresh_frequency).toBe('24h');
+  });
+});
+
+describe('GET /admin/route-pages — refresh_frequency filter', () => {
+  test('applies a valid refresh_frequency filter', async () => {
+    let filteredWith = null;
+    const originalFrom = supa.from.getMockImplementation();
+    supa.from.mockImplementation((table) => {
+      if (table === 'route_pages') {
+        const builder = {
+          select: () => builder,
+          eq: (col, val) => { if (col === 'refresh_frequency') filteredWith = val; return builder; },
+          order: () => builder,
+          range: () => Promise.resolve({ data: [], error: null, count: 0 }),
+        };
+        return builder;
+      }
+      return originalFrom(table);
+    });
+    const app = buildApp();
+    const res = await request(app).get('/admin/route-pages?refresh_frequency=6h').set(AUTH);
+    expect(res.status).toBe(200);
+    expect(filteredWith).toBe('6h');
+  });
+
+  test('ignores an invalid refresh_frequency value silently (no filter applied)', async () => {
+    let filterCalled = false;
+    const originalFrom = supa.from.getMockImplementation();
+    supa.from.mockImplementation((table) => {
+      if (table === 'route_pages') {
+        const builder = {
+          select: () => builder,
+          eq: (col) => { if (col === 'refresh_frequency') filterCalled = true; return builder; },
+          order: () => builder,
+          range: () => Promise.resolve({ data: [], error: null, count: 0 }),
+        };
+        return builder;
+      }
+      return originalFrom(table);
+    });
+    const app = buildApp();
+    const res = await request(app).get('/admin/route-pages?refresh_frequency=bogus').set(AUTH);
+    expect(res.status).toBe(200);
+    expect(filterCalled).toBe(false);
+  });
+});
+
+describe('POST /admin/route-pages/bulk-create — refresh_frequency', () => {
+  test('rejects an invalid refresh_frequency', async () => {
+    const app = buildApp();
+    const res = await request(app).post('/admin/route-pages/bulk-create').set(AUTH).send({
+      airports: [{ code: 'BER', city: 'Berlin' }, { code: 'CDG', city: 'Paris' }],
+      refresh_frequency: 'sometimes',
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test('defaults every inserted route to none when omitted', async () => {
+    let upsertedRows = null;
+    const originalFrom = supa.from.getMockImplementation();
+    supa.from.mockImplementation((table) => {
+      if (table === 'route_pages') {
+        return {
+          select: () => Promise.resolve({ data: [], error: null }),
+          upsert: (rows) => { upsertedRows = rows; return { select: () => Promise.resolve({ data: rows.map((r, i) => ({ id: 'g' + i })), error: null }) }; },
+        };
+      }
+      return originalFrom(table);
+    });
+    const app = buildApp();
+    const res = await request(app).post('/admin/route-pages/bulk-create').set(AUTH).send({
+      airports: [{ code: 'BER', city: 'Berlin' }, { code: 'CDG', city: 'Paris' }],
+    });
+    expect(res.status).toBe(200);
+    expect(upsertedRows.every((r) => r.refresh_frequency === 'none')).toBe(true);
+  });
+
+  test('applies a given refresh_frequency to the whole batch', async () => {
+    let upsertedRows = null;
+    const originalFrom = supa.from.getMockImplementation();
+    supa.from.mockImplementation((table) => {
+      if (table === 'route_pages') {
+        return {
+          select: () => Promise.resolve({ data: [], error: null }),
+          upsert: (rows) => { upsertedRows = rows; return { select: () => Promise.resolve({ data: rows.map((r, i) => ({ id: 'g' + i })), error: null }) }; },
+        };
+      }
+      return originalFrom(table);
+    });
+    const app = buildApp();
+    const res = await request(app).post('/admin/route-pages/bulk-create').set(AUTH).send({
+      airports: [{ code: 'BER', city: 'Berlin' }, { code: 'CDG', city: 'Paris' }],
+      refresh_frequency: '12h',
+    });
+    expect(res.status).toBe(200);
+    expect(upsertedRows.every((r) => r.refresh_frequency === '12h')).toBe(true);
+  });
+});
+
+describe('PUT /admin/route-pages/bulk-refresh', () => {
+  test('rejects a missing ids array', async () => {
+    const app = buildApp();
+    const res = await request(app).put('/admin/route-pages/bulk-refresh').set(AUTH).send({ refresh_frequency: '6h' });
+    expect(res.status).toBe(400);
+  });
+
+  test('rejects more than 500 ids', async () => {
+    const app = buildApp();
+    const ids = Array.from({ length: 501 }, (_, i) => 'id-' + i);
+    const res = await request(app).put('/admin/route-pages/bulk-refresh').set(AUTH).send({ ids, refresh_frequency: '6h' });
+    expect(res.status).toBe(400);
+  });
+
+  test('rejects an invalid refresh_frequency', async () => {
+    const app = buildApp();
+    const res = await request(app).put('/admin/route-pages/bulk-refresh').set(AUTH).send({ ids: ['id-1'], refresh_frequency: 'never' });
+    expect(res.status).toBe(400);
+  });
+
+  test('updates the given ids to the requested refresh_frequency', async () => {
+    let updatedWith = null;
+    let updatedIds = null;
+    const originalFrom = supa.from.getMockImplementation();
+    supa.from.mockImplementation((table) => {
+      if (table === 'route_pages') {
+        return {
+          update: (payload) => {
+            updatedWith = payload;
+            return { in: (col, ids) => { updatedIds = ids; return { select: () => Promise.resolve({ data: ids.map((id) => ({ id })), error: null }) }; } };
+          },
+        };
+      }
+      return originalFrom(table);
+    });
+    const app = buildApp();
+    const res = await request(app).put('/admin/route-pages/bulk-refresh').set(AUTH).send({ ids: ['id-1', 'id-2'], refresh_frequency: '24h' });
+    expect(res.status).toBe(200);
+    expect(res.body.updated).toBe(2);
+    expect(updatedWith.refresh_frequency).toBe('24h');
+    expect(updatedIds).toEqual(['id-1', 'id-2']);
   });
 });
 

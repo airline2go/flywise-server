@@ -107,6 +107,13 @@ function slugify(title) {
   return s || ('post-' + Math.random().toString(36).slice(2, 8));
 }
 
+// [ROUTE-REFRESH-TIER] 'none' = SEO-only (never proactively warmed by
+// warmRoutePricesOnce() in search.routes.js — a real visitor can still
+// trigger an on-demand price via GET /route-price); anything else is a
+// Live-Pricing route refreshed on that cadence. One field, not a
+// separate tier flag — see sql/route_refresh_tier.sql for the reasoning.
+const VALID_REFRESH_FREQUENCIES = ['none', '6h', '12h', '24h'];
+
 app.get('/admin/blog-posts', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
@@ -624,6 +631,9 @@ app.get('/admin/route-pages', rateLimit('admin', 120, 60000), requireAdmin, asyn
     if (statusFilter === 'published' || statusFilter === 'draft' || statusFilter === 'dead') {
       query = query.eq('status', statusFilter);
     }
+    if (VALID_REFRESH_FREQUENCIES.includes(req.query.refresh_frequency)) {
+      query = query.eq('refresh_frequency', req.query.refresh_frequency);
+    }
     if (q) {
       // بحث على أي عمود من الخمسة دول — يغطي البحث بالاسم أو بكود المطار
       const esc = q.replace(/[%_]/g, '\\$&');
@@ -651,13 +661,20 @@ app.get('/admin/route-pages', rateLimit('admin', 120, 60000), requireAdmin, asyn
 app.post('/admin/route-pages/bulk-create', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { airports, bothDirections } = req.body;
+    const { airports, bothDirections, refresh_frequency } = req.body;
     if (!Array.isArray(airports) || airports.length < 2) {
       return res.status(400).json({ ok: false, error: 'محتاج مطارين على الأقل' });
     }
     if (airports.length > 60) {
       return res.status(400).json({ ok: false, error: 'الحد الأقصى 60 مطار في المرة الواحدة (عشان الأداء) — قسّم القائمة على دفعات' });
     }
+    // [SAFE-DEFAULT] Same "start SEO-only, upgrade later" default as a
+    // single-route create — an admin bulk-creating hundreds of routes
+    // shouldn't accidentally put all of them on the Duffel-warming clock.
+    if (refresh_frequency != null && !VALID_REFRESH_FREQUENCIES.includes(refresh_frequency)) {
+      return res.status(400).json({ ok: false, error: 'refresh_frequency ungültig' });
+    }
+    const bulkRefreshFrequency = refresh_frequency || 'none';
     for (const a of airports) {
       if (!a || !a.code || !a.city) {
         return res.status(400).json({ ok: false, error: 'كل مطار لازم يكون ليه كود ومدينة (اخترهم من نتائج البحث بس)' });
@@ -717,6 +734,7 @@ app.post('/admin/route-pages/bulk-create', rateLimit('admin', 120, 60000), requi
         destination_country: d.country || null,
         distance_km, haul_type,
         status: 'draft', // [SAFE-DEFAULT] أبداً منشور تلقائياً — الأدمن بيراجع وينشر يدوياً
+        refresh_frequency: bulkRefreshFrequency,
       });
     }
 
@@ -833,9 +851,12 @@ app.post('/admin/route-pages/health-check-batch', rateLimit('admin', 120, 60000)
 app.post('/admin/route-pages', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status, origin_lat, origin_lng, destination_lat, destination_lng, origin_country, destination_country, custom_title, custom_meta_description, custom_faq } = req.body;
+    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status, origin_lat, origin_lng, destination_lat, destination_lng, origin_country, destination_country, custom_title, custom_meta_description, custom_faq, refresh_frequency } = req.body;
     if (!origin_iata || !destination_iata || !origin_city || !destination_city) {
       return res.status(400).json({ ok: false, error: 'IATA-Codes und Stadtnamen sind erforderlich' });
+    }
+    if (refresh_frequency != null && !VALID_REFRESH_FREQUENCIES.includes(refresh_frequency)) {
+      return res.status(400).json({ ok: false, error: 'refresh_frequency ungültig' });
     }
 
     // [DUPLICATE-ROUTE-FIX] Real duplicate check based on the actual
@@ -908,6 +929,7 @@ app.post('/admin/route-pages', rateLimit('admin', 120, 60000), requireAdmin, asy
       custom_meta_description: custom_meta_description || null,
       custom_faq: Array.isArray(custom_faq) && custom_faq.length ? custom_faq : null,
       status: isPublishing ? 'published' : 'draft',
+      refresh_frequency: refresh_frequency || 'none',
     }).select().maybeSingle();
     if (error) throw new Error(error.message);
     // [COUNTRY-PAGES / CITY-PAGES] Only auto-create country/city pages
@@ -926,10 +948,42 @@ app.post('/admin/route-pages', rateLimit('admin', 120, 60000), requireAdmin, asy
   }
 });
 
+// [BULK-REFRESH-TIER] يخلي الأدمن يختار مجموعة مسارات موجودة فعلاً
+// ويغيّر معدل تحديث السعر بتاعهم كلهم بضغطة واحدة — بدون ما يحتاج
+// يفتح كل مسار لوحده. لا triggerRebuild() هنا: هذا التغيير بيأثر على
+// سلوك تحديث الأسعار بالخلفية بس، مش على محتوى SEO المنشور فعلاً.
+app.put('/admin/route-pages/bulk-refresh', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { ids, refresh_frequency } = req.body;
+    if (!Array.isArray(ids) || !ids.length) {
+      return res.status(400).json({ ok: false, error: 'ids ist erforderlich' });
+    }
+    if (ids.length > 500) {
+      return res.status(400).json({ ok: false, error: 'الحد الأقصى 500 مسار في المرة الواحدة' });
+    }
+    if (!VALID_REFRESH_FREQUENCIES.includes(refresh_frequency)) {
+      return res.status(400).json({ ok: false, error: 'refresh_frequency ungültig' });
+    }
+    const { data, error } = await supa.from('route_pages')
+      .update({ refresh_frequency, updated_at: new Date().toISOString() })
+      .in('id', ids)
+      .select('id');
+    if (error) throw new Error(error.message);
+    log('info', 'bulk_route_refresh_updated', { count: (data || []).length, refresh_frequency });
+    res.json({ ok: true, updated: (data || []).length });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.put('/admin/route-pages/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status, origin_lat, origin_lng, destination_lat, destination_lng, origin_country, destination_country, custom_title, custom_meta_description, custom_faq } = req.body;
+    const { origin_iata, destination_iata, origin_city, destination_city, intro_text, status, origin_lat, origin_lng, destination_lat, destination_lng, origin_country, destination_country, custom_title, custom_meta_description, custom_faq, refresh_frequency } = req.body;
+    if (refresh_frequency != null && !VALID_REFRESH_FREQUENCIES.includes(refresh_frequency)) {
+      return res.status(400).json({ ok: false, error: 'refresh_frequency ungültig' });
+    }
     const update = { updated_at: new Date().toISOString() };
     if (origin_iata != null) update.origin_iata = origin_iata.toUpperCase();
     if (destination_iata != null) update.destination_iata = destination_iata.toUpperCase();
@@ -942,6 +996,7 @@ app.put('/admin/route-pages/:id', rateLimit('admin', 120, 60000), requireAdmin, 
     if (custom_meta_description != null) update.custom_meta_description = custom_meta_description || null;
     if (custom_faq != null) update.custom_faq = Array.isArray(custom_faq) && custom_faq.length ? custom_faq : null;
     if (status != null) update.status = status;
+    if (refresh_frequency != null) update.refresh_frequency = refresh_frequency;
     // [ROUTE-PAGES-DISTANCE] Recompute whenever fresh coordinates are
     // supplied (i.e. the admin re-selected an airport while editing) — so
     // editing a route's endpoints never leaves a stale distance/haul_type
@@ -974,6 +1029,7 @@ app.put('/admin/route-pages/:id', rateLimit('admin', 120, 60000), requireAdmin, 
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+
 
 // [BULK-PUBLISH] نشر كل المسودات دفعة واحدة — نفس بالظبط اللي بيحصل
 // لما تنشر مسار واحد يدوي (تفعيل صفحات الدول والمدن المرتبطة)، بس

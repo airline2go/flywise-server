@@ -7,6 +7,7 @@ jest.mock('../src/clients/supabase', () => {
     const builder = {
       select: () => builder,
       eq: () => builder,
+      neq: () => builder,
       then: (resolve, reject) => Promise.resolve(cfg.result || { data: null, error: null }).then(resolve, reject),
     };
     return builder;
@@ -175,6 +176,58 @@ describe('GET /route-price', () => {
     const res = await request(app).get('/route-price?from=SIN&to=HKG');
     expect(res.status).toBe(200);
     expect(res.body).toEqual(expect.objectContaining({ ok: true, price: null }));
+  });
+});
+
+// [ROUTE-REFRESH-TIER] warmRoutePricesOnce() — the proactive background
+// warming cycle that now reads each route's own refresh_frequency
+// instead of applying one blanket 12h rule to every published route.
+describe('warmRoutePricesOnce', () => {
+  const { warmRoutePricesOnce } = require('../src/routes/search.routes');
+  const DUFFEL_OFFER = { data: { id: 'orq_w', offers: [{ id: 'off_w', total_amount: '150.00', total_currency: 'EUR', slices: [{ duration: 'PT3H', segments: [{ marketing_carrier: { name: 'Airpiv Air' } }] }] }] } };
+  const hoursAgo = (h) => new Date(Date.now() - h * 60 * 60 * 1000).toISOString();
+
+  test("excludes refresh_frequency='none' routes entirely, even with no cache at all", async () => {
+    supa.__setResponse('route_pages', { result: { data: [{ origin_iata: 'BER', destination_iata: 'FRA', refresh_frequency: 'none' }], error: null } });
+    mockGetAdminConfig.mockResolvedValue(null); // "never cached" — would be due under any threshold
+    mockDuffelFn.mockResolvedValue(DUFFEL_OFFER);
+    await warmRoutePricesOnce();
+    expect(mockDuffelFn).not.toHaveBeenCalled();
+  });
+
+  test("warms a '6h' route whose cache is 7h old — stale relative to its OWN threshold, not the old blanket 12h", async () => {
+    supa.__setResponse('route_pages', { result: { data: [{ origin_iata: 'MUC', destination_iata: 'PMI', refresh_frequency: '6h' }], error: null } });
+    mockGetAdminConfig.mockResolvedValue({ price: 80, fetchedAt: hoursAgo(7) });
+    mockDuffelFn.mockResolvedValue(DUFFEL_OFFER);
+    await warmRoutePricesOnce();
+    expect(mockDuffelFn).toHaveBeenCalled();
+    expect(mockSetAdminConfig).toHaveBeenCalledWith('route_price_MUC_PMI', expect.any(Object));
+  });
+
+  test("does NOT warm a '24h' route whose cache is only 7h old — still fresh relative to its own threshold", async () => {
+    supa.__setResponse('route_pages', { result: { data: [{ origin_iata: 'HAM', destination_iata: 'LIS', refresh_frequency: '24h' }], error: null } });
+    mockGetAdminConfig.mockResolvedValue({ price: 80, fetchedAt: hoursAgo(7) });
+    mockDuffelFn.mockResolvedValue(DUFFEL_OFFER);
+    await warmRoutePricesOnce();
+    expect(mockDuffelFn).not.toHaveBeenCalled();
+  });
+
+  test('duplicate IATA pairs at different frequencies pick the shortest interval (never under-serves either row)', async () => {
+    supa.__setResponse('route_pages', {
+      result: {
+        data: [
+          { origin_iata: 'DUS', destination_iata: 'AGP', refresh_frequency: '24h' },
+          { origin_iata: 'DUS', destination_iata: 'AGP', refresh_frequency: '6h' },
+        ],
+        error: null,
+      },
+    });
+    // 7h-old cache: stale for the 6h row, still fresh for the 24h row —
+    // the pair must be treated as due, proving the shortest wins.
+    mockGetAdminConfig.mockResolvedValue({ price: 80, fetchedAt: hoursAgo(7) });
+    mockDuffelFn.mockResolvedValue(DUFFEL_OFFER);
+    await warmRoutePricesOnce();
+    expect(mockDuffelFn).toHaveBeenCalledTimes(1); // de-duped to ONE warm, not two
   });
 });
 
