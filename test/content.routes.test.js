@@ -8,6 +8,7 @@ jest.mock('../src/clients/supabase', () => {
       neq: () => builder,
       not: () => builder,
       or: () => builder,
+      in: () => builder,
       order: () => builder,
       limit: () => builder,
       update: () => builder,
@@ -43,11 +44,18 @@ beforeEach(() => {
 
 describe('GET /cities', () => {
   test('returns the published city list', async () => {
-    supa.__setResponse('cities', { result: { data: [{ city_slug: 'berlin', name: 'Berlin' }, { city_slug: 'paris', name: 'Paris' }], error: null } });
+    supa.__setResponse('cities', { result: { data: [{ id: 'city-1', city_slug: 'berlin', name: 'Berlin' }, { id: 'city-2', city_slug: 'paris', name: 'Paris' }], error: null } });
+    supa.__setResponse('city_translations', { result: { data: [{ city_id: 'city-1', language: 'en', name: 'Berlin' }], error: null } });
     const app = buildApp();
     const res = await request(app).get('/cities');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, cities: [{ city_slug: 'berlin', name: 'Berlin' }, { city_slug: 'paris', name: 'Paris' }] });
+    expect(res.body).toEqual({
+      ok: true,
+      cities: [
+        { city_slug: 'berlin', name: 'Berlin', translations: { en: 'Berlin' } },
+        { city_slug: 'paris', name: 'Paris', translations: {} },
+      ],
+    });
   });
 
   test('returns an empty list rather than an error when there are no cities yet', async () => {
@@ -165,10 +173,11 @@ describe('GET /blog-posts-en/:slug', () => {
 describe('GET /countries', () => {
   test('returns the published country list', async () => {
     supa.__setResponse('countries', { result: { data: [{ code: 'DE', name: 'Deutschland' }], error: null } });
+    supa.__setResponse('country_translations', { result: { data: [{ country_code: 'DE', language: 'en', name: 'Germany' }], error: null } });
     const app = buildApp();
     const res = await request(app).get('/countries');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, countries: [{ code: 'DE', name: 'Deutschland' }] });
+    expect(res.body).toEqual({ ok: true, countries: [{ code: 'DE', name: 'Deutschland', translations: { en: 'Germany' } }] });
   });
 });
 

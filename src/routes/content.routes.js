@@ -173,7 +173,25 @@ app.get('/countries', rateLimit('content', 1000, 60000), async (req, res) => {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { data, error } = await supa.from('countries').select('code,name').eq('status', 'published').order('name', { ascending: true });
     if (error) throw new Error(error.message);
-    res.json({ ok: true, countries: data || [] });
+    const countries = data || [];
+
+    // [GEO-CMS] One bounded follow-up query for every country's
+    // translations, grouped in JS — not N+1 queries. The SSG build fetches
+    // this list exactly once and needs every country's translations to
+    // build its global localization lookup, so it's cheaper to include
+    // them here than to have the build re-fetch each country individually.
+    const codes = countries.map((c) => c.code);
+    let translationsByCode = {};
+    if (codes.length) {
+      const { data: t, error: tErr } = await supa.from('country_translations').select('country_code,language,name').in('country_code', codes);
+      if (tErr) throw new Error(tErr.message);
+      (t || []).forEach((r) => {
+        if (!translationsByCode[r.country_code]) translationsByCode[r.country_code] = {};
+        translationsByCode[r.country_code][r.language] = r.name;
+      });
+    }
+
+    res.json({ ok: true, countries: countries.map((c) => ({ ...c, translations: translationsByCode[c.code] || {} })) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -223,9 +241,23 @@ app.get('/countries/:code', rateLimit('content', 1000, 60000), async (req, res) 
 app.get('/cities', rateLimit('content', 1000, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { data, error } = await supa.from('cities').select('city_slug,name').eq('status', 'published').order('name', { ascending: true });
+    const { data, error } = await supa.from('cities').select('id,city_slug,name').eq('status', 'published').order('name', { ascending: true });
     if (error) throw new Error(error.message);
-    res.json({ ok: true, cities: data || [] });
+    const cities = data || [];
+
+    // [GEO-CMS] Same bounded-follow-up-query pattern as GET /countries.
+    const ids = cities.map((c) => c.id);
+    let translationsById = {};
+    if (ids.length) {
+      const { data: t, error: tErr } = await supa.from('city_translations').select('city_id,language,name').in('city_id', ids);
+      if (tErr) throw new Error(tErr.message);
+      (t || []).forEach((r) => {
+        if (!translationsById[r.city_id]) translationsById[r.city_id] = {};
+        translationsById[r.city_id][r.language] = r.name;
+      });
+    }
+
+    res.json({ ok: true, cities: cities.map((c) => ({ city_slug: c.city_slug, name: c.name, translations: translationsById[c.id] || {} })) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
