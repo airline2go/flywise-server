@@ -26,8 +26,10 @@ jest.mock('../src/clients/supabase', () => {
 jest.mock('../src/utils/log', () => jest.fn());
 
 const mockGetOrCreateLoyaltyAccount = jest.fn();
+const mockLogLoyaltyTransaction = jest.fn();
 jest.mock('../src/services/loyalty', () => ({
   getOrCreateLoyaltyAccount: (...args) => mockGetOrCreateLoyaltyAccount(...args),
+  logLoyaltyTransaction: (...args) => mockLogLoyaltyTransaction(...args),
 }));
 
 const supa = require('../src/clients/supabase');
@@ -44,6 +46,7 @@ beforeEach(() => {
   supa.__reset();
   supa.from.mockReset().mockImplementation(defaultFromImpl);
   mockGetOrCreateLoyaltyAccount.mockReset();
+  mockLogLoyaltyTransaction.mockReset();
 });
 
 describe('referralCodeFor', () => {
@@ -167,6 +170,8 @@ describe('checkAndPayout', () => {
     const result = await referrals.checkAndPayout('user-1');
     expect(result).toEqual({ creditedNow: 10 });
     expect(updatedWith).toEqual({ reward_referrer_paid: false, reward_referred_paid: true, status: 'pending' });
+    // [LEDGER] creditReward must also log a loyalty_transactions row.
+    expect(mockLogLoyaltyTransaction).toHaveBeenCalledWith('user', 'user-1', 'reward', 10, 15, expect.any(String));
   });
 
   test('marks completed once both sides are paid', async () => {
@@ -243,5 +248,7 @@ describe('reverseReferralForBooking', () => {
     expect(referralUpdatedWith).toEqual({ status: 'cancelled' });
     // Only the referrer had been paid — only one reversal credit update expected.
     expect(loyaltyUpdatedFor).toEqual([{ credit: 10 }]);
+    // [LEDGER] reverseReward must also log a (negative) loyalty_transactions row.
+    expect(mockLogLoyaltyTransaction).toHaveBeenCalledWith('user', 'referrer-1', 'reward', -10, 10, expect.any(String));
   });
 });

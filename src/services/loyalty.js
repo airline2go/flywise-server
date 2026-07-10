@@ -49,6 +49,27 @@ function creditUsableForSubtotal(subtotal, cfg) {
   return Number(last.creditEur) || 0;
 }
 
+// [LOYALTY-LEDGER] Fire-and-forget insert into the loyalty_transactions
+// ledger — purely additive, never blocks or alters the balance mutation
+// it's logging (same fire-and-forget shape as logAdminActivity). kind/id
+// follow the same device|user convention as every other function here,
+// so anonymous-device accounts get logged too, not just registered users.
+async function logLoyaltyTransaction(kind, id, type, amount, balanceAfter, note) {
+  if (!supa || !id) return;
+  const column = kind === 'device' ? 'device_id' : 'user_id';
+  try {
+    await supa.from('loyalty_transactions').insert({
+      [column]: id,
+      type,
+      amount,
+      balance_after: balanceAfter,
+      note: note || null,
+    });
+  } catch (e) {
+    log('warn', 'loyalty_transaction_log_failed', { type, error: e.message });
+  }
+}
+
 // Looks up (or lazily creates) a loyalty account for either an anonymous
 // device or a logged-in user. `kind` is 'device' or 'user'; `id` is the
 // device_id or user_id respectively. This is the ONLY place that touches
@@ -129,6 +150,8 @@ async function applyLoyaltyForBooking(kind, id, creditUsed, paidAmount) {
       bookings_count: (Number(account.bookings_count) || 0) + 1,
       tier: newTier,
     }).eq(column, id);
+    const usedAmount = Math.round((Number(creditUsed) || 0) * 100) / 100;
+    if (usedAmount > 0) logLoyaltyTransaction(kind, id, 'booking_usage', -usedAmount, newCredit);
     return earned;
   } catch (e) {
     log('warn', 'loyalty_apply_failed', { error: e.message });
@@ -178,6 +201,7 @@ async function reverseLoyaltyForBooking(kind, id, creditUsedOriginal, pointsEarn
       tier: newTier,
     }).eq(column, id);
     if (error) return { ok: false, error: error.message };
+    if (creditToRestore > 0) logLoyaltyTransaction(kind, id, 'refund', creditToRestore, newCredit);
     log('info', 'loyalty_reversed_for_cancellation', { kind, id, creditToRestore, pointsToRemove, newTier, refundRatio });
     return { ok: true };
   } catch (e) {
@@ -205,6 +229,7 @@ module.exports = {
   getLoyaltyConfig,
   creditUsableForSubtotal,
   getOrCreateLoyaltyAccount,
+  logLoyaltyTransaction,
   computeLoyaltyDiscount,
   applyLoyaltyForBooking,
   reverseLoyaltyForBooking,

@@ -23,9 +23,11 @@ jest.mock('../src/clients/supabase', () => {
 
 const mockGetLoyaltyConfig = jest.fn();
 const mockGetOrCreateLoyaltyAccount = jest.fn();
+const mockLogLoyaltyTransaction = jest.fn();
 jest.mock('../src/services/loyalty', () => ({
   getLoyaltyConfig: (...args) => mockGetLoyaltyConfig(...args),
   getOrCreateLoyaltyAccount: (...args) => mockGetOrCreateLoyaltyAccount(...args),
+  logLoyaltyTransaction: (...args) => mockLogLoyaltyTransaction(...args),
 }));
 
 jest.mock('../src/utils/log', () => jest.fn());
@@ -54,6 +56,7 @@ beforeEach(() => {
   supa.__mockGetUser.mockReset().mockResolvedValue({ data: null, error: { message: 'invalid token' } });
   mockGetLoyaltyConfig.mockReset().mockResolvedValue({ pointsPerEuroRedeem: 400 });
   mockGetOrCreateLoyaltyAccount.mockReset();
+  mockLogLoyaltyTransaction.mockReset();
 });
 
 describe('POST /loyalty/redeem', () => {
@@ -108,6 +111,9 @@ describe('POST /loyalty/redeem', () => {
       loyalty: { credit: 8, points: 800, lifetime_points: 1500, tier: 'silver' },
     });
     expect(supa.from).toHaveBeenCalledWith('loyalty_accounts');
+    // [LEDGER] Every credit-adding path must also log a loyalty_transactions
+    // row — additive on top of the balance mutation itself.
+    expect(mockLogLoyaltyTransaction).toHaveBeenCalledWith('user', 'user-5', 'reward', 1, 6, expect.any(String));
   });
 
   test('lifetime_points falls back to points on the updated row when null', async () => {

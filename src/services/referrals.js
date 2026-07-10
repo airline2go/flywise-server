@@ -13,7 +13,7 @@
 
 const supa = require('../clients/supabase');
 const log = require('../utils/log');
-const { getOrCreateLoyaltyAccount } = require('./loyalty');
+const { getOrCreateLoyaltyAccount, logLoyaltyTransaction } = require('./loyalty');
 
 const REWARD_EUR = 10;
 
@@ -122,6 +122,7 @@ async function creditReward(userId) {
   const newCredit = Math.round(((Number(account.credit) || 0) + REWARD_EUR) * 100) / 100;
   const { error } = await supa.from('loyalty_accounts').update({ credit: newCredit }).eq('user_id', userId);
   if (error) { log('warn', 'referral_credit_failed', { userId, error: error.message }); return false; }
+  logLoyaltyTransaction('user', userId, 'reward', REWARD_EUR, newCredit, 'referral_reward');
   return true;
 }
 
@@ -197,7 +198,8 @@ async function reverseReward(userId) {
   if (!account) return;
   const newCredit = Math.max(0, Math.round(((Number(account.credit) || 0) - REWARD_EUR) * 100) / 100);
   const { error } = await supa.from('loyalty_accounts').update({ credit: newCredit }).eq('user_id', userId);
-  if (error) log('warn', 'referral_reverse_credit_failed', { userId, error: error.message });
+  if (error) { log('warn', 'referral_reverse_credit_failed', { userId, error: error.message }); return; }
+  logLoyaltyTransaction('user', userId, 'reward', -REWARD_EUR, newCredit, 'referral_reward_reversed');
 }
 
 // The caller's own "who did I invite" list (mirrors the old client-side

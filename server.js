@@ -95,6 +95,8 @@ require('./src/routes/referral.routes')(app);
 require('./src/routes/promo.routes')(app);
 require('./src/routes/content.routes')(app);
 require('./src/routes/admin.routes')(app);
+require('./src/routes/admin-staff.routes')(app);
+require('./src/routes/admin-customers.routes')(app);
 
 // ─── [7] معالج الأخطاء الموحّد ───────────────────────────────
 if (env.SENTRY_DSN) {

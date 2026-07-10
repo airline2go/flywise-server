@@ -10,7 +10,8 @@ const env = require('../config/env');
 const log = require('../utils/log');
 const supa = require('../clients/supabase');
 const rateLimit = require('../middleware/rateLimit');
-const { requireAdmin } = require('../middleware/auth');
+const { requireAdmin, requireFullAdmin } = require('../middleware/auth');
+const { logAdminActivity } = require('../services/adminAuth');
 const duffel = require('../services/duffel');
 const { duffelAttempt } = require('../services/duffel');
 const {
@@ -34,7 +35,7 @@ app.post('/admin/login', rateLimit('admin_login', 10, 60000), (req, res) => {
   const b = Buffer.from(env.ADMIN_TOKEN);
   const valid = a.length === b.length && require('crypto').timingSafeEqual(a, b);
   if (!valid) { log('warn', 'admin_login_failed', { ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress }); return res.status(401).json({ ok: false, error: 'Falsches Passwort' }); }
-  res.json({ ok: true, token: env.ADMIN_TOKEN });
+  res.json({ ok: true, token: env.ADMIN_TOKEN, role: 'admin' });
 });
 
 app.get('/admin/maintenance', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
@@ -1137,6 +1138,13 @@ app.get('/admin/bookings', rateLimit('admin', 120, 60000), requireAdmin, async (
     const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
     let query = supa.from('bookings').select('*').order('created_at', { ascending: false }).limit(limit);
     if (req.query.status) query = query.eq('status', req.query.status);
+    const q = (req.query.q || '').trim();
+    if (q) {
+      const esc = q.replace(/[%_]/g, '\\$&');
+      query = query.or(
+        `customer_email.ilike.%${esc}%,customer_name.ilike.%${esc}%,customer_phone.ilike.%${esc}%`
+      );
+    }
     const { data, error } = await query;
     if (error) throw new Error(error.message);
     res.json({ ok: true, bookings: data || [] });
@@ -1156,7 +1164,7 @@ app.post('/admin/bookings/:id/cancel', rateLimit('admin', 120, 60000), requireAd
   }
 });
 
-app.get('/admin/profit-tiers', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
+app.get('/admin/profit-tiers', rateLimit('admin', 120, 60000), requireFullAdmin, async (req, res) => {
   try {
     const tiers = await getAdminConfig('ticket_profit_tiers', DEFAULT_TICKET_TIERS);
     res.json({ ok: true, tiers });
@@ -1164,18 +1172,19 @@ app.get('/admin/profit-tiers', rateLimit('admin', 120, 60000), requireAdmin, asy
     res.status(500).json({ ok: false, error: err.message });
   }
 });
-app.post('/admin/profit-tiers', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
+app.post('/admin/profit-tiers', rateLimit('admin', 120, 60000), requireFullAdmin, async (req, res) => {
   try {
     const tiers = validateTiersPayload(req.body && req.body.tiers);
     await setAdminConfig('ticket_profit_tiers', tiers);
     log('info', 'admin_ticket_tiers_updated', { count: tiers.length });
+    logAdminActivity(req.adminUserId, 'profit_tiers_changed', 'config', 'ticket_profit_tiers', { count: tiers.length });
     res.json({ ok: true, tiers });
   } catch (err) {
     res.status(err.status || 400).json({ ok: false, error: err.message });
   }
 });
 
-app.get('/admin/ancillary-margin', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
+app.get('/admin/ancillary-margin', rateLimit('admin', 120, 60000), requireFullAdmin, async (req, res) => {
   try {
     const tiers = await getAdminConfig('ancillary_profit_tiers', DEFAULT_ANCILLARY_TIERS);
     res.json({ ok: true, tiers });
@@ -1183,11 +1192,12 @@ app.get('/admin/ancillary-margin', rateLimit('admin', 120, 60000), requireAdmin,
     res.status(500).json({ ok: false, error: err.message });
   }
 });
-app.post('/admin/ancillary-margin', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
+app.post('/admin/ancillary-margin', rateLimit('admin', 120, 60000), requireFullAdmin, async (req, res) => {
   try {
     const tiers = validateTiersPayload(req.body && req.body.tiers);
     await setAdminConfig('ancillary_profit_tiers', tiers);
     log('info', 'admin_ancillary_tiers_updated', { count: tiers.length });
+    logAdminActivity(req.adminUserId, 'ancillary_margin_changed', 'config', 'ancillary_profit_tiers', { count: tiers.length });
     res.json({ ok: true, tiers });
   } catch (err) {
     res.status(err.status || 400).json({ ok: false, error: err.message });

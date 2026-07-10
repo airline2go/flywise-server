@@ -8,7 +8,7 @@ const log = require('../utils/log');
 const supa = require('../clients/supabase');
 const rateLimit = require('../middleware/rateLimit');
 const { attachUserIfPresent } = require('../middleware/auth');
-const { getLoyaltyConfig, getOrCreateLoyaltyAccount } = require('../services/loyalty');
+const { getLoyaltyConfig, getOrCreateLoyaltyAccount, logLoyaltyTransaction } = require('../services/loyalty');
 
 module.exports = (app) => {
 
@@ -47,6 +47,7 @@ app.post('/loyalty/redeem', attachUserIfPresent, rateLimit('loyalty-redeem', 20,
       .maybeSingle();
     if (error) throw new Error(error.message);
 
+    logLoyaltyTransaction('user', req.userId, 'reward', euros, newCredit, `${pointsToRedeem} Punkte eingelöst`);
     log('info', 'loyalty_points_redeemed', { userId: req.userId, points: pointsToRedeem, euros, newPoints, newCredit });
     res.json({
       ok: true,
