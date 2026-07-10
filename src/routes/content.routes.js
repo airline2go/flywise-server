@@ -173,7 +173,25 @@ app.get('/countries', rateLimit('content', 1000, 60000), async (req, res) => {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { data, error } = await supa.from('countries').select('code,name').eq('status', 'published').order('name', { ascending: true });
     if (error) throw new Error(error.message);
-    res.json({ ok: true, countries: data || [] });
+    const countries = data || [];
+
+    // [GEO-CMS] One bounded follow-up query for every country's
+    // translations, grouped in JS — not N+1 queries. The SSG build fetches
+    // this list exactly once and needs every country's translations to
+    // build its global localization lookup, so it's cheaper to include
+    // them here than to have the build re-fetch each country individually.
+    const codes = countries.map((c) => c.code);
+    let translationsByCode = {};
+    if (codes.length) {
+      const { data: t, error: tErr } = await supa.from('country_translations').select('country_code,language,name').in('country_code', codes);
+      if (tErr) throw new Error(tErr.message);
+      (t || []).forEach((r) => {
+        if (!translationsByCode[r.country_code]) translationsByCode[r.country_code] = {};
+        translationsByCode[r.country_code][r.language] = r.name;
+      });
+    }
+
+    res.json({ ok: true, countries: countries.map((c) => ({ ...c, translations: translationsByCode[c.code] || {} })) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -201,7 +219,16 @@ app.get('/countries/:code', rateLimit('content', 1000, 60000), async (req, res) 
     if (routesErr) throw new Error(routesErr.message);
     if (!routes || !routes.length) return res.status(404).json({ ok: false, error: 'Keine Routen für dieses Land gefunden' });
 
-    res.json({ ok: true, country, routes });
+    // [GEO-CMS] 7-language name translations, e.g.
+    // {name:"Germany", translations:{en:"Germany", de:"Deutschland", ...}}
+    // — falls back to just the legacy `name` field for any language not
+    // yet translated (nothing to backfill for a brand-new country row).
+    const { data: t, error: tErr } = await supa.from('country_translations').select('language,name').eq('country_code', code);
+    if (tErr) throw new Error(tErr.message);
+    const translations = {};
+    (t || []).forEach((r) => { translations[r.language] = r.name; });
+
+    res.json({ ok: true, country: { ...country, translations }, routes });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -214,9 +241,27 @@ app.get('/countries/:code', rateLimit('content', 1000, 60000), async (req, res) 
 app.get('/cities', rateLimit('content', 1000, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { data, error } = await supa.from('cities').select('city_slug,name').eq('status', 'published').order('name', { ascending: true });
+    // [GEO-CMS] airport_codes included so the SSG build can resolve "which
+    // city does this IATA code belong to" client-side (a city's name
+    // translations apply to every airport serving it, e.g. LHR/LGW/STN/LTN
+    // all localize to the same "London" translations).
+    const { data, error } = await supa.from('cities').select('id,city_slug,name,airport_codes').eq('status', 'published').order('name', { ascending: true });
     if (error) throw new Error(error.message);
-    res.json({ ok: true, cities: data || [] });
+    const cities = data || [];
+
+    // [GEO-CMS] Same bounded-follow-up-query pattern as GET /countries.
+    const ids = cities.map((c) => c.id);
+    let translationsById = {};
+    if (ids.length) {
+      const { data: t, error: tErr } = await supa.from('city_translations').select('city_id,language,name').in('city_id', ids);
+      if (tErr) throw new Error(tErr.message);
+      (t || []).forEach((r) => {
+        if (!translationsById[r.city_id]) translationsById[r.city_id] = {};
+        translationsById[r.city_id][r.language] = r.name;
+      });
+    }
+
+    res.json({ ok: true, cities: cities.map((c) => ({ city_slug: c.city_slug, name: c.name, airport_codes: c.airport_codes || [], translations: translationsById[c.id] || {} })) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -243,7 +288,31 @@ app.get('/cities/:slug', rateLimit('content', 1000, 60000), async (req, res) => 
     if (routesErr) throw new Error(routesErr.message);
     if (!routes || !routes.length) return res.status(404).json({ ok: false, error: 'Keine Routen für diese Stadt gefunden' });
 
-    res.json({ ok: true, city, routes });
+    // [GEO-CMS] 7-language name translations, same shape as /countries/:code.
+    const { data: t, error: tErr } = await supa.from('city_translations').select('language,name').eq('city_id', city.id);
+    if (tErr) throw new Error(tErr.message);
+    const translations = {};
+    (t || []).forEach((r) => { translations[r.language] = r.name; });
+
+    res.json({ ok: true, city: { ...city, translations }, routes });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── GET /airports ───────────────────────────────────────────────
+// [AIRPORT-IDENTITY-FIRST] Public list of published, authoritative
+// airport rows — mirrors GET /cities / GET /countries. Used by the
+// admin Geo CMS and, going forward, by the SSG build. Airports not yet
+// backfilled into this table (see the fallback in GET /airports/:code
+// below) simply won't appear here until ensureAirportExists() or the
+// admin Geo CMS creates a row for them.
+app.get('/airports', rateLimit('content', 1000, 60000), async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { data, error } = await supa.from('airports').select('iata_code,airport_name,city_id,country_code').eq('status', 'published').order('iata_code', { ascending: true });
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, airports: data || [] });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -251,12 +320,15 @@ app.get('/cities/:slug', rateLimit('content', 1000, 60000), async (req, res) => 
 
 // ─── GET /airports/:code ─────────────────────────────────────────
 // [AIRPORT-PAGES] The 4th and final level of the Home → Country → City
-// → Airport hierarchy. Unlike countries/cities, airports need no
-// separate table or auto-creation step — every route_pages row already
-// carries the airport's IATA code, city, and coordinates directly, so
-// an airport page simply exists whenever at least one published route
-// uses that code. 404s if no published route touches this airport at
-// all, same no-thin-content guarantee as every other level.
+// → Airport hierarchy. [AIRPORT-IDENTITY-FIRST] Prefers the
+// authoritative `airports` table (IATA code -> airport row -> city ->
+// country) over deriving live from route_pages — but falls back to the
+// old live-derivation for any code ensureAirportExists() hasn't
+// backfilled yet (e.g. a route published before the Geo CMS migration
+// that hasn't been re-saved since), so no existing airport page
+// regresses the moment this ships. 404s if no published route touches
+// this airport at all, same no-thin-content guarantee as every other
+// level, regardless of whether an authoritative row exists.
 app.get('/airports/:code', rateLimit('content', 1000, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
@@ -269,21 +341,72 @@ app.get('/airports/:code', rateLimit('content', 1000, 60000), async (req, res) =
     if (routesErr) throw new Error(routesErr.message);
     if (!routes || !routes.length) return res.status(404).json({ ok: false, error: 'Flughafen nicht gefunden' });
 
-    // [AIRPORT-PAGES] Derive the airport's display city/country/slug/
-    // coordinates from whichever route mentions it first — there's no
-    // separate airports table holding this independently, so this is
-    // the only source of truth available.
     const firstAsOrigin = routes.find((r) => r.origin_iata === code);
     const firstAsDest = routes.find((r) => r.destination_iata === code);
     const ref = firstAsOrigin || firstAsDest;
-    const airport = {
-      code,
-      city: firstAsOrigin ? ref.origin_city : ref.destination_city,
-      city_slug: firstAsOrigin ? ref.origin_city_slug : ref.destination_city_slug,
-      country: firstAsOrigin ? ref.origin_country : ref.destination_country,
-      lat: firstAsOrigin ? ref.origin_lat : ref.destination_lat,
-      lng: firstAsOrigin ? ref.origin_lng : ref.destination_lng,
-    };
+    const fallbackCity = firstAsOrigin ? ref.origin_city : ref.destination_city;
+    const fallbackCitySlug = firstAsOrigin ? ref.origin_city_slug : ref.destination_city_slug;
+    const fallbackCountry = firstAsOrigin ? ref.origin_country : ref.destination_country;
+    const fallbackLat = firstAsOrigin ? ref.origin_lat : ref.destination_lat;
+    const fallbackLng = firstAsOrigin ? ref.origin_lng : ref.destination_lng;
+
+    const { data: airportRow, error: airportErr } = await supa.from('airports').select('*').eq('iata_code', code).maybeSingle();
+    if (airportErr) throw new Error(airportErr.message);
+
+    let translations = {};
+    let citySlug = fallbackCitySlug;
+    let cityName = fallbackCity;
+    let countryCode = fallbackCountry;
+    let airport;
+
+    if (airportRow) {
+      const { data: t } = await supa.from('airport_translations').select('language,name').eq('airport_id', airportRow.id);
+      (t || []).forEach((r) => { translations[r.language] = r.name; });
+      if (airportRow.city_id) {
+        const { data: c } = await supa.from('cities').select('city_slug,name').eq('id', airportRow.city_id).maybeSingle();
+        if (c) { citySlug = c.city_slug; cityName = c.name; }
+      }
+      countryCode = airportRow.country_code || fallbackCountry;
+      airport = {
+        code,
+        name: airportRow.airport_name,
+        icao: airportRow.icao_code,
+        city: cityName,
+        city_slug: citySlug,
+        country: countryCode,
+        lat: airportRow.latitude != null ? airportRow.latitude : fallbackLat,
+        lng: airportRow.longitude != null ? airportRow.longitude : fallbackLng,
+        translations,
+      };
+    } else {
+      airport = {
+        code,
+        name: code,
+        city: fallbackCity,
+        city_slug: fallbackCitySlug,
+        country: fallbackCountry,
+        lat: fallbackLat,
+        lng: fallbackLng,
+        translations,
+      };
+    }
+
+    // [GEO-CMS] Also surface the linked city's/country's own translations
+    // so the airport page can localize those without an extra round trip.
+    let cityTranslations = {}, countryTranslations = {};
+    if (citySlug) {
+      const { data: cityRow } = await supa.from('cities').select('id').eq('city_slug', citySlug).maybeSingle();
+      if (cityRow) {
+        const { data: ct } = await supa.from('city_translations').select('language,name').eq('city_id', cityRow.id);
+        (ct || []).forEach((r) => { cityTranslations[r.language] = r.name; });
+      }
+    }
+    if (countryCode) {
+      const { data: cot } = await supa.from('country_translations').select('language,name').eq('country_code', countryCode);
+      (cot || []).forEach((r) => { countryTranslations[r.language] = r.name; });
+    }
+    airport.city_translations = cityTranslations;
+    airport.country_translations = countryTranslations;
 
     res.json({ ok: true, airport, routes });
   } catch (err) {

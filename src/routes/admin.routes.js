@@ -567,8 +567,8 @@ app.post('/admin/route-pages/backfill-locations', rateLimit('admin', 120, 60000)
           const finalDestSlug = update.destination_city_slug || route.destination_city_slug;
           if (finalOriginCountry) ensureCountryExists(finalOriginCountry);
           if (finalDestCountry) ensureCountryExists(finalDestCountry);
-          if (finalOriginSlug) ensureCityExists(finalOriginSlug, route.origin_city, finalOriginCountry, route.origin_iata);
-          if (finalDestSlug) ensureCityExists(finalDestSlug, route.destination_city, finalDestCountry, route.destination_iata);
+          if (finalOriginSlug) ensureCityExists(finalOriginSlug, route.origin_city, finalOriginCountry, route.origin_iata, route.origin_lat, route.origin_lng);
+          if (finalDestSlug) ensureCityExists(finalDestSlug, route.destination_city, finalDestCountry, route.destination_iata, route.destination_lat, route.destination_lng);
         } else {
           skipped++;
         }
@@ -710,7 +710,9 @@ app.post('/admin/route-pages/bulk-create', rateLimit('admin', 120, 60000), requi
       const pairKey = oCode + '_' + dCode;
       if (existingSet.has(pairKey)) { skippedExisting++; continue; }
 
-      let baseSlug = slugify(o.city + '-' + d.city);
+      // [AIRPORT-IDENTITY-FIRST] Same IATA-based slug as single-route
+      // creation — see the comment on baseSlug in POST /admin/route-pages.
+      let baseSlug = (oCode + '-' + dCode).toLowerCase();
       let slug = baseSlug, n = 2;
       while (usedSlugs.has(slug)) { slug = baseSlug + '-' + (n++); }
       usedSlugs.add(slug);
@@ -883,10 +885,15 @@ app.post('/admin/route-pages', rateLimit('admin', 120, 60000), requireAdmin, asy
       });
     }
 
-    // [ROUTE-PAGES] Reuses the exact same slugify() used for blog posts —
-    // same umlaut-transliteration and non-Latin fallback behavior, just
-    // seeded from the city names instead of a post title.
-    let baseSlug = slugify(origin_city + '-' + destination_city);
+    // [AIRPORT-IDENTITY-FIRST] New routes now get a short, stable,
+    // language-neutral IATA-based slug (e.g. "muc-pmi") instead of a
+    // city-name slug — city names already appear in the page's title/H1/
+    // content/schema/breadcrumb, so repeating them in the URL is
+    // redundant, and an IATA pair never changes even if a city's display
+    // name is edited later. This only affects NEW routes created from
+    // here on — existing published routes keep their current city-name
+    // slug untouched (no retroactive rename/redirect).
+    let baseSlug = (origin_iata + '-' + destination_iata).toLowerCase();
     let slug = baseSlug;
     for (let attempt = 2; attempt <= 21; attempt++) {
       const { data: existing } = await supa.from('route_pages').select('id').eq('slug', slug).maybeSingle();
@@ -938,8 +945,8 @@ app.post('/admin/route-pages', rateLimit('admin', 120, 60000), requireAdmin, asy
     if (isPublishing) {
       if (origin_country) ensureCountryExists(origin_country);
       if (destination_country) ensureCountryExists(destination_country);
-      ensureCityExists(originCitySlug, origin_city, origin_country, origin_iata.toUpperCase());
-      ensureCityExists(destCitySlug, destination_city, destination_country, destination_iata.toUpperCase());
+      ensureCityExists(originCitySlug, origin_city, origin_country, origin_iata.toUpperCase(), origin_lat, origin_lng);
+      ensureCityExists(destCitySlug, destination_city, destination_country, destination_iata.toUpperCase(), destination_lat, destination_lng);
       triggerRebuild();
     }
     res.json({ ok: true, route: data });
@@ -1020,8 +1027,8 @@ app.put('/admin/route-pages/:id', rateLimit('admin', 120, 60000), requireAdmin, 
     if (status === 'published' && data) {
       if (data.origin_country) ensureCountryExists(data.origin_country);
       if (data.destination_country) ensureCountryExists(data.destination_country);
-      if (data.origin_city_slug) ensureCityExists(data.origin_city_slug, data.origin_city, data.origin_country, data.origin_iata);
-      if (data.destination_city_slug) ensureCityExists(data.destination_city_slug, data.destination_city, data.destination_country, data.destination_iata);
+      if (data.origin_city_slug) ensureCityExists(data.origin_city_slug, data.origin_city, data.origin_country, data.origin_iata, data.origin_lat, data.origin_lng);
+      if (data.destination_city_slug) ensureCityExists(data.destination_city_slug, data.destination_city, data.destination_country, data.destination_iata, data.destination_lat, data.destination_lng);
       triggerRebuild();
     }
     res.json({ ok: true, route: data });

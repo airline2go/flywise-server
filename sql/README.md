@@ -56,7 +56,28 @@ an existing one only needs whichever haven't been run yet):
    (`GET /admin/api-logs/stats`). Server-only RLS, same as
    `admin_activity_log`/`error_logs`.
 
+10. `geo_i18n.sql` — the Geo CMS foundation for the 7-language SEO
+    expansion (Phase 3A). Adds a real `airports` table (Airport-Identity-
+    First: IATA code -> airport row -> city -> country, instead of
+    deriving airport data live from whichever `route_pages` row mentions
+    it first, as `GET /airports/:code` used to) plus `city_translations`/
+    `country_translations`/`airport_translations` — one row per
+    (entity, language) covering all 7 platform languages (en, de, ar,
+    es, fr, it, nl). Backfills the `de` translation for every existing
+    city/country from its own `name` column (always reliable), and
+    best-effort backfills the other 6 languages for the ~62 cities / 34
+    countries already known from `flywise-app`'s `build/data.js`
+    dictionaries, matched by slug/code — any city/country outside that
+    known set (auto-created later from a new route) simply starts with
+    only the `de` seed until filled in via the new admin "Airports &
+    Cities" page. One-time backfill tracked via an `admin_config`
+    marker, same idempotency pattern as `route_refresh_tier.sql`. Needed
+    by `src/routes/admin-geo.routes.js` and the rewritten
+    `GET /airports/:code` in `src/routes/content.routes.js`.
+
 As of this writing, the first seven have been run against the live
 database. `route_refresh_tier.sql` (#8) and `api_logs.sql` (#9) are new
 and still need to be run once before the route-tiering admin UI and the
-API-monitoring dashboard have any effect.
+API-monitoring dashboard have any effect. `geo_i18n.sql` (#10) is also
+new and needs to be run once before the Geo CMS / multi-language SEO
+pages have any effect.
