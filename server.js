@@ -86,6 +86,7 @@ require('./src/routes/health.routes')(app);
 require('./src/routes/search.routes')(app);
 require('./src/routes/booking.routes')(app);
 require('./src/routes/cancel.routes')(app);
+require('./src/routes/flight-change.routes')(app);
 require('./src/routes/alerts.routes')(app);
 require('./src/routes/contact.routes')(app);
 require('./src/routes/auth.routes')(app);
