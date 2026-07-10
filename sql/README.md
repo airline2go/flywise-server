@@ -28,5 +28,16 @@ an existing one only needs whichever haven't been run yet):
    `referrer_id`/`referred_id`/`booking_id` foreign keys, RLS with
    server-only writes) and `loyalty_accounts.referral_code`. Needed by
    `src/services/referrals.js` / `src/routes/referral.routes.js`.
+7. `admin_staff.sql` — real per-admin accounts (`admin_users`,
+   `admin_sessions`) with two roles (`admin` full access, `staff`
+   restricted from margins/credit/staff-management), a general
+   `admin_activity_log`, and a full credit-movement ledger
+   (`loyalty_transactions`, `admin_credit_log`). The legacy
+   `ADMIN_TOKEN` env var keeps working unchanged as a permanent
+   fallback — this migration is purely additive. Needed by
+   `src/services/adminAuth.js` / `src/routes/admin-staff.routes.js` /
+   `src/routes/admin-customers.routes.js`.
 
-As of this writing, all six have been run against the live database.
+As of this writing, the first six have been run against the live database.
+`admin_staff.sql` (#7) is new and still needs to be run once before the
+admin panel's staff-accounts/credit-top-up features go live.

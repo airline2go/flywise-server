@@ -42,6 +42,10 @@ module.exports = {
 
   ADMIN_TOKEN: process.env.ADMIN_TOKEN,
 
+  // [ADMIN-CREDIT-CAP] أعلى مبلغ يقدر الأدمن يضيفه بضغطة وحدة على أي
+  // حساب — حماية من غلطة كتابة رقم زايد صفر أو نقر مرتين بسرعة.
+  MAX_ADMIN_CREDIT_AMOUNT: Number(process.env.MAX_ADMIN_CREDIT_AMOUNT) || 1000,
+
   // [AUTO-REBUILD] Optional — flywise-app's Render "Deploy Hook" URL. When
   // set, publishing/editing/deleting a city, country, airport, route, or
   // blog post fires this hook so the frontend's SSG build picks up the
