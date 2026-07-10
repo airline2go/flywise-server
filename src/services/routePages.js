@@ -76,28 +76,80 @@ async function ensureCountryExists(isoCode) {
 // by the caller via slugify() — the same normalization already used for
 // blog/route slugs — so "Berlin" and "berlin " from two different routes
 // correctly resolve to the same city row instead of silently creating
-// two near-duplicate cities.
-async function ensureCityExists(citySlug, displayName, countryCode, airportCode) {
+// two near-duplicate cities. lat/lng are optional (only some call sites
+// have them handy) and are only ever used to fill in ensureAirportExists()
+// below — they're never stored on the city row itself.
+async function ensureCityExists(citySlug, displayName, countryCode, airportCode, lat, lng) {
   if (!citySlug || !supa) return;
   try {
+    let cityId = null;
     const { data: existing } = await supa.from('cities').select('id, airport_codes').eq('city_slug', citySlug).maybeSingle();
     if (existing) {
+      cityId = existing.id;
       if (airportCode && !(existing.airport_codes || []).includes(airportCode)) {
         await supa.from('cities').update({ airport_codes: [...(existing.airport_codes || []), airportCode] }).eq('id', existing.id);
         log('info', 'city_airport_added', { city_slug: citySlug, airport: airportCode });
       }
-      return;
+    } else {
+      const { data: inserted } = await supa.from('cities').insert({
+        city_slug: citySlug,
+        name: displayName,
+        country_code: countryCode || null,
+        airport_codes: airportCode ? [airportCode] : [],
+        status: 'published',
+      }).select('id').maybeSingle();
+      cityId = inserted ? inserted.id : null;
+      log('info', 'city_auto_created', { city_slug: citySlug, name: displayName });
     }
-    await supa.from('cities').insert({
-      city_slug: citySlug,
-      name: displayName,
-      country_code: countryCode || null,
-      airport_codes: airportCode ? [airportCode] : [],
-      status: 'published',
-    });
-    log('info', 'city_auto_created', { city_slug: citySlug, name: displayName });
+    // [AIRPORT-IDENTITY-FIRST] Every route that touches a city also
+    // touches a real airport — keep the authoritative `airports` table in
+    // sync the same way, instead of only cities/countries auto-populating.
+    if (airportCode) await ensureAirportExists(airportCode, cityId, countryCode, lat, lng);
   } catch (e) {
     log('warn', 'ensure_city_exists_failed', { city_slug: citySlug, error: e.message });
+  }
+}
+
+// [AIRPORT-IDENTITY-FIRST] Auto-creates (or backfills missing fields on)
+// an authoritative airports row whenever a published route touches that
+// IATA code — mirrors ensureCityExists()/ensureCountryExists(). Only
+// backfills fields that are currently null (never overwrites a value an
+// admin may have deliberately edited via the Geo CMS with a route's
+// possibly-stale coordinates). `airport_name` has no per-language
+// translation of its own here (see `airport_translations`) — it starts
+// as the IATA code itself, a usable-if-unpolished placeholder exactly
+// like ensureCountryExists() falling back to the raw ISO code, until an
+// admin fills in the real name.
+async function ensureAirportExists(iataCode, cityId, countryCode, lat, lng) {
+  if (!iataCode || !supa) return;
+  try {
+    const { data: existing } = await supa.from('airports')
+      .select('id, city_id, country_code, latitude, longitude')
+      .eq('iata_code', iataCode).maybeSingle();
+    if (existing) {
+      const patch = {};
+      if (!existing.city_id && cityId) patch.city_id = cityId;
+      if (!existing.country_code && countryCode) patch.country_code = countryCode;
+      if (existing.latitude == null && lat != null) patch.latitude = Number(lat);
+      if (existing.longitude == null && lng != null) patch.longitude = Number(lng);
+      if (Object.keys(patch).length) {
+        patch.updated_at = new Date().toISOString();
+        await supa.from('airports').update(patch).eq('id', existing.id);
+      }
+      return;
+    }
+    await supa.from('airports').insert({
+      iata_code: iataCode,
+      airport_name: iataCode,
+      city_id: cityId || null,
+      country_code: countryCode || null,
+      latitude: lat != null ? Number(lat) : null,
+      longitude: lng != null ? Number(lng) : null,
+      status: 'published',
+    });
+    log('info', 'airport_auto_created', { iata_code: iataCode });
+  } catch (e) {
+    log('warn', 'ensure_airport_exists_failed', { iata_code: iataCode, error: e.message });
   }
 }
 
@@ -107,4 +159,5 @@ module.exports = {
   COUNTRY_NAMES_DE,
   ensureCountryExists,
   ensureCityExists,
+  ensureAirportExists,
 };
