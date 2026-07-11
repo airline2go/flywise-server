@@ -37,7 +37,11 @@ module.exports = {
 
   REDIS_URL: process.env.REDIS_URL,
 
-  ALLOWED_ORIGINS: (process.env.ALLOWED_ORIGINS || 'https://airpiv.com,https://www.airpiv.com')
+  // [NEXTJS-MIGRATION] flywise-app-amber.vercel.app is the new Next.js
+  // frontend (Phase 0 of the migration to Next.js — see project history)
+  // — added to the default allowlist so it doesn't need a matching env var
+  // change on Render to fetch from the public content endpoints.
+  ALLOWED_ORIGINS: (process.env.ALLOWED_ORIGINS || 'https://airpiv.com,https://www.airpiv.com,https://flywise-app-amber.vercel.app')
     .split(',').map((s) => s.trim()).filter(Boolean),
 
   ADMIN_TOKEN: process.env.ADMIN_TOKEN,
