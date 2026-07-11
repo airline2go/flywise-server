@@ -2,6 +2,7 @@ process.env.ADMIN_TOKEN = 'test-admin-token';
 
 jest.mock('../src/clients/supabase', () => {
   const responses = {};
+  const updateCalls = [];
   function makeBuilder(table) {
     const cfg = responses[table] || {};
     const builder = {
@@ -9,13 +10,26 @@ jest.mock('../src/clients/supabase', () => {
       eq: () => builder,
       neq: () => builder,
       then: (resolve, reject) => Promise.resolve(cfg.result || { data: null, error: null }).then(resolve, reject),
+      // [ROUTE-INTELLIGENCE-1] fetchAndCacheRoutePrice()'s fire-and-forget
+      // route_pages.update({...}).eq().eq() call — recorded, not asserted
+      // by default, so pre-existing /route-price tests don't need to know
+      // about it unless a test specifically cares.
+      update: (patch) => {
+        const updateBuilder = {
+          eq: (col, val) => { updateCalls.push({ table, patch, col, val }); return updateBuilder; },
+          then: (resolve, reject) => Promise.resolve({ error: null }).then(resolve, reject),
+          catch: () => updateBuilder,
+        };
+        return updateBuilder;
+      },
     };
     return builder;
   }
   return {
     from: jest.fn((table) => makeBuilder(table)),
     __setResponse: (table, cfg) => { responses[table] = cfg; },
-    __reset: () => { for (const k of Object.keys(responses)) delete responses[k]; },
+    __reset: () => { for (const k of Object.keys(responses)) delete responses[k]; updateCalls.length = 0; },
+    __updateCalls: updateCalls,
   };
 });
 
@@ -197,6 +211,41 @@ describe('GET /route-price', () => {
     expect(res.body.offers.bestValue).toBeTruthy();
     expect(mockDuffelFn).toHaveBeenCalledWith('POST', expect.any(String), expect.any(Object), null,
       expect.objectContaining({ logContext: { route_origin: 'BER', route_destination: 'CDG' } }));
+  });
+
+  test('[ROUTE-INTELLIGENCE-1] a fresh Duffel call with valid offers persists the insights onto route_pages, fire-and-forget', async () => {
+    mockGetAdminConfig.mockResolvedValue(null);
+    mockDuffelFn.mockResolvedValue({
+      data: {
+        id: 'orq_ri',
+        offers: [
+          { id: 'a', total_amount: '80.00', total_currency: 'EUR', slices: [{ duration: 'PT2H', segments: [{ marketing_carrier: { name: 'Lufthansa' } }] }] },
+          { id: 'b', total_amount: '120.00', total_currency: 'EUR', slices: [{ duration: 'PT4H', segments: [{ marketing_carrier: { name: 'Air France' } }, { marketing_carrier: { name: 'Air France' } }] }] },
+        ],
+      },
+    });
+    const res = await request(app).get('/route-price?from=ber&to=cdg');
+    expect(res.status).toBe(200);
+
+    const call = supa.__updateCalls.find((c) => c.table === 'route_pages');
+    expect(call).toBeTruthy();
+    expect(call.col).toBe('origin_iata');
+    expect(call.val).toBe('BER');
+    expect(call.patch).toEqual(expect.objectContaining({
+      direct_flight_available: true, // offer 'a' has 0 stops
+      all_direct: false, // offer 'b' has 1 stop
+    }));
+    expect(call.patch.avg_duration_min).toBe(180); // (120 + 240) / 2
+    expect(call.patch.stop_distribution).toEqual({ 0: 1, 1: 1 });
+    expect(call.patch.airline_count).toBe(2);
+    expect(call.patch.insights_updated_at).toEqual(expect.any(String));
+  });
+
+  test('[ROUTE-INTELLIGENCE-1] no route_pages update fires when Duffel returns no usable offers', async () => {
+    mockGetAdminConfig.mockResolvedValue(null);
+    mockDuffelFn.mockResolvedValue({ data: { id: 'orq_empty', offers: [] } });
+    await request(app).get('/route-price?from=SIN&to=NRT');
+    expect(supa.__updateCalls.find((c) => c.table === 'route_pages')).toBeUndefined();
   });
 
   test('a cached response threads the stored offers object through unchanged', async () => {

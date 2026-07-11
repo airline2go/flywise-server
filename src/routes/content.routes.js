@@ -7,6 +7,7 @@
 const log = require('../utils/log');
 const supa = require('../clients/supabase');
 const rateLimit = require('../middleware/rateLimit');
+const { buildRouteIntelligenceSnapshot } = require('../services/routeIntelligence');
 
 // [RATE-LIMIT-FIX] None of these routes had any rate limiting at all —
 // public, unauthenticated, and an unmetered surface for scraping/DB-
@@ -449,7 +450,7 @@ app.get('/route-pages/:slug', rateLimit('content', 1000, 60000), async (req, res
     const { data, error } = await supa.from('route_pages').select('*').eq('slug', req.params.slug).eq('status', 'published').maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return res.status(404).json({ ok: false, error: 'Route nicht gefunden' });
-    res.json({ ok: true, route: data });
+    res.json({ ok: true, route: Object.assign({}, data, { intelligence: buildRouteIntelligenceSnapshot(data) }) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
