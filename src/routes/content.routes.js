@@ -11,17 +11,20 @@ const { buildRouteIntelligenceSnapshot } = require('../services/routeIntelligenc
 
 // [RATE-LIMIT-FIX] None of these routes had any rate limiting at all —
 // public, unauthenticated, and an unmetered surface for scraping/DB-
-// hammering. The limit here (1000/min per IP) is deliberately generous
+// hammering. The limit here (2500/min per IP) is deliberately generous
 // rather than the tighter values used elsewhere in the API: flywise-app's
 // SSG build (build/generate-pages.js) calls these same detail endpoints
 // once per city/country/airport/route/blog-post from a single Render
-// build-environment IP, with 8-way bounded concurrency — a real site with
-// hundreds of published routes can legitimately produce a burst well
-// above a "normal visitor" rate limit. This still meaningfully throttles
-// abusive scraping while leaving comfortable headroom for the build.
+// build-environment IP — a real site with 1000+ published routes plus
+// airports/cities/countries/blog can legitimately need ~1400+ requests in
+// one build run. Raised from the original 1000 after a real deploy hit it
+// (build/fetch-utils.js's own concurrency+pacing was tightened at the same
+// time as defense in depth — see its header comment). This still
+// meaningfully throttles abusive scraping while leaving comfortable
+// headroom for the build.
 module.exports = (app) => {
 
-app.get('/blog-posts', rateLimit('content', 1000, 60000), async (req, res) => {
+app.get('/blog-posts', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
@@ -41,7 +44,7 @@ app.get('/blog-posts', rateLimit('content', 1000, 60000), async (req, res) => {
 // Single published post by slug, for the public post-detail page.
 // Increments views_count best-effort (fire-and-forget — a failed view
 // count update must never block the post from rendering for the reader).
-app.get('/blog-posts/:slug', rateLimit('content', 1000, 60000), async (req, res) => {
+app.get('/blog-posts/:slug', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { data, error } = await supa.from('blog_posts').select('*').eq('slug', req.params.slug).eq('status', 'published').maybeSingle();
@@ -61,7 +64,7 @@ app.get('/blog-posts/:slug', rateLimit('content', 1000, 60000), async (req, res)
 // GET /blog-posts, aliased to the same field names so the public
 // /en/blog listing page and the SSG build's blog-posts-en fetch need no
 // language-specific handling.
-app.get('/blog-posts-en', rateLimit('content', 1000, 60000), async (req, res) => {
+app.get('/blog-posts-en', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
@@ -83,7 +86,7 @@ app.get('/blog-posts-en', rateLimit('content', 1000, 60000), async (req, res) =>
 // same row as the German post. Mirrors GET /blog-posts/:slug (same
 // view-count bump), remapped onto the shared slug/title/content/excerpt
 // field names the public post-detail page and the SSG build expect.
-app.get('/blog-posts-en/:slug', rateLimit('content', 1000, 60000), async (req, res) => {
+app.get('/blog-posts-en/:slug', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { data, error } = await supa.from('blog_posts').select('*').eq('slug_en', req.params.slug).eq('status', 'published').maybeSingle();
@@ -109,7 +112,7 @@ app.get('/blog-posts-en/:slug', rateLimit('content', 1000, 60000), async (req, r
 // destination city — powers the "Ähnliche Flugrouten" internal-linking
 // section. Excludes the route itself; capped at 6 (per spec: 3-6 related
 // routes shown).
-app.get('/route-pages/:slug/related', rateLimit('content', 1000, 60000), async (req, res) => {
+app.get('/route-pages/:slug/related', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { data: current, error: e1 } = await supa.from('route_pages').select('id, origin_city, destination_city').eq('slug', req.params.slug).maybeSingle();
@@ -129,7 +132,7 @@ app.get('/route-pages/:slug/related', rateLimit('content', 1000, 60000), async (
   }
 });
 
-app.get('/route-pages', rateLimit('content', 1000, 60000), async (req, res) => {
+app.get('/route-pages', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     // [ROUTE-INTELLIGENCE-3] distance_km/haul_type/airline_count/route_score
@@ -150,7 +153,7 @@ app.get('/route-pages', rateLimit('content', 1000, 60000), async (req, res) => {
 // [COUNTRY-PAGES] Public list of published countries — only ones with at
 // least one real route actually exist here (see ensureCountryExists),
 // so this never returns an empty/thin entry.
-app.get('/countries', rateLimit('content', 1000, 60000), async (req, res) => {
+app.get('/countries', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { data, error } = await supa.from('countries').select('code,name').eq('status', 'published').order('name', { ascending: true });
@@ -185,7 +188,7 @@ app.get('/countries', rateLimit('content', 1000, 60000), async (req, res) => {
 // page actually renders. 404s if the country doesn't exist or has no
 // published routes left (e.g. the last route touching it was
 // unpublished/deleted) — never serves an empty shell page.
-app.get('/countries/:code', rateLimit('content', 1000, 60000), async (req, res) => {
+app.get('/countries/:code', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const code = req.params.code.toUpperCase();
@@ -220,7 +223,7 @@ app.get('/countries/:code', rateLimit('content', 1000, 60000), async (req, res) 
 // [CITY-PAGES] Public list of published cities — mirrors GET /countries
 // exactly. Only cities with at least one real route actually exist here
 // (see ensureCityExists), so this never returns an empty/thin entry.
-app.get('/cities', rateLimit('content', 1000, 60000), async (req, res) => {
+app.get('/cities', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     // [GEO-CMS] airport_codes included so the SSG build can resolve "which
@@ -254,7 +257,7 @@ app.get('/cities', rateLimit('content', 1000, 60000), async (req, res) => {
 // (as origin OR destination) — what the public city.html page renders.
 // Mirrors /countries/:code exactly. 404s if the city doesn't exist or
 // has no published routes left, never serving an empty shell page.
-app.get('/cities/:slug', rateLimit('content', 1000, 60000), async (req, res) => {
+app.get('/cities/:slug', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const citySlug = req.params.slug.toLowerCase();
@@ -289,7 +292,7 @@ app.get('/cities/:slug', rateLimit('content', 1000, 60000), async (req, res) => 
 // backfilled into this table (see the fallback in GET /airports/:code
 // below) simply won't appear here until ensureAirportExists() or the
 // admin Geo CMS creates a row for them.
-app.get('/airports', rateLimit('content', 1000, 60000), async (req, res) => {
+app.get('/airports', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { data, error } = await supa.from('airports').select('iata_code,airport_name,city_id,country_code').eq('status', 'published').order('iata_code', { ascending: true });
@@ -311,7 +314,7 @@ app.get('/airports', rateLimit('content', 1000, 60000), async (req, res) => {
 // regresses the moment this ships. 404s if no published route touches
 // this airport at all, same no-thin-content guarantee as every other
 // level, regardless of whether an authoritative row exists.
-app.get('/airports/:code', rateLimit('content', 1000, 60000), async (req, res) => {
+app.get('/airports/:code', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const code = req.params.code.toUpperCase();
@@ -407,7 +410,7 @@ app.get('/airports/:code', rateLimit('content', 1000, 60000), async (req, res) =
 // GET /cities / GET /countries / GET /airports. Rows only exist once
 // ensureAirlineExists() has observed that carrier operating at least one
 // live-searched route (see search.routes.js's fetchAndCacheRoutePrice()).
-app.get('/airlines', rateLimit('content', 1000, 60000), async (req, res) => {
+app.get('/airlines', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { data, error } = await supa.from('airlines').select('iata_code,name').eq('status', 'published').order('name', { ascending: true });
@@ -423,7 +426,7 @@ app.get('/airlines', rateLimit('content', 1000, 60000), async (req, res) => {
 // airline has been observed operating (via the route_airlines join
 // table) — 404s if the airline exists but has no matching published
 // route, same no-thin-content guarantee as cities/countries/airports.
-app.get('/airlines/:code', rateLimit('content', 1000, 60000), async (req, res) => {
+app.get('/airlines/:code', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const code = req.params.code.toUpperCase();
@@ -481,7 +484,7 @@ app.get('/airlines/:code', rateLimit('content', 1000, 60000), async (req, res) =
 });
 
 // ─── GET /route-pages/:slug ──────────────────────────────────────
-app.get('/route-pages/:slug', rateLimit('content', 1000, 60000), async (req, res) => {
+app.get('/route-pages/:slug', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const { data, error } = await supa.from('route_pages').select('*').eq('slug', req.params.slug).eq('status', 'published').maybeSingle();
