@@ -107,6 +107,7 @@ require('./src/routes/admin-airlines.routes')(app);
 // all that's needed here.
 require('./src/services/routeTraffic');
 require('./src/services/routeScore');
+require('./src/services/routeIntelligenceRefresh');
 
 // ─── [7] معالج الأخطاء الموحّد ───────────────────────────────
 if (env.SENTRY_DSN) {

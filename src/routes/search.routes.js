@@ -143,6 +143,27 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
     airlines: Array.from(airlines).slice(0, 8), // cap — purely defensive, real routes rarely exceed this
   } : null;
 
+  // [ROUTE-INTELLIGENCE-1] Fire-and-forget persistence of the insights
+  // object above onto route_pages — previously this lived only inside a
+  // single /route-price response and the price cache (which overwrites on
+  // every fetch), so the SSG build never saw it. airline_count here is a
+  // same-search approximation (capped at 8, like insights.airlines); the
+  // authoritative count gets recomputed periodically by
+  // routeIntelligenceRefresh.js from the accumulating route_airlines table.
+  if (insights && supa) {
+    const stopDistribution = stopCounts.reduce((acc, s) => { acc[s] = (acc[s] || 0) + 1; return acc; }, {});
+    supa.from('route_pages').update({
+      direct_flight_available: insights.directAvailable,
+      all_direct: insights.allDirect,
+      avg_duration_min: insights.avgDurationMin,
+      min_duration_min: insights.minDurationMin,
+      stop_distribution: stopDistribution,
+      airline_count: insights.airlines.length,
+      insights_updated_at: new Date().toISOString(),
+    }).eq('origin_iata', from.toUpperCase()).eq('destination_iata', to.toUpperCase())
+      .then(() => {}).catch(() => {});
+  }
+
   // [AIRLINE-PAGES] Fire-and-forget — never blocks or slows down the price
   // response. Same data already extracted above for `insights.airlines`,
   // now also persisted (via ensureAirlineExists()/ensureRouteAirlineObserved(),
