@@ -103,28 +103,6 @@ app.get('/blog-posts-en/:slug', rateLimit('content', 1000, 60000), async (req, r
   }
 });
 
-app.get('/sitemap-routes.xml', rateLimit('content', 1000, 60000), async (req, res) => {
-  try {
-    if (!supa) return res.status(503).send('');
-    const { data, error } = await supa.from('route_pages')
-      .select('slug, updated_at')
-      .eq('status', 'published');
-    if (error) throw new Error(error.message);
-
-    const urls = (data || []).map((r) => {
-      const lastmod = new Date(r.updated_at || Date.now()).toISOString().slice(0, 10);
-      return `  <url>\n    <loc>https://airpiv.com/flights/${encodeURIComponent(r.slug)}</loc>\n    <lastmod>${lastmod}</lastmod>\n    <changefreq>weekly</changefreq>\n    <priority>0.7</priority>\n  </url>`;
-    }).join('\n');
-
-    const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>`;
-    res.set('Content-Type', 'application/xml');
-    res.set('Cache-Control', 'public, max-age=3600'); // ساعة كاش — كافية، المسارات لا تتغير كل دقيقة
-    res.send(xml);
-  } catch (err) {
-    res.status(500).send('');
-  }
-});
-
 // ─── GET /route-pages/:slug/related ────────────────────────────
 // [RELATED-ROUTES] Other published routes sharing the same origin OR
 // destination city — powers the "Ähnliche Flugrouten" internal-linking
@@ -409,6 +387,56 @@ app.get('/airports/:code', rateLimit('content', 1000, 60000), async (req, res) =
     airport.country_translations = countryTranslations;
 
     res.json({ ok: true, airport, routes });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── GET /airlines ────────────────────────────────────────────────
+// [AIRLINE-PAGES] Public list of published airlines — same shape as
+// GET /cities / GET /countries / GET /airports. Rows only exist once
+// ensureAirlineExists() has observed that carrier operating at least one
+// live-searched route (see search.routes.js's fetchAndCacheRoutePrice()).
+app.get('/airlines', rateLimit('content', 1000, 60000), async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { data, error } = await supa.from('airlines').select('iata_code,name').eq('status', 'published').order('name', { ascending: true });
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, airlines: data || [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── GET /airlines/:code ───────────────────────────────────────────
+// [AIRLINE-PAGES] Detail + every published route_pages entry this
+// airline has been observed operating (via the route_airlines join
+// table) — 404s if the airline exists but has no matching published
+// route, same no-thin-content guarantee as cities/countries/airports.
+app.get('/airlines/:code', rateLimit('content', 1000, 60000), async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const code = req.params.code.toUpperCase();
+    const { data: airline, error: airlineErr } = await supa.from('airlines').select('*').eq('iata_code', code).eq('status', 'published').maybeSingle();
+    if (airlineErr) throw new Error(airlineErr.message);
+    if (!airline) return res.status(404).json({ ok: false, error: 'Airline nicht gefunden' });
+
+    const { data: observed, error: obsErr } = await supa.from('route_airlines')
+      .select('route_origin_iata,route_destination_iata')
+      .eq('airline_id', airline.id);
+    if (obsErr) throw new Error(obsErr.message);
+    if (!observed || !observed.length) return res.status(404).json({ ok: false, error: 'Keine Routen für diese Airline gefunden' });
+
+    const pairs = observed.map((o) => `and(origin_iata.eq.${o.route_origin_iata},destination_iata.eq.${o.route_destination_iata})`);
+    const { data: routes, error: routesErr } = await supa.from('route_pages')
+      .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_city_slug,destination_city_slug,origin_country,destination_country')
+      .eq('status', 'published')
+      .or(pairs.join(','))
+      .order('origin_city', { ascending: true });
+    if (routesErr) throw new Error(routesErr.message);
+    if (!routes || !routes.length) return res.status(404).json({ ok: false, error: 'Keine Routen für diese Airline gefunden' });
+
+    res.json({ ok: true, airline, routes });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }

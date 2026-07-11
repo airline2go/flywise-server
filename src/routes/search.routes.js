@@ -12,6 +12,7 @@ const { requireAdmin } = require('../middleware/auth');
 const duffel = require('../services/duffel');
 const { getAdminConfig, setAdminConfig, getTicketProfitTiers, computeTieredMargin } = require('../services/adminConfig');
 const { normalizeOffer } = require('../services/normalizeOffer');
+const { ensureAirlineExists, ensureRouteAirlineObserved } = require('../services/routePages');
 const supa = require('../clients/supabase');
 
 // [MEMORY-LEAK-FIX] كاش 5 دقائق لبحث المطارات — بينضف نفسه دوري
@@ -121,6 +122,7 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
   const durations = [];
   const stopCounts = [];
   const airlines = new Set();
+  const airlinesObserved = new Map(); // iata_code -> name, for [AIRLINE-PAGES] observation below
   for (const o of offers) {
     const slice = (o.slices || [])[0];
     if (!slice) continue;
@@ -128,7 +130,10 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
     if (durMin != null) durations.push(durMin);
     const segs = slice.segments || [];
     stopCounts.push(Math.max(0, segs.length - 1));
-    segs.forEach((s) => { if (s.marketing_carrier?.name) airlines.add(s.marketing_carrier.name); });
+    segs.forEach((s) => {
+      if (s.marketing_carrier?.name) airlines.add(s.marketing_carrier.name);
+      if (s.marketing_carrier?.iata_code) airlinesObserved.set(s.marketing_carrier.iata_code, s.marketing_carrier.name);
+    });
   }
   const insights = durations.length ? {
     avgDurationMin: Math.round(durations.reduce((a, b) => a + b, 0) / durations.length),
@@ -137,6 +142,19 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
     allDirect: stopCounts.every((s) => s === 0),
     airlines: Array.from(airlines).slice(0, 8), // cap — purely defensive, real routes rarely exceed this
   } : null;
+
+  // [AIRLINE-PAGES] Fire-and-forget — never blocks or slows down the price
+  // response. Same data already extracted above for `insights.airlines`,
+  // now also persisted (via ensureAirlineExists()/ensureRouteAirlineObserved(),
+  // mirroring ensureCityExists()'s auto-upsert-on-observation pattern) so
+  // it accumulates into real airline pages and a real "airlines flying
+  // this route" list instead of being recomputed from one live search
+  // every page view.
+  airlinesObserved.forEach((name, iataCode) => {
+    ensureAirlineExists(iataCode, name)
+      .then((airlineId) => { if (airlineId) return ensureRouteAirlineObserved(from.toUpperCase(), to.toUpperCase(), airlineId); })
+      .catch(() => {});
+  });
 
   const currency = offers[0].total_currency || 'EUR';
   const routeOffers = { cheapest, fastest, bestValue };

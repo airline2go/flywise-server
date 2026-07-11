@@ -76,13 +76,14 @@ app.get('/admin/cities', rateLimit('admin', 120, 60000), requireAdmin, async (re
 app.post('/admin/cities', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { city_slug, name, country_code, status } = req.body || {};
+    const { city_slug, name, country_code, status, intro_text } = req.body || {};
     if (!city_slug || !name) return res.status(400).json({ ok: false, error: 'city_slug und name sind erforderlich' });
     const { data, error } = await supa.from('cities').insert({
       city_slug: String(city_slug).toLowerCase(),
       name,
       country_code: country_code || null,
       status: status === 'draft' ? 'draft' : 'published',
+      intro_text: intro_text ? String(intro_text).trim() : null,
     }).select().maybeSingle();
     if (error) throw new Error(error.message);
     res.json({ ok: true, city: data });
@@ -94,11 +95,12 @@ app.post('/admin/cities', rateLimit('admin', 120, 60000), requireAdmin, async (r
 app.put('/admin/cities/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { name, country_code, status } = req.body || {};
+    const { name, country_code, status, intro_text } = req.body || {};
     const update = {};
     if (name != null) update.name = name;
     if (country_code != null) update.country_code = country_code || null;
     if (status === 'published' || status === 'draft') update.status = status;
+    if (intro_text != null) update.intro_text = String(intro_text).trim() || null;
     const { data, error } = await supa.from('cities').update(update).eq('id', req.params.id).select().maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return res.status(404).json({ ok: false, error: 'Stadt nicht gefunden' });
@@ -178,12 +180,13 @@ app.get('/admin/countries', rateLimit('admin', 120, 60000), requireAdmin, async 
 app.post('/admin/countries', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { code, name, status } = req.body || {};
+    const { code, name, status, intro_text } = req.body || {};
     if (!code || !name) return res.status(400).json({ ok: false, error: 'code und name sind erforderlich' });
     const { data, error } = await supa.from('countries').insert({
       code: String(code).toUpperCase(),
       name,
       status: status === 'draft' ? 'draft' : 'published',
+      intro_text: intro_text ? String(intro_text).trim() : null,
     }).select().maybeSingle();
     if (error) throw new Error(error.message);
     res.json({ ok: true, country: data });
@@ -195,10 +198,11 @@ app.post('/admin/countries', rateLimit('admin', 120, 60000), requireAdmin, async
 app.put('/admin/countries/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { name, status } = req.body || {};
+    const { name, status, intro_text } = req.body || {};
     const update = {};
     if (name != null) update.name = name;
     if (status === 'published' || status === 'draft') update.status = status;
+    if (intro_text != null) update.intro_text = String(intro_text).trim() || null;
     const { data, error } = await supa.from('countries').update(update).eq('id', req.params.id).select().maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return res.status(404).json({ ok: false, error: 'Land nicht gefunden' });
