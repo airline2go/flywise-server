@@ -132,8 +132,11 @@ app.get('/route-pages/:slug/related', rateLimit('content', 1000, 60000), async (
 app.get('/route-pages', rateLimit('content', 1000, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    // [ROUTE-INTELLIGENCE-3] distance_km/haul_type/airline_count/route_score
+    // added so the SSG build's computeRelatedRoutes() can rank alternatives
+    // instead of only pure same-city matching — see generate-pages.js.
     const { data, error } = await supa.from('route_pages')
-      .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_country,destination_country')
+      .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_country,destination_country,distance_km,haul_type,airline_count,route_score')
       .eq('status', 'published')
       .order('origin_city', { ascending: true });
     if (error) throw new Error(error.message);
@@ -355,6 +358,12 @@ app.get('/airports/:code', rateLimit('content', 1000, 60000), async (req, res) =
         country: countryCode,
         lat: airportRow.latitude != null ? airportRow.latitude : fallbackLat,
         lng: airportRow.longitude != null ? airportRow.longitude : fallbackLng,
+        // [ROUTE-INTELLIGENCE-3] Optional, admin-authored — null unless
+        // an admin has filled them in via the Geo CMS.
+        distance_to_city_center_km: airportRow.distance_to_city_center_km,
+        transit_options: airportRow.transit_options,
+        terminal_info: airportRow.terminal_info,
+        traveler_tips: airportRow.traveler_tips,
         translations,
       };
     } else {
@@ -423,7 +432,7 @@ app.get('/airlines/:code', rateLimit('content', 1000, 60000), async (req, res) =
     if (!airline) return res.status(404).json({ ok: false, error: 'Airline nicht gefunden' });
 
     const { data: observed, error: obsErr } = await supa.from('route_airlines')
-      .select('route_origin_iata,route_destination_iata')
+      .select('route_origin_iata,route_destination_iata,last_seen_at')
       .eq('airline_id', airline.id);
     if (obsErr) throw new Error(obsErr.message);
     if (!observed || !observed.length) return res.status(404).json({ ok: false, error: 'Keine Routen für diese Airline gefunden' });
@@ -437,7 +446,35 @@ app.get('/airlines/:code', rateLimit('content', 1000, 60000), async (req, res) =
     if (routesErr) throw new Error(routesErr.message);
     if (!routes || !routes.length) return res.status(404).json({ ok: false, error: 'Keine Routen für diese Airline gefunden' });
 
-    res.json({ ok: true, airline, routes });
+    // [ROUTE-INTELLIGENCE-3] mostUsedRoutes: no per-route observation
+    // frequency is tracked, so recency (last_seen_at) is the best proxy
+    // available — the routes this airline has been most recently seen
+    // operating, capped at 6. hubAirport: an admin-set override
+    // (airlines.hub_iata) always wins; otherwise inferred as the IATA
+    // code appearing most often as origin or destination across every
+    // route this airline has ever been observed on.
+    const routeBySlug = new Map(routes.map((r) => [`${r.origin_iata}-${r.destination_iata}`, r]));
+    const mostUsedRoutes = observed
+      .slice()
+      .sort((a, b) => new Date(b.last_seen_at) - new Date(a.last_seen_at))
+      .map((o) => routeBySlug.get(`${o.route_origin_iata}-${o.route_destination_iata}`))
+      .filter(Boolean)
+      .slice(0, 6);
+
+    let hubAirport = airline.hub_iata || null;
+    if (!hubAirport) {
+      const airportCounts = new Map();
+      observed.forEach((o) => {
+        airportCounts.set(o.route_origin_iata, (airportCounts.get(o.route_origin_iata) || 0) + 1);
+        airportCounts.set(o.route_destination_iata, (airportCounts.get(o.route_destination_iata) || 0) + 1);
+      });
+      let topCount = 0;
+      for (const [code, count] of airportCounts) {
+        if (count > topCount) { hubAirport = code; topCount = count; }
+      }
+    }
+
+    res.json({ ok: true, airline: Object.assign({}, airline, { hubAirport }), routes, mostUsedRoutes });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }

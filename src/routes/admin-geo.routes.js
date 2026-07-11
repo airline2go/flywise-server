@@ -288,7 +288,7 @@ app.get('/admin/airports', rateLimit('admin', 120, 60000), requireAdmin, async (
 app.post('/admin/airports', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { iata_code, icao_code, airport_name, city_id, country_code, latitude, longitude, status } = req.body || {};
+    const { iata_code, icao_code, airport_name, city_id, country_code, latitude, longitude, status, distance_to_city_center_km, transit_options, terminal_info, traveler_tips } = req.body || {};
     if (!iata_code || !airport_name) return res.status(400).json({ ok: false, error: 'iata_code und airport_name sind erforderlich' });
     const { data: dup } = await supa.from('airports').select('id').eq('iata_code', String(iata_code).toUpperCase()).maybeSingle();
     if (dup) return res.status(409).json({ ok: false, error: 'Ein Flughafen mit diesem IATA-Code existiert bereits' });
@@ -301,6 +301,10 @@ app.post('/admin/airports', rateLimit('admin', 120, 60000), requireAdmin, async 
       latitude: latitude != null && latitude !== '' ? Number(latitude) : null,
       longitude: longitude != null && longitude !== '' ? Number(longitude) : null,
       status: status === 'draft' ? 'draft' : 'published',
+      distance_to_city_center_km: distance_to_city_center_km != null && distance_to_city_center_km !== '' ? Number(distance_to_city_center_km) : null,
+      transit_options: transit_options ? String(transit_options).trim() : null,
+      terminal_info: terminal_info ? String(terminal_info).trim() : null,
+      traveler_tips: traveler_tips ? String(traveler_tips).trim() : null,
     }).select().maybeSingle();
     if (error) throw new Error(error.message);
     res.json({ ok: true, airport: data });
@@ -312,7 +316,7 @@ app.post('/admin/airports', rateLimit('admin', 120, 60000), requireAdmin, async 
 app.put('/admin/airports/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { icao_code, airport_name, city_id, country_code, latitude, longitude, status } = req.body || {};
+    const { icao_code, airport_name, city_id, country_code, latitude, longitude, status, distance_to_city_center_km, transit_options, terminal_info, traveler_tips } = req.body || {};
     const update = { updated_at: new Date().toISOString() };
     if (icao_code != null) update.icao_code = icao_code || null;
     if (airport_name != null) update.airport_name = airport_name;
@@ -321,6 +325,10 @@ app.put('/admin/airports/:id', rateLimit('admin', 120, 60000), requireAdmin, asy
     if (latitude != null) update.latitude = latitude === '' ? null : Number(latitude);
     if (longitude != null) update.longitude = longitude === '' ? null : Number(longitude);
     if (status === 'published' || status === 'draft') update.status = status;
+    if (distance_to_city_center_km != null) update.distance_to_city_center_km = distance_to_city_center_km === '' ? null : Number(distance_to_city_center_km);
+    if (transit_options != null) update.transit_options = String(transit_options).trim() || null;
+    if (terminal_info != null) update.terminal_info = String(terminal_info).trim() || null;
+    if (traveler_tips != null) update.traveler_tips = String(traveler_tips).trim() || null;
     const { data, error } = await supa.from('airports').update(update).eq('id', req.params.id).select().maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return res.status(404).json({ ok: false, error: 'Flughafen nicht gefunden' });
