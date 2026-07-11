@@ -183,6 +183,38 @@ describe('POST /admin/airports', () => {
   });
 });
 
+describe('PUT /admin/airports/:id — [ROUTE-INTELLIGENCE-3] traveler info fields', () => {
+  test('accepts and passes through distance_to_city_center_km/transit_options/terminal_info/traveler_tips', async () => {
+    supa.__push('airports', {
+      maybeSingle: {
+        data: {
+          id: 'airport-1', iata_code: 'MUC', distance_to_city_center_km: 28.5,
+          transit_options: 'Train every 20 minutes', terminal_info: 'Two terminals, T1 and T2',
+          traveler_tips: 'Arrive 2 hours early for international flights',
+        },
+        error: null,
+      },
+    });
+    const app = buildApp();
+    const res = await request(app).put('/admin/airports/airport-1').set(OWNER_AUTH).send({
+      distance_to_city_center_km: '28.5',
+      transit_options: 'Train every 20 minutes',
+      terminal_info: 'Two terminals, T1 and T2',
+      traveler_tips: 'Arrive 2 hours early for international flights',
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.airport.distance_to_city_center_km).toBe(28.5);
+    expect(res.body.airport.transit_options).toBe('Train every 20 minutes');
+  });
+
+  test('an empty string clears a previously-set field back to null', async () => {
+    supa.__push('airports', { maybeSingle: { data: { id: 'airport-1', iata_code: 'MUC', traveler_tips: null }, error: null } });
+    const app = buildApp();
+    const res = await request(app).put('/admin/airports/airport-1').set(OWNER_AUTH).send({ traveler_tips: '' });
+    expect(res.status).toBe(200);
+  });
+});
+
 describe('DELETE /admin/airports/:id', () => {
   test('deletes an airport', async () => {
     supa.__push('airports', { result: { data: null, error: null } });

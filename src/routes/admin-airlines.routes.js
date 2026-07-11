@@ -43,13 +43,15 @@ app.get('/admin/airlines', rateLimit('admin', 120, 60000), requireAdmin, async (
 app.post('/admin/airlines', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { iata_code, name, status, intro_text } = req.body || {};
+    const { iata_code, name, status, intro_text, country_code, hub_iata } = req.body || {};
     if (!iata_code || !name) return res.status(400).json({ ok: false, error: 'iata_code und name sind erforderlich' });
     const { data, error } = await supa.from('airlines').insert({
       iata_code: String(iata_code).toUpperCase(),
       name,
       status: status === 'draft' ? 'draft' : 'published',
       intro_text: intro_text ? String(intro_text).trim() : null,
+      country_code: country_code ? String(country_code).toUpperCase() : null,
+      hub_iata: hub_iata ? String(hub_iata).toUpperCase() : null,
     }).select().maybeSingle();
     if (error) throw new Error(error.message);
     res.json({ ok: true, airline: data });
@@ -61,11 +63,13 @@ app.post('/admin/airlines', rateLimit('admin', 120, 60000), requireAdmin, async 
 app.put('/admin/airlines/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { name, status, intro_text } = req.body || {};
+    const { name, status, intro_text, country_code, hub_iata } = req.body || {};
     const update = {};
     if (name != null) update.name = name;
     if (status === 'published' || status === 'draft') update.status = status;
     if (intro_text != null) update.intro_text = String(intro_text).trim() || null;
+    if (country_code != null) update.country_code = String(country_code).trim().toUpperCase() || null;
+    if (hub_iata != null) update.hub_iata = String(hub_iata).trim().toUpperCase() || null;
     const { data, error } = await supa.from('airlines').update(update).eq('id', req.params.id).select().maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return res.status(404).json({ ok: false, error: 'Airline nicht gefunden' });

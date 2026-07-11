@@ -262,3 +262,97 @@ describe('GET /airports/:code', () => {
     expect(res.body.airport.country_translations).toEqual({ en: 'Germany' });
   });
 });
+
+describe('GET /airlines/:code', () => {
+  test('404s when the airline itself is not found', async () => {
+    supa.__setResponse('airlines', { maybeSingle: { data: null, error: null } });
+    const app = buildApp();
+    const res = await request(app).get('/airlines/XX');
+    expect(res.status).toBe(404);
+  });
+
+  test('404s when the airline exists but has never been observed on any route', async () => {
+    supa.__setResponse('airlines', { maybeSingle: { data: { id: 'al-1', iata_code: 'LH', name: 'Lufthansa', hub_iata: null }, error: null } });
+    supa.__setResponse('route_airlines', { result: { data: [], error: null } });
+    const app = buildApp();
+    const res = await request(app).get('/airlines/LH');
+    expect(res.status).toBe(404);
+  });
+
+  test('404s when observed routes exist but none are currently published', async () => {
+    supa.__setResponse('airlines', { maybeSingle: { data: { id: 'al-1', iata_code: 'LH', name: 'Lufthansa', hub_iata: null }, error: null } });
+    supa.__setResponse('route_airlines', { result: { data: [{ route_origin_iata: 'FRA', route_destination_iata: 'JFK', last_seen_at: '2026-01-01T00:00:00Z' }], error: null } });
+    supa.__setResponse('route_pages', { result: { data: [], error: null } });
+    const app = buildApp();
+    const res = await request(app).get('/airlines/LH');
+    expect(res.status).toBe(404);
+  });
+
+  test('[ROUTE-INTELLIGENCE-3] mostUsedRoutes is sorted by most-recently-observed first', async () => {
+    supa.__setResponse('airlines', { maybeSingle: { data: { id: 'al-1', iata_code: 'LH', name: 'Lufthansa', hub_iata: null }, error: null } });
+    supa.__setResponse('route_airlines', {
+      result: {
+        data: [
+          { route_origin_iata: 'FRA', route_destination_iata: 'JFK', last_seen_at: '2026-01-01T00:00:00Z' },
+          { route_origin_iata: 'FRA', route_destination_iata: 'LHR', last_seen_at: '2026-03-01T00:00:00Z' },
+        ],
+        error: null,
+      },
+    });
+    supa.__setResponse('route_pages', {
+      result: {
+        data: [
+          { slug: 'frankfurt-newyork', origin_iata: 'FRA', destination_iata: 'JFK', origin_city: 'Frankfurt', destination_city: 'New York' },
+          { slug: 'frankfurt-london', origin_iata: 'FRA', destination_iata: 'LHR', origin_city: 'Frankfurt', destination_city: 'London' },
+        ],
+        error: null,
+      },
+    });
+    const app = buildApp();
+    const res = await request(app).get('/airlines/LH');
+    expect(res.status).toBe(200);
+    expect(res.body.mostUsedRoutes.map((r) => r.slug)).toEqual(['frankfurt-london', 'frankfurt-newyork']);
+  });
+
+  test('[ROUTE-INTELLIGENCE-3] an admin-set hub_iata always wins over inference', async () => {
+    supa.__setResponse('airlines', { maybeSingle: { data: { id: 'al-1', iata_code: 'LH', name: 'Lufthansa', hub_iata: 'MUC' }, error: null } });
+    supa.__setResponse('route_airlines', {
+      result: { data: [{ route_origin_iata: 'FRA', route_destination_iata: 'JFK', last_seen_at: '2026-01-01T00:00:00Z' }], error: null },
+    });
+    supa.__setResponse('route_pages', {
+      result: { data: [{ slug: 'frankfurt-newyork', origin_iata: 'FRA', destination_iata: 'JFK', origin_city: 'Frankfurt', destination_city: 'New York' }], error: null },
+    });
+    const app = buildApp();
+    const res = await request(app).get('/airlines/LH');
+    expect(res.body.airline.hubAirport).toBe('MUC'); // not FRA, which is what inference would have picked
+  });
+
+  test('[ROUTE-INTELLIGENCE-3] without an admin override, hubAirport is inferred as the most-observed IATA code', async () => {
+    supa.__setResponse('airlines', { maybeSingle: { data: { id: 'al-1', iata_code: 'LH', name: 'Lufthansa', hub_iata: null }, error: null } });
+    supa.__setResponse('route_airlines', {
+      result: {
+        data: [
+          { route_origin_iata: 'FRA', route_destination_iata: 'JFK', last_seen_at: '2026-01-01T00:00:00Z' },
+          { route_origin_iata: 'FRA', route_destination_iata: 'LHR', last_seen_at: '2026-01-01T00:00:00Z' },
+          { route_origin_iata: 'MUC', route_destination_iata: 'JFK', last_seen_at: '2026-01-01T00:00:00Z' },
+        ],
+        error: null,
+      },
+    });
+    supa.__setResponse('route_pages', {
+      result: {
+        data: [
+          { slug: 'a', origin_iata: 'FRA', destination_iata: 'JFK', origin_city: 'Frankfurt', destination_city: 'New York' },
+          { slug: 'b', origin_iata: 'FRA', destination_iata: 'LHR', origin_city: 'Frankfurt', destination_city: 'London' },
+          { slug: 'c', origin_iata: 'MUC', destination_iata: 'JFK', origin_city: 'Munich', destination_city: 'New York' },
+        ],
+        error: null,
+      },
+    });
+    const app = buildApp();
+    const res = await request(app).get('/airlines/LH');
+    // FRA and JFK both appear twice (origin twice for FRA; destination twice for JFK) — a tie,
+    // broken by first-observed-in-iteration-order, which is FRA (appears first in the observed list).
+    expect(res.body.airline.hubAirport).toBe('FRA');
+  });
+});
