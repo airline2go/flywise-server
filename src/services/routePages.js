@@ -153,6 +153,48 @@ async function ensureAirportExists(iataCode, cityId, countryCode, lat, lng) {
   }
 }
 
+// [AIRLINE-PAGES] Auto-creates (or updates) an airlines row the first
+// time a given IATA carrier code is observed in a live Duffel search —
+// same on-demand pattern as ensureCityExists()/ensureAirportExists(),
+// just keyed on the carrier's IATA code instead of a city slug/airport
+// code. name is only ever set once (on first observation); it's a
+// non-localized proper noun, so there's nothing to update on repeat sightings.
+async function ensureAirlineExists(iataCode, name) {
+  if (!iataCode || !supa) return null;
+  try {
+    const { data: existing } = await supa.from('airlines').select('id').eq('iata_code', iataCode).maybeSingle();
+    if (existing) return existing.id;
+    const { data: inserted } = await supa.from('airlines').insert({
+      iata_code: iataCode,
+      name: name || iataCode,
+      status: 'published',
+    }).select('id').maybeSingle();
+    log('info', 'airline_auto_created', { iata_code: iataCode, name });
+    return inserted ? inserted.id : null;
+  } catch (e) {
+    log('warn', 'ensure_airline_exists_failed', { iata_code: iataCode, error: e.message });
+    return null;
+  }
+}
+
+// [ROUTE-AIRLINES-OBSERVED] Records that `airlineId` has been seen
+// operating a segment on origin->destination — upserts on the
+// (route, airline) unique key so a repeat sighting just bumps
+// last_seen_at instead of creating a duplicate row.
+async function ensureRouteAirlineObserved(originIata, destinationIata, airlineId) {
+  if (!originIata || !destinationIata || !airlineId || !supa) return;
+  try {
+    await supa.from('route_airlines').upsert({
+      route_origin_iata: originIata,
+      route_destination_iata: destinationIata,
+      airline_id: airlineId,
+      last_seen_at: new Date().toISOString(),
+    }, { onConflict: 'route_origin_iata,route_destination_iata,airline_id' });
+  } catch (e) {
+    log('warn', 'ensure_route_airline_observed_failed', { origin: originIata, destination: destinationIata, error: e.message });
+  }
+}
+
 module.exports = {
   haversineDistanceKm,
   classifyHaul,
@@ -160,4 +202,6 @@ module.exports = {
   ensureCountryExists,
   ensureCityExists,
   ensureAirportExists,
+  ensureAirlineExists,
+  ensureRouteAirlineObserved,
 };
