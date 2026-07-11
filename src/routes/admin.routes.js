@@ -27,6 +27,20 @@ const { haversineDistanceKm, classifyHaul, ensureCountryExists, ensureCityExists
 const triggerRebuild = require('../utils/triggerRebuild');
 const { DEFAULT_ROUTE_SCORE_CONFIG } = require('../services/routeScore');
 
+// [ON-DEMAND-REVALIDATE] A published route page also brings its origin/
+// destination city and country pages into existence (see [COUNTRY-PAGES /
+// CITY-PAGES] below) — so a single route publish/edit can affect up to
+// five separate pages. Builds the `entities` payload triggerRebuild()
+// forwards to the Next.js frontend's /api/revalidate route.
+function routeEntities(route) {
+  const entities = [{ type: 'route', slug: route.slug }];
+  if (route.origin_country) entities.push({ type: 'country', slug: route.origin_country });
+  if (route.destination_country) entities.push({ type: 'country', slug: route.destination_country });
+  if (route.origin_city_slug) entities.push({ type: 'city', slug: route.origin_city_slug });
+  if (route.destination_city_slug) entities.push({ type: 'city', slug: route.destination_city_slug });
+  return entities;
+}
+
 module.exports = (app) => {
 
 app.post('/admin/login', rateLimit('admin_login', 10, 60000), (req, res) => {
@@ -403,7 +417,12 @@ app.post('/admin/blog-posts', rateLimit('admin', 120, 60000), requireAdmin, asyn
       published_at: isPublishing ? new Date().toISOString() : null,
     }).select().maybeSingle();
     if (error) throw new Error(error.message);
-    if (isPublishing) triggerRebuild();
+    if (isPublishing) {
+      triggerRebuild([
+        { type: 'blog', slug: data.slug, lang: 'de' },
+        ...(data.slug_en ? [{ type: 'blog', slug: data.slug_en, lang: 'en' }] : []),
+      ]);
+    }
     res.json({ ok: true, post: data });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -473,7 +492,12 @@ app.put('/admin/blog-posts/:id', rateLimit('admin', 120, 60000), requireAdmin, a
     // would break any link already shared/indexed by Google for this post.
     const { data, error } = await supa.from('blog_posts').update(update).eq('id', req.params.id).select().maybeSingle();
     if (error) throw new Error(error.message);
-    if (data && data.status === 'published') triggerRebuild();
+    if (data && data.status === 'published') {
+      triggerRebuild([
+        { type: 'blog', slug: data.slug, lang: 'de' },
+        ...(data.slug_en ? [{ type: 'blog', slug: data.slug_en, lang: 'en' }] : []),
+      ]);
+    }
     res.json({ ok: true, post: data });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -483,9 +507,20 @@ app.put('/admin/blog-posts/:id', rateLimit('admin', 120, 60000), requireAdmin, a
 app.delete('/admin/blog-posts/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    // [ON-DEMAND-REVALIDATE] Fetched before deleting — the slug(s) are
+    // needed to tell the Next.js frontend which cached pages to drop, and
+    // the row won't exist to read from anymore right after the delete.
+    const { data: existing } = await supa.from('blog_posts').select('slug, slug_en, status').eq('id', req.params.id).maybeSingle();
     const { error } = await supa.from('blog_posts').delete().eq('id', req.params.id);
     if (error) throw new Error(error.message);
-    triggerRebuild();
+    if (existing && existing.status === 'published') {
+      triggerRebuild([
+        { type: 'blog', slug: existing.slug, lang: 'de' },
+        ...(existing.slug_en ? [{ type: 'blog', slug: existing.slug_en, lang: 'en' }] : []),
+      ]);
+    } else {
+      triggerRebuild();
+    }
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -955,7 +990,7 @@ app.post('/admin/route-pages', rateLimit('admin', 120, 60000), requireAdmin, asy
       if (destination_country) ensureCountryExists(destination_country);
       ensureCityExists(originCitySlug, origin_city, origin_country, origin_iata.toUpperCase(), origin_lat, origin_lng);
       ensureCityExists(destCitySlug, destination_city, destination_country, destination_iata.toUpperCase(), destination_lat, destination_lng);
-      triggerRebuild();
+      triggerRebuild(routeEntities(data));
     }
     res.json({ ok: true, route: data });
   } catch (err) {
@@ -1037,7 +1072,7 @@ app.put('/admin/route-pages/:id', rateLimit('admin', 120, 60000), requireAdmin, 
       if (data.destination_country) ensureCountryExists(data.destination_country);
       if (data.origin_city_slug) ensureCityExists(data.origin_city_slug, data.origin_city, data.origin_country, data.origin_iata, data.origin_lat, data.origin_lng);
       if (data.destination_city_slug) ensureCityExists(data.destination_city_slug, data.destination_city, data.destination_country, data.destination_iata, data.destination_lat, data.destination_lng);
-      triggerRebuild();
+      triggerRebuild(routeEntities(data));
     }
     res.json({ ok: true, route: data });
   } catch (err) {
@@ -1055,7 +1090,7 @@ app.post('/admin/route-pages/publish-all-drafts', rateLimit('admin', 120, 60000)
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
 
     const { data: drafts, error: fetchErr } = await supa.from('route_pages')
-      .select('id, origin_iata, destination_iata, origin_city, destination_city, origin_city_slug, destination_city_slug, origin_country, destination_country')
+      .select('id, slug, origin_iata, destination_iata, origin_city, destination_city, origin_city_slug, destination_city_slug, origin_country, destination_country')
       .eq('status', 'draft');
     if (fetchErr) throw new Error(fetchErr.message);
     if (!drafts || !drafts.length) {
@@ -1072,14 +1107,16 @@ app.post('/admin/route-pages/publish-all-drafts', rateLimit('admin', 120, 60000)
     // برلين، برلين بتتفعّل مرة واحدة بس مش 500 مرة.
     const countriesSeen = new Set();
     const citiesSeen = new Set();
+    const entities = [];
     for (const d of drafts) {
-      if (d.origin_country && !countriesSeen.has(d.origin_country)) { countriesSeen.add(d.origin_country); ensureCountryExists(d.origin_country); }
-      if (d.destination_country && !countriesSeen.has(d.destination_country)) { countriesSeen.add(d.destination_country); ensureCountryExists(d.destination_country); }
-      if (d.origin_city_slug && !citiesSeen.has(d.origin_city_slug)) { citiesSeen.add(d.origin_city_slug); ensureCityExists(d.origin_city_slug, d.origin_city, d.origin_country, d.origin_iata); }
-      if (d.destination_city_slug && !citiesSeen.has(d.destination_city_slug)) { citiesSeen.add(d.destination_city_slug); ensureCityExists(d.destination_city_slug, d.destination_city, d.destination_country, d.destination_iata); }
+      entities.push({ type: 'route', slug: d.slug });
+      if (d.origin_country && !countriesSeen.has(d.origin_country)) { countriesSeen.add(d.origin_country); ensureCountryExists(d.origin_country); entities.push({ type: 'country', slug: d.origin_country }); }
+      if (d.destination_country && !countriesSeen.has(d.destination_country)) { countriesSeen.add(d.destination_country); ensureCountryExists(d.destination_country); entities.push({ type: 'country', slug: d.destination_country }); }
+      if (d.origin_city_slug && !citiesSeen.has(d.origin_city_slug)) { citiesSeen.add(d.origin_city_slug); ensureCityExists(d.origin_city_slug, d.origin_city, d.origin_country, d.origin_iata); entities.push({ type: 'city', slug: d.origin_city_slug }); }
+      if (d.destination_city_slug && !citiesSeen.has(d.destination_city_slug)) { citiesSeen.add(d.destination_city_slug); ensureCityExists(d.destination_city_slug, d.destination_city, d.destination_country, d.destination_iata); entities.push({ type: 'city', slug: d.destination_city_slug }); }
     }
 
-    triggerRebuild();
+    triggerRebuild(entities);
     log('info', 'bulk_published_drafts', { count: drafts.length });
     res.json({ ok: true, published: drafts.length });
   } catch (err) {
@@ -1090,9 +1127,14 @@ app.post('/admin/route-pages/publish-all-drafts', rateLimit('admin', 120, 60000)
 app.delete('/admin/route-pages/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    // [ON-DEMAND-REVALIDATE] Fetched before deleting, same reasoning as
+    // the blog-posts delete handler above — only the route's own page is
+    // revalidated (not its city/country pages, since other routes may
+    // still reference them).
+    const { data: existing } = await supa.from('route_pages').select('slug').eq('id', req.params.id).maybeSingle();
     const { error } = await supa.from('route_pages').delete().eq('id', req.params.id);
     if (error) throw new Error(error.message);
-    triggerRebuild();
+    triggerRebuild(existing ? [{ type: 'route', slug: existing.slug }] : undefined);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });

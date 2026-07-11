@@ -56,4 +56,15 @@ module.exports = {
   // change without waiting for the next code push. If unset, this feature
   // is simply skipped — never a hard failure, never blocks the admin action.
   RENDER_DEPLOY_HOOK_URL: process.env.RENDER_DEPLOY_HOOK_URL,
+
+  // [NEXTJS-REVALIDATE] Optional — the Next.js frontend's base URL and a
+  // shared secret, used to call its `/api/revalidate` route on-demand
+  // whenever a route page/blog post is published/edited/deleted (Phase 2
+  // of the Next.js migration — see the migration plan). This is additive
+  // to RENDER_DEPLOY_HOOK_URL above, not a replacement: the old static
+  // site still needs its own rebuild trigger until the full domain
+  // cutover happens. If either var is unset, this feature is simply
+  // skipped — never a hard failure, never blocks the admin action.
+  NEXTJS_REVALIDATE_URL: process.env.NEXTJS_REVALIDATE_URL,
+  NEXTJS_REVALIDATE_SECRET: process.env.NEXTJS_REVALIDATE_SECRET,
 };
