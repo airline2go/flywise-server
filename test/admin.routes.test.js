@@ -13,6 +13,8 @@ jest.mock('../src/clients/supabase', () => {
       in: () => builder,
       gte: () => builder,
       lte: () => builder,
+      range: () => builder,
+      or: () => builder,
       update: () => builder,
       insert: () => builder,
       upsert: () => builder,
@@ -38,6 +40,16 @@ jest.mock('../src/utils/log', () => jest.fn());
 const express = require('express');
 const request = require('supertest');
 const supa = require('../src/clients/supabase');
+
+// [TEST-ISOLATION] Several tests below capture `supa.from.getMockImplementation()`
+// as their own "originalFrom" and layer a table-specific override on top —
+// but since none of them ever restore it afterward, and the shared
+// beforeEach only calls `.mockClear()` (which resets call history, not the
+// implementation), each such test's "original" is really whatever the
+// *previous* one left behind. Captured once here, before any test runs, so
+// later describe blocks can force a real reset rather than inheriting an
+// accumulated chain of overrides.
+const trueOriginalFrom = supa.from.getMockImplementation();
 
 function buildApp() {
   const app = express();
@@ -482,6 +494,74 @@ describe('GET/POST /admin/api-cost-config', () => {
     const app2 = buildApp();
     const postRes = await request(app2).post('/admin/api-cost-config').set(staffAuth2).set('X-Forwarded-For', '10.9.5.2').send({ costPerRequestEur: 1 });
     expect(postRes.status).toBe(403);
+  });
+});
+
+describe('GET/POST /admin/route-score-config', () => {
+  // [TEST-ISOLATION] See the trueOriginalFrom comment near the top of this
+  // file — an earlier test's route_pages mockImplementation (a
+  // select-less stub) can otherwise leak into these.
+  beforeEach(() => { supa.from.mockImplementation(trueOriginalFrom); });
+
+  test('GET returns the defaults when nothing has been configured', async () => {
+    supa.__setResponse('admin_config', { maybeSingle: { data: null, error: null } });
+    const app = buildApp();
+    const res = await request(app).get('/admin/route-score-config').set(AUTH);
+    expect(res.status).toBe(200);
+    expect(res.body.config).toEqual({
+      halfLifeDays: 7, lookbackDays: 30, impressionWeight: 1, clickWeight: 10,
+      bookingWeight: 100, ctrWeight: 50, confidenceLowMax: 100, confidenceHighMin: 1000,
+    });
+  });
+
+  test('POST clamps invalid values back to safe defaults', async () => {
+    const app = buildApp();
+    const res = await request(app).post('/admin/route-score-config').set(AUTH).send({ halfLifeDays: 'abc', clickWeight: -5 });
+    expect(res.status).toBe(200);
+    expect(res.body.config.halfLifeDays).toBe(7);
+    expect(res.body.config.clickWeight).toBe(0); // clamped to the min (0), not the default
+  });
+
+  test('POST accepts and echoes back valid values', async () => {
+    const app = buildApp();
+    const res = await request(app).post('/admin/route-score-config').set(AUTH).send({
+      halfLifeDays: 14, lookbackDays: 60, impressionWeight: 2, clickWeight: 20,
+      bookingWeight: 200, ctrWeight: 25, confidenceLowMax: 50, confidenceHighMin: 500,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.config).toEqual({
+      halfLifeDays: 14, lookbackDays: 60, impressionWeight: 2, clickWeight: 20,
+      bookingWeight: 200, ctrWeight: 25, confidenceLowMax: 50, confidenceHighMin: 500,
+    });
+  });
+
+  test('a staff session is blocked (403) from both GET and POST', async () => {
+    const staffAuth = staffAuthHeaders();
+    const app = buildApp();
+    const getRes = await request(app).get('/admin/route-score-config').set(staffAuth).set('X-Forwarded-For', '10.9.5.4');
+    expect(getRes.status).toBe(403);
+    const staffAuth2 = staffAuthHeaders();
+    const app2 = buildApp();
+    const postRes = await request(app2).post('/admin/route-score-config').set(staffAuth2).set('X-Forwarded-For', '10.9.5.5').send({ halfLifeDays: 3 });
+    expect(postRes.status).toBe(403);
+  });
+});
+
+describe('GET /admin/route-pages ?sort=score', () => {
+  beforeEach(() => { supa.from.mockImplementation(trueOriginalFrom); });
+
+  test('sorts by route_score descending when requested', async () => {
+    supa.__setResponse('route_pages', { result: { data: [], error: null, count: 0 } });
+    const app = buildApp();
+    const res = await request(app).get('/admin/route-pages?sort=score').set(AUTH);
+    expect(res.status).toBe(200);
+  });
+
+  test('defaults to created_at ordering when sort is omitted', async () => {
+    supa.__setResponse('route_pages', { result: { data: [], error: null, count: 0 } });
+    const app = buildApp();
+    const res = await request(app).get('/admin/route-pages').set(AUTH);
+    expect(res.status).toBe(200);
   });
 });
 

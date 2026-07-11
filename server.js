@@ -94,10 +94,18 @@ require('./src/routes/loyalty.routes')(app);
 require('./src/routes/referral.routes')(app);
 require('./src/routes/promo.routes')(app);
 require('./src/routes/content.routes')(app);
+require('./src/routes/tracking.routes')(app);
 require('./src/routes/admin.routes')(app);
 require('./src/routes/admin-staff.routes')(app);
 require('./src/routes/admin-customers.routes')(app);
 require('./src/routes/admin-geo.routes')(app);
+
+// [ROUTE-SCORE-4A] Not route registrars — each of these self-starts its
+// own background timer the moment it's required (same pattern as
+// warmRoutePricesOnce() inside search.routes.js), so a plain require is
+// all that's needed here.
+require('./src/services/routeTraffic');
+require('./src/services/routeScore');
 
 // ─── [7] معالج الأخطاء الموحّد ───────────────────────────────
 if (env.SENTRY_DSN) {

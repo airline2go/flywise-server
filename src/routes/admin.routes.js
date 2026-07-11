@@ -25,6 +25,7 @@ const {
 const { getLoyaltyConfig } = require('../services/loyalty');
 const { haversineDistanceKm, classifyHaul, ensureCountryExists, ensureCityExists } = require('../services/routePages');
 const triggerRebuild = require('../utils/triggerRebuild');
+const { DEFAULT_ROUTE_SCORE_CONFIG } = require('../services/routeScore');
 
 module.exports = (app) => {
 
@@ -641,7 +642,14 @@ app.get('/admin/route-pages', rateLimit('admin', 120, 60000), requireAdmin, asyn
         `origin_city.ilike.%${esc}%,destination_city.ilike.%${esc}%,origin_iata.ilike.%${esc}%,destination_iata.ilike.%${esc}%,slug.ilike.%${esc}%`
       );
     }
-    query = query.order('created_at', { ascending: false }).range(from, to);
+    // [ROUTE-SCORE-4A] ?sort=score surfaces route_score for the admin
+    // to review — read-only, nothing downstream of this acts on it yet.
+    if (req.query.sort === 'score') {
+      query = query.order('route_score', { ascending: false, nullsFirst: false });
+    } else {
+      query = query.order('created_at', { ascending: false });
+    }
+    query = query.range(from, to);
 
     const { data, error, count } = await query;
     if (error) throw new Error(error.message);
@@ -1509,6 +1517,39 @@ app.post('/admin/api-cost-config', rateLimit('admin', 120, 60000), requireFullAd
       dailyRequestAlertThreshold: Number.isFinite(Number(incoming.dailyRequestAlertThreshold)) ? Math.max(1, parseInt(incoming.dailyRequestAlertThreshold, 10)) : DEFAULT_API_COST_CONFIG.dailyRequestAlertThreshold,
     };
     await setAdminConfig('api_cost_config', cfg);
+    res.json({ ok: true, config: cfg });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// [ROUTE-SCORE-4A] Owner-only, same tier as the cost config above — the
+// score weights indirectly shape what Phase 4B will eventually rank
+// routes by, so this stays behind requireFullAdmin from day one even
+// though nothing acts on the score yet in this phase.
+app.get('/admin/route-score-config', rateLimit('admin', 120, 60000), requireFullAdmin, async (req, res) => {
+  try {
+    const cfg = Object.assign({}, DEFAULT_ROUTE_SCORE_CONFIG, await getAdminConfig('route_score_config', {}));
+    res.json({ ok: true, config: cfg });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+app.post('/admin/route-score-config', rateLimit('admin', 120, 60000), requireFullAdmin, async (req, res) => {
+  try {
+    const incoming = req.body || {};
+    const num = (v, fallback, min) => (Number.isFinite(Number(v)) ? Math.max(min, Number(v)) : fallback);
+    const cfg = {
+      halfLifeDays: num(incoming.halfLifeDays, DEFAULT_ROUTE_SCORE_CONFIG.halfLifeDays, 0.1),
+      lookbackDays: num(incoming.lookbackDays, DEFAULT_ROUTE_SCORE_CONFIG.lookbackDays, 1),
+      impressionWeight: num(incoming.impressionWeight, DEFAULT_ROUTE_SCORE_CONFIG.impressionWeight, 0),
+      clickWeight: num(incoming.clickWeight, DEFAULT_ROUTE_SCORE_CONFIG.clickWeight, 0),
+      bookingWeight: num(incoming.bookingWeight, DEFAULT_ROUTE_SCORE_CONFIG.bookingWeight, 0),
+      ctrWeight: num(incoming.ctrWeight, DEFAULT_ROUTE_SCORE_CONFIG.ctrWeight, 0),
+      confidenceLowMax: num(incoming.confidenceLowMax, DEFAULT_ROUTE_SCORE_CONFIG.confidenceLowMax, 0),
+      confidenceHighMin: num(incoming.confidenceHighMin, DEFAULT_ROUTE_SCORE_CONFIG.confidenceHighMin, 0),
+    };
+    await setAdminConfig('route_score_config', cfg);
     res.json({ ok: true, config: cfg });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
