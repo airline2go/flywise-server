@@ -441,13 +441,24 @@ app.get('/airlines/:code', rateLimit('content', 2500, 60000), async (req, res) =
     if (!observed || !observed.length) return res.status(404).json({ ok: false, error: 'Keine Routen für diese Airline gefunden' });
 
     const pairs = observed.map((o) => `and(origin_iata.eq.${o.route_origin_iata},destination_iata.eq.${o.route_destination_iata})`);
-    const { data: routes, error: routesErr } = await supa.from('route_pages')
-      .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_city_slug,destination_city_slug,origin_country,destination_country')
-      .eq('status', 'published')
-      .or(pairs.join(','))
-      .order('origin_city', { ascending: true });
-    if (routesErr) throw new Error(routesErr.message);
-    if (!routes || !routes.length) return res.status(404).json({ ok: false, error: 'Keine Routen für diese Airline gefunden' });
+    // [OR-BATCH] A major airline (e.g. LH/BA) is observed on hundreds of
+    // routes; a single .or() with that many conditions overruns PostgREST's
+    // request-length limit and comes back as "Bad Request" (surfaced to the
+    // client as a 500). Query the pairs in chunks and merge — the result set
+    // is identical, just assembled from several smaller requests. Dedupe by
+    // slug and re-apply the origin_city ordering the single query used to do.
+    const OR_CHUNK = 50;
+    const routesBySlug = new Map();
+    for (let i = 0; i < pairs.length; i += OR_CHUNK) {
+      const { data: part, error: routesErr } = await supa.from('route_pages')
+        .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_city_slug,destination_city_slug,origin_country,destination_country')
+        .eq('status', 'published')
+        .or(pairs.slice(i, i + OR_CHUNK).join(','));
+      if (routesErr) throw new Error(routesErr.message);
+      (part || []).forEach((r) => routesBySlug.set(r.slug, r));
+    }
+    const routes = [...routesBySlug.values()].sort((a, b) => (a.origin_city || '').localeCompare(b.origin_city || ''));
+    if (!routes.length) return res.status(404).json({ ok: false, error: 'Keine Routen für diese Airline gefunden' });
 
     // [ROUTE-INTELLIGENCE-3] mostUsedRoutes: no per-route observation
     // frequency is tracked, so recency (last_seen_at) is the best proxy
