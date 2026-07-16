@@ -71,6 +71,12 @@ process.on('uncaughtException', (err) => {
 // ─── [4] Webhooks — لازم قبل express.json() ────────────────
 require('./src/routes/webhooks.routes')(app);
 
+// ─── [4b] robots.txt — يُخدَم دايمًا (قبل الصيانة/الميدلوير العام) ──
+// نطاق الـ API (api.airpiv.com) مالهوش يتفهرس — بيرجّع JSON مش صفحات.
+// يُسجَّل هنا بدري عشان يُخدَم حتى أثناء وضع الصيانة، من غير رؤوس
+// CORS/الأمان (مش محتاجها). مافيش body فمش متأثر بترتيب express.json().
+require('./src/routes/seo.routes')(app);
+
 // ─── [5] express.json() + الـ middleware العام ─────────────
 // [LONG-ARTICLE-FIX] كان 256kb — كافي لمعظم الطلبات، بس مقال طويل جدًا
 // (+5000 كلمة مع روابط وHTML كتير) ممكن يقرب منه، والسيرفر وقتها كان
