@@ -69,6 +69,10 @@ function applyGlobalMiddleware(app) {
   // 4) [#13] رؤوس أمان (helmet-lite، بدون أي مكتبة خارجية)
   app.use((req, res, next) => {
     res.header('X-Content-Type-Options', 'nosniff');
+    // [NO-INDEX] نطاق الـ API مالهوش يظهر في نتائج البحث — بيرجّع JSON
+    // مش صفحات. طبقة تأمين تانية جنب robots.txt: لو URL اتعرف من رابط
+    // خارجي، الهيدر ده بيمنع فهرسته. مابيأثرش على fetch()/المتصفح إطلاقًا.
+    res.header('X-Robots-Tag', 'noindex, nofollow');
     res.header('X-Frame-Options', 'DENY');
     res.header('Referrer-Policy', 'strict-origin-when-cross-origin');
     res.header('X-XSS-Protection', '1; mode=block');
