@@ -495,7 +495,7 @@ create table if not exists route_pages (
   origin_lat numeric, origin_lng numeric,
   destination_lat numeric, destination_lng numeric,
   distance_km int,                               -- computed via Haversine formula server-side — a real, verifiable number, never guessed
-  haul_type text,                                -- 'short-haul' | 'long-haul', computed from distance_km
+  haul_type text,                                -- 'short-haul' | 'medium-haul' | 'long-haul', computed from distance_km
   -- [COUNTRY-PAGES] Captured automatically from the airport search
   -- results at creation time (Duffel's iata_country_code) — never
   -- manually entered. This is what lets country.html query "all routes

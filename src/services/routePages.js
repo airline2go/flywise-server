@@ -20,12 +20,20 @@ function haversineDistanceKm(lat1, lon1, lat2, lon2) {
   const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
   return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 }
-// 1500km is a standard aviation-industry rule of thumb for where
-// short-haul (typically narrow-body) operations give way to long-haul —
-// an objective, defensible threshold, not an arbitrary content-writing
-// choice.
+// Three-tier great-circle distance bands, matching the standard
+// aviation-industry Kurz-/Mittel-/Langstrecke split:
+//   short-haul  (Kurzstrecke):  < 1500 km
+//   medium-haul (Mittelstrecke): 1500–4000 km
+//   long-haul   (Langstrecke):  >= 4000 km
+// The middle band exists because a 1500–4000 km flight (e.g. Berlin↔Valencia
+// at ~1790 km) is neither a short hop nor an intercontinental long-haul —
+// classifying it as 'long-haul' (the old two-tier behavior) both mislabels
+// it on the page and gives the reader wrong booking-window advice. Thresholds
+// are objective, defensible distances, not arbitrary content-writing choices.
 function classifyHaul(distanceKm) {
-  return distanceKm < 1500 ? 'short-haul' : 'long-haul';
+  if (distanceKm < 1500) return 'short-haul';
+  if (distanceKm < 4000) return 'medium-haul';
+  return 'long-haul';
 }
 
 // [COUNTRY-PAGES] ISO code -> German display name, covering the
