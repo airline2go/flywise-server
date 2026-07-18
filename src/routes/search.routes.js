@@ -147,7 +147,7 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
     });
   }
   const insights = durations.length ? {
-    avgDurationMin: Math.round(durations.reduce((a, b) => a + b, 0) / durations.length),
+    avgDurationMin: avgDurationExcludingOutliers(durations),
     minDurationMin: Math.min(...durations),
     directAvailable: stopCounts.some((s) => s === 0),
     allDirect: stopCounts.every((s) => s === 0),
@@ -327,6 +327,24 @@ async function warmRoutePricesOnce() {
 // the process alive on their own during shutdown.
 setTimeout(() => { warmRoutePricesOnce(); }, 30000).unref();
 setInterval(() => { warmRoutePricesOnce(); }, ROUTE_PRICE_WARM_INTERVAL_MS).unref();
+
+// [DURATION-OUTLIERS] The "average flight time" must reflect a TYPICAL
+// itinerary, not be dragged up by a handful of absurd multi-stop / overnight
+// connections a single search can return (e.g. Amsterdam→Paris showing a
+// 6h33m average against a 1h06m nonstop). We exclude any itinerary whose
+// total duration exceeds DURATION_OUTLIER_MULTIPLE× the shortest itinerary on
+// the route — a connection taking more than triple the fastest option is an
+// outlier, not representative of the route. If trimming would leave nothing
+// (degenerate data), we fall back to the raw mean so a value is still shown.
+const DURATION_OUTLIER_MULTIPLE = 3;
+function avgDurationExcludingOutliers(durations) {
+  if (!durations || !durations.length) return null;
+  const min = Math.min(...durations);
+  const cap = min * DURATION_OUTLIER_MULTIPLE;
+  const trimmed = durations.filter((d) => d <= cap);
+  const source = trimmed.length ? trimmed : durations;
+  return Math.round(source.reduce((a, b) => a + b, 0) / source.length);
+}
 
 module.exports = (app) => {
 app.get('/debug/raw', requireAdmin, rateLimit('pay', 10, 60000), async (req, res) => {
@@ -541,3 +559,4 @@ app.get('/search/airports', rateLimit('airports', 60, 60000), async (req, res) =
 };
 module.exports.warmRoutePricesOnce = warmRoutePricesOnce;
 module.exports.selectRouteOffers = selectRouteOffers;
+module.exports.avgDurationExcludingOutliers = avgDurationExcludingOutliers;
