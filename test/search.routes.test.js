@@ -423,3 +423,31 @@ describe('GET /debug/raw', () => {
     expect(res.body.total_offers).toBe(1);
   });
 });
+
+// [DURATION-OUTLIERS] The average flight time must reflect a typical
+// itinerary, not be dragged up by absurd multi-stop/overnight connections.
+describe('avgDurationExcludingOutliers', () => {
+  const { avgDurationExcludingOutliers } = require('../src/routes/search.routes');
+
+  test('excludes itineraries longer than 3x the shortest (Amsterdam->Paris case)', () => {
+    // nonstop 66m + a couple ~6.5h connection outliers
+    expect(avgDurationExcludingOutliers([66, 71, 80, 393, 410])).toBe(72);
+  });
+
+  test('returns the plain mean when nothing is an outlier', () => {
+    expect(avgDurationExcludingOutliers([60, 70, 80])).toBe(70);
+  });
+
+  test('handles a single value', () => {
+    expect(avgDurationExcludingOutliers([90])).toBe(90);
+  });
+
+  test('falls back to the raw mean if trimming would leave nothing', () => {
+    // all equal -> cap == value, everything kept
+    expect(avgDurationExcludingOutliers([120, 120])).toBe(120);
+  });
+
+  test('returns null for an empty list', () => {
+    expect(avgDurationExcludingOutliers([])).toBeNull();
+  });
+});
