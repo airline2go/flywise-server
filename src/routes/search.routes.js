@@ -13,6 +13,7 @@ const duffel = require('../services/duffel');
 const { getAdminConfig, setAdminConfig, getTicketProfitTiers, computeTieredMargin } = require('../services/adminConfig');
 const { normalizeOffer } = require('../services/normalizeOffer');
 const { ensureAirlineExists, ensureRouteAirlineObserved } = require('../services/routePages');
+const { isExcludedCarrier } = require('../services/carrierFilter');
 const supa = require('../clients/supabase');
 
 // [MEMORY-LEAK-FIX] كاش 5 دقائق لبحث المطارات — بينضف نفسه دوري
@@ -107,7 +108,10 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
     const durationMin = slice ? isoMinutesToHours(slice.duration) : null;
     const segs = slice ? (slice.segments || []) : [];
     const stops = slice ? Math.max(0, segs.length - 1) : null;
-    const airline = (segs[0] && segs[0].marketing_carrier && segs[0].marketing_carrier.name) || null;
+    const mc = segs[0] && segs[0].marketing_carrier;
+    // [CARRIER-FILTER] Suppress the display airline name too when it's the
+    // test-mode/placeholder carrier, so it never reaches the offer UI.
+    const airline = (mc && mc.name && !isExcludedCarrier(mc.iata_code, mc.name)) ? mc.name : null;
     return { id: o.id, price, durationMin, stops, airline };
   });
   const { cheapest, fastest, bestValue } = selectRouteOffers(priced);
@@ -131,8 +135,15 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
     const segs = slice.segments || [];
     stopCounts.push(Math.max(0, segs.length - 1));
     segs.forEach((s) => {
-      if (s.marketing_carrier?.name) airlines.add(s.marketing_carrier.name);
-      if (s.marketing_carrier?.iata_code) airlinesObserved.set(s.marketing_carrier.iata_code, s.marketing_carrier.name);
+      const carrierName = s.marketing_carrier?.name;
+      const carrierIata = s.marketing_carrier?.iata_code;
+      // [CARRIER-FILTER] Never store or surface Duffel's test-mode carrier
+      // ("Duffel Airways"/ZZ) or normalizeOffer's XX/Unknown placeholder —
+      // token-independent, so a mis-set env or a malformed offer can't leak
+      // a fake airline onto public route/airline pages.
+      if (isExcludedCarrier(carrierIata, carrierName)) return;
+      if (carrierName) airlines.add(carrierName);
+      if (carrierIata) airlinesObserved.set(carrierIata, carrierName);
     });
   }
   const insights = durations.length ? {
