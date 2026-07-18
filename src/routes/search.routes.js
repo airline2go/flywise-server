@@ -170,6 +170,10 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
       min_duration_min: insights.minDurationMin,
       stop_distribution: stopDistribution,
       airline_count: insights.airlines.length,
+      // [ECONOMIC-INTELLIGENCE] Live itinerary count from this exact search —
+      // the "number of available itineraries" metric. Persisted inline (like
+      // the operational insights) so the SSG build sees the latest count.
+      itinerary_count: offers.length,
       insights_updated_at: new Date().toISOString(),
     }).eq('origin_iata', from.toUpperCase()).eq('destination_iata', to.toUpperCase())
       .then(() => {}).catch(() => {});
@@ -190,6 +194,22 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
 
   const currency = offers[0].total_currency || 'EUR';
   const routeOffers = { cheapest, fastest, bestValue };
+
+  // [ECONOMIC-INTELLIGENCE] Append this observed "from" price to the
+  // route_price_history log (append-only) so the periodic aggregator can
+  // compute a real price range / cheapest-ever / trend. Fire-and-forget:
+  // a failed insert must never slow or break the price response. Only
+  // records genuine priced results (cheapest.price is a real fare here).
+  if (supa && cheapest && cheapest.price != null) {
+    supa.from('route_price_history').insert({
+      route_origin_iata: from.toUpperCase(),
+      route_destination_iata: to.toUpperCase(),
+      price: cheapest.price,
+      currency,
+      offer_count: offers.length,
+    }).then(() => {}).catch(() => {});
+  }
+
   await setAdminConfig(cacheKey, { price: cheapest.price, currency, departure_date, insights, offers: routeOffers, fetchedAt: new Date().toISOString() });
   await incrementDailyPriceCheckCounter();
   const checksToday = await getDailyPriceCheckCount();

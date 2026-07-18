@@ -37,9 +37,24 @@ function buildRouteIntelligenceSnapshot(route) {
       airlineCount: route.airline_count == null ? null : route.airline_count,
       updatedAt: route.insights_updated_at || null,
     },
-    // Deferred to the price-history phase — always null for now.
-    // Consumers must not assume this is populated.
-    economic: null,
+    // [ECONOMIC-INTELLIGENCE] Populated from the route_price_history
+    // aggregates written by routePriceHistoryRefresh.js (price_* columns) and
+    // the inline itinerary_count from the last search. Stays null as a whole
+    // when the route has no observed price points yet — consumers must still
+    // handle null, and every individual field is independently null when its
+    // own signal is missing (e.g. priceTrend before MIN_SAMPLES_FOR_TREND).
+    economic: (route.price_avg == null && route.price_min == null && route.itinerary_count == null)
+      ? null
+      : {
+        priceMin: route.price_min == null ? null : Number(route.price_min),
+        priceAvg: route.price_avg == null ? null : Number(route.price_avg),
+        priceMax: route.price_max == null ? null : Number(route.price_max),
+        currency: route.price_currency || null,
+        sampleCount: route.price_sample_count == null ? null : route.price_sample_count,
+        itineraryCount: route.itinerary_count == null ? null : route.itinerary_count,
+        priceTrend: route.price_trend || null,
+        updatedAt: route.price_updated_at || null,
+      },
   };
 }
 

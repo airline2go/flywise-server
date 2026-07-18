@@ -56,6 +56,28 @@ test('operational fields default to null rather than undefined when not yet popu
   });
 });
 
-test('economic is always null in this phase — consumers must not assume it is populated', () => {
+test('economic is null when the route has no observed price points', () => {
   expect(buildRouteIntelligenceSnapshot({}).economic).toBeNull();
+});
+
+test('economic is populated from route_pages price aggregates when present', () => {
+  const snap = buildRouteIntelligenceSnapshot({
+    price_min: 49, price_avg: 72.5, price_max: 120,
+    price_currency: 'EUR', price_sample_count: 12,
+    itinerary_count: 34, price_trend: 'down',
+    price_updated_at: '2026-07-15T00:00:00.000Z',
+  });
+  expect(snap.economic).toEqual({
+    priceMin: 49, priceAvg: 72.5, priceMax: 120,
+    currency: 'EUR', sampleCount: 12, itineraryCount: 34,
+    priceTrend: 'down', updatedAt: '2026-07-15T00:00:00.000Z',
+  });
+});
+
+test('economic populates from itinerary_count alone (before any price aggregate exists)', () => {
+  const snap = buildRouteIntelligenceSnapshot({ itinerary_count: 8 });
+  expect(snap.economic).not.toBeNull();
+  expect(snap.economic.itineraryCount).toBe(8);
+  expect(snap.economic.priceAvg).toBeNull();
+  expect(snap.economic.priceTrend).toBeNull();
 });
