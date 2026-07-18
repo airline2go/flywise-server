@@ -46,11 +46,20 @@ describe('classifyHaul', () => {
     expect(classifyHaul(1499)).toBe('short-haul');
   });
 
-  test('distance at exactly 1500km is long-haul', () => {
-    expect(classifyHaul(1500)).toBe('long-haul');
+  test('distance at exactly 1500km is medium-haul', () => {
+    expect(classifyHaul(1500)).toBe('medium-haul');
   });
 
-  test('distance over 1500km is long-haul', () => {
+  test('a 1500–4000km route (e.g. Berlin–Valencia) is medium-haul', () => {
+    expect(classifyHaul(1790)).toBe('medium-haul');
+    expect(classifyHaul(3999)).toBe('medium-haul');
+  });
+
+  test('distance at exactly 4000km is long-haul', () => {
+    expect(classifyHaul(4000)).toBe('long-haul');
+  });
+
+  test('a clearly intercontinental distance is long-haul', () => {
     expect(classifyHaul(5000)).toBe('long-haul');
   });
 });
