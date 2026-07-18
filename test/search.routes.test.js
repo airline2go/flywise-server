@@ -9,6 +9,10 @@ jest.mock('../src/clients/supabase', () => {
       select: () => builder,
       eq: () => builder,
       neq: () => builder,
+      // [ECONOMIC-INTELLIGENCE] fetchAndCacheRoutePrice()'s fire-and-forget
+      // route_price_history.insert({...}) — returns the thenable builder so
+      // the `.then().catch()` chain resolves without a real DB.
+      insert: () => builder,
       then: (resolve, reject) => Promise.resolve(cfg.result || { data: null, error: null }).then(resolve, reject),
       // [ROUTE-INTELLIGENCE-1] fetchAndCacheRoutePrice()'s fire-and-forget
       // route_pages.update({...}).eq().eq() call — recorded, not asserted
