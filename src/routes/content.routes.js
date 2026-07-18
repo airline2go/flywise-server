@@ -501,7 +501,31 @@ app.get('/route-pages/:slug', rateLimit('content', 2500, 60000), async (req, res
     const { data, error } = await supa.from('route_pages').select('*').eq('slug', req.params.slug).eq('status', 'published').maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return res.status(404).json({ ok: false, error: 'Route nicht gefunden' });
-    res.json({ ok: true, route: Object.assign({}, data, { intelligence: buildRouteIntelligenceSnapshot(data) }) });
+
+    // [AIRLINE-SECTION] Attach the real published airlines observed operating
+    // this exact route (route_airlines -> airlines), so the SSG build can
+    // render an "airlines flying this route" section that links to each
+    // airline's own page — durable internal linking + unique per-route
+    // content, from the same accumulating table airline pages already use.
+    // Fire-safe: any failure here just yields an empty list, never a 500 on
+    // the route page itself.
+    let airlines = [];
+    try {
+      const { data: raRows } = await supa.from('route_airlines')
+        .select('airline_id')
+        .eq('route_origin_iata', data.origin_iata)
+        .eq('route_destination_iata', data.destination_iata);
+      const ids = (raRows || []).map((r) => r.airline_id).filter(Boolean);
+      if (ids.length) {
+        const { data: alRows } = await supa.from('airlines')
+          .select('iata_code,name').in('id', ids).eq('status', 'published');
+        airlines = (alRows || []).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+      }
+    } catch (e) {
+      log('warn', 'route_airlines_attach_failed', { slug: req.params.slug, error: e.message });
+    }
+
+    res.json({ ok: true, route: Object.assign({}, data, { airlines, intelligence: buildRouteIntelligenceSnapshot(data) }) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
