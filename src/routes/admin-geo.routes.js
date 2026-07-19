@@ -13,6 +13,7 @@ const log = require('../utils/log');
 const supa = require('../clients/supabase');
 const rateLimit = require('../middleware/rateLimit');
 const { requireAdmin } = require('../middleware/auth');
+const triggerRebuild = require('../utils/triggerRebuild');
 
 const LANGUAGES = ['en', 'de', 'ar', 'es', 'fr', 'it', 'nl'];
 
@@ -86,6 +87,10 @@ app.post('/admin/cities', rateLimit('admin', 120, 60000), requireAdmin, async (r
       intro_text: intro_text ? String(intro_text).trim() : null,
     }).select().maybeSingle();
     if (error) throw new Error(error.message);
+    // [ON-DEMAND-REVALIDATE] Refresh this city page immediately (all 7
+    // languages) when public. One entity → 7 paths; not fired from route
+    // publishes, so no per-route fan-out.
+    if (data && data.status === 'published') triggerRebuild([{ type: 'city', slug: data.city_slug }]);
     res.json({ ok: true, city: data });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -104,6 +109,7 @@ app.put('/admin/cities/:id', rateLimit('admin', 120, 60000), requireAdmin, async
     const { data, error } = await supa.from('cities').update(update).eq('id', req.params.id).select().maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return res.status(404).json({ ok: false, error: 'Stadt nicht gefunden' });
+    if (data.status === 'published') triggerRebuild([{ type: 'city', slug: data.city_slug }]);
     res.json({ ok: true, city: data });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -113,8 +119,11 @@ app.put('/admin/cities/:id', rateLimit('admin', 120, 60000), requireAdmin, async
 app.delete('/admin/cities/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    // Fetched before the delete — city_slug identifies the cached page to drop.
+    const { data: existing } = await supa.from('cities').select('city_slug, status').eq('id', req.params.id).maybeSingle();
     const { error } = await supa.from('cities').delete().eq('id', req.params.id);
     if (error) throw new Error(error.message);
+    if (existing && existing.status === 'published') triggerRebuild([{ type: 'city', slug: existing.city_slug }]);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -143,6 +152,9 @@ app.put('/admin/cities/:id/translations', rateLimit('admin', 120, 60000), requir
     const { error } = await supa.from('city_translations').upsert(rows, { onConflict: 'city_id,language' });
     if (error) throw new Error(error.message);
     log('info', 'city_translations_updated', { city_id: req.params.id, languages: entries.map(([l]) => l) });
+    // A changed translated name changes the rendered page — refresh it now.
+    const { data: city } = await supa.from('cities').select('city_slug, status').eq('id', req.params.id).maybeSingle();
+    if (city && city.status === 'published') triggerRebuild([{ type: 'city', slug: city.city_slug }]);
     res.json({ ok: true, updated: entries.length });
   } catch (err) {
     res.status(err.status || 500).json({ ok: false, error: err.message });
@@ -189,6 +201,10 @@ app.post('/admin/countries', rateLimit('admin', 120, 60000), requireAdmin, async
       intro_text: intro_text ? String(intro_text).trim() : null,
     }).select().maybeSingle();
     if (error) throw new Error(error.message);
+    // [ON-DEMAND-REVALIDATE] Refresh this country page immediately (all 7
+    // languages) when public. One entity → 7 paths; not fired from route
+    // publishes.
+    if (data && data.status === 'published') triggerRebuild([{ type: 'country', slug: data.code }]);
     res.json({ ok: true, country: data });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -206,6 +222,7 @@ app.put('/admin/countries/:id', rateLimit('admin', 120, 60000), requireAdmin, as
     const { data, error } = await supa.from('countries').update(update).eq('id', req.params.id).select().maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return res.status(404).json({ ok: false, error: 'Land nicht gefunden' });
+    if (data.status === 'published') triggerRebuild([{ type: 'country', slug: data.code }]);
     res.json({ ok: true, country: data });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -215,8 +232,11 @@ app.put('/admin/countries/:id', rateLimit('admin', 120, 60000), requireAdmin, as
 app.delete('/admin/countries/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    // Fetched before the delete — the code identifies the cached page to drop.
+    const { data: existing } = await supa.from('countries').select('code, status').eq('id', req.params.id).maybeSingle();
     const { error } = await supa.from('countries').delete().eq('id', req.params.id);
     if (error) throw new Error(error.message);
+    if (existing && existing.status === 'published') triggerRebuild([{ type: 'country', slug: existing.code }]);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -244,13 +264,15 @@ app.put('/admin/countries/:id/translations', rateLimit('admin', 120, 60000), req
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const entries = validateTranslationsPayload(req.body && req.body.translations);
     if (!entries.length) return res.json({ ok: true, updated: 0 });
-    const { data: country, error: cErr } = await supa.from('countries').select('code').eq('id', req.params.id).maybeSingle();
+    const { data: country, error: cErr } = await supa.from('countries').select('code, status').eq('id', req.params.id).maybeSingle();
     if (cErr) throw new Error(cErr.message);
     if (!country) return res.status(404).json({ ok: false, error: 'Land nicht gefunden' });
     const rows = entries.map(([language, name]) => ({ country_code: country.code, language, name: String(name).trim() }));
     const { error } = await supa.from('country_translations').upsert(rows, { onConflict: 'country_code,language' });
     if (error) throw new Error(error.message);
     log('info', 'country_translations_updated', { country_code: country.code, languages: entries.map(([l]) => l) });
+    // A changed translated name changes the rendered page — refresh it now.
+    if (country.status === 'published') triggerRebuild([{ type: 'country', slug: country.code }]);
     res.json({ ok: true, updated: entries.length });
   } catch (err) {
     res.status(err.status || 500).json({ ok: false, error: err.message });
@@ -307,6 +329,11 @@ app.post('/admin/airports', rateLimit('admin', 120, 60000), requireAdmin, async 
       traveler_tips: traveler_tips ? String(traveler_tips).trim() : null,
     }).select().maybeSingle();
     if (error) throw new Error(error.message);
+    // [ON-DEMAND-REVALIDATE] Refresh this airport page immediately (all 7
+    // languages) when it's public. One entity → 7 paths; deliberately not
+    // fired from route publishes, so high-frequency route edits don't fan
+    // out to airport pages (those pick up new routes via the daily window).
+    if (data && data.status === 'published') triggerRebuild([{ type: 'airport', slug: data.iata_code }]);
     res.json({ ok: true, airport: data });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -332,6 +359,7 @@ app.put('/admin/airports/:id', rateLimit('admin', 120, 60000), requireAdmin, asy
     const { data, error } = await supa.from('airports').update(update).eq('id', req.params.id).select().maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return res.status(404).json({ ok: false, error: 'Flughafen nicht gefunden' });
+    if (data.status === 'published') triggerRebuild([{ type: 'airport', slug: data.iata_code }]);
     res.json({ ok: true, airport: data });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -341,8 +369,12 @@ app.put('/admin/airports/:id', rateLimit('admin', 120, 60000), requireAdmin, asy
 app.delete('/admin/airports/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    // Fetched before the delete — the iata_code identifies which cached
+    // airport page to drop, and the row is gone right after.
+    const { data: existing } = await supa.from('airports').select('iata_code, status').eq('id', req.params.id).maybeSingle();
     const { error } = await supa.from('airports').delete().eq('id', req.params.id);
     if (error) throw new Error(error.message);
+    if (existing && existing.status === 'published') triggerRebuild([{ type: 'airport', slug: existing.iata_code }]);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -371,6 +403,10 @@ app.put('/admin/airports/:id/translations', rateLimit('admin', 120, 60000), requ
     const { error } = await supa.from('airport_translations').upsert(rows, { onConflict: 'airport_id,language' });
     if (error) throw new Error(error.message);
     log('info', 'airport_translations_updated', { airport_id: req.params.id, languages: entries.map(([l]) => l) });
+    // A changed translated name changes the rendered page — refresh it now.
+    // The translations table is keyed by airport_id, so resolve the iata_code.
+    const { data: ap } = await supa.from('airports').select('iata_code, status').eq('id', req.params.id).maybeSingle();
+    if (ap && ap.status === 'published') triggerRebuild([{ type: 'airport', slug: ap.iata_code }]);
     res.json({ ok: true, updated: entries.length });
   } catch (err) {
     res.status(err.status || 500).json({ ok: false, error: err.message });
