@@ -28,6 +28,33 @@ app.get('/blog-posts', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
+    const lang = req.query.lang;
+
+    // [MULTILANG-BLOG] A non-German language reads its slugs/titles from
+    // blog_post_translations, joined (in app code, no PostgREST embedding) to
+    // the published parent for the shared cover/author/date fields.
+    if (lang && lang !== 'de') {
+      const { data: parents, error: pErr } = await supa.from('blog_posts')
+        .select('id,cover_image_url,author,published_at')
+        .eq('status', 'published')
+        .order('published_at', { ascending: false })
+        .limit(limit);
+      if (pErr) throw new Error(pErr.message);
+      const ids = (parents || []).map((p) => p.id);
+      if (!ids.length) return res.json({ ok: true, posts: [] });
+      const { data: trs, error: tErr } = await supa.from('blog_post_translations')
+        .select('post_id,slug,title,excerpt').eq('language', lang).in('post_id', ids);
+      if (tErr) throw new Error(tErr.message);
+      const byId = new Map((trs || []).map((t) => [t.post_id, t]));
+      const posts = (parents || [])
+        .filter((p) => byId.has(p.id))
+        .map((p) => {
+          const t = byId.get(p.id);
+          return { slug: t.slug, title: t.title, excerpt: t.excerpt, cover_image_url: p.cover_image_url, author: p.author, published_at: p.published_at };
+        });
+      return res.json({ ok: true, posts });
+    }
+
     const { data, error } = await supa.from('blog_posts')
       .select('slug,title,excerpt,cover_image_url,author,published_at')
       .eq('status', 'published')
@@ -47,6 +74,28 @@ app.get('/blog-posts', rateLimit('content', 2500, 60000), async (req, res) => {
 app.get('/blog-posts/:slug', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const lang = req.query.lang;
+
+    // [MULTILANG-BLOG] Non-German: look the post up by its per-language slug in
+    // blog_post_translations, then confirm the parent is published.
+    if (lang && lang !== 'de') {
+      const { data: tr, error: trErr } = await supa.from('blog_post_translations')
+        .select('slug,title,meta_description,excerpt,content,post_id')
+        .eq('language', lang).eq('slug', req.params.slug).maybeSingle();
+      if (trErr) throw new Error(trErr.message);
+      if (!tr) return res.status(404).json({ ok: false, error: 'Beitrag nicht gefunden' });
+      const { data: parent, error: pErr } = await supa.from('blog_posts')
+        .select('id,cover_image_url,author,published_at,status,views_count').eq('id', tr.post_id).maybeSingle();
+      if (pErr) throw new Error(pErr.message);
+      if (!parent || parent.status !== 'published') return res.status(404).json({ ok: false, error: 'Beitrag nicht gefunden' });
+      supa.from('blog_posts').update({ views_count: (parent.views_count || 0) + 1 }).eq('id', parent.id)
+        .then(({ error: e }) => { if (e) log('warn', 'blog_view_count_failed', { error: e.message }); });
+      return res.json({ ok: true, post: {
+        slug: tr.slug, title: tr.title, meta_description: tr.meta_description, excerpt: tr.excerpt,
+        content: tr.content, cover_image_url: parent.cover_image_url, author: parent.author, published_at: parent.published_at,
+      } });
+    }
+
     const { data, error } = await supa.from('blog_posts').select('*').eq('slug', req.params.slug).eq('status', 'published').maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return res.status(404).json({ ok: false, error: 'Beitrag nicht gefunden' });
