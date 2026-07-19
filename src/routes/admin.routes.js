@@ -25,7 +25,18 @@ const {
 const { getLoyaltyConfig } = require('../services/loyalty');
 const { haversineDistanceKm, classifyHaul, ensureCountryExists, ensureCityExists } = require('../services/routePages');
 const triggerRebuild = require('../utils/triggerRebuild');
+const { translateAndStoreAllLanguages } = require('../services/blogTranslation');
 const { DEFAULT_ROUTE_SCORE_CONFIG } = require('../services/routeScore');
+
+// [MULTILANG-BLOG] Fire-and-forget: translate a just-published German post into
+// every other site language and store each in blog_post_translations, then
+// revalidate that language's page as it lands. Never blocks the admin response
+// (7 sequential Claude calls) and never throws into the handler.
+function translateBlogPostAllLanguages(post) {
+  translateAndStoreAllLanguages(post, supa, {
+    onLanguageStored: ({ code, slug }) => triggerRebuild([{ type: 'blog', slug, lang: code }]),
+  }).catch((e) => log('warn', 'blog_translate_all_failed', { error: e.message }));
+}
 
 // [ON-DEMAND-REVALIDATE] A published route page also brings its origin/
 // destination city and country pages into existence (see [COUNTRY-PAGES /
@@ -422,6 +433,7 @@ app.post('/admin/blog-posts', rateLimit('admin', 120, 60000), requireAdmin, asyn
         { type: 'blog', slug: data.slug, lang: 'de' },
         ...(data.slug_en ? [{ type: 'blog', slug: data.slug_en, lang: 'en' }] : []),
       ]);
+      translateBlogPostAllLanguages(data);
     }
     res.json({ ok: true, post: data });
   } catch (err) {
@@ -497,6 +509,7 @@ app.put('/admin/blog-posts/:id', rateLimit('admin', 120, 60000), requireAdmin, a
         { type: 'blog', slug: data.slug, lang: 'de' },
         ...(data.slug_en ? [{ type: 'blog', slug: data.slug_en, lang: 'en' }] : []),
       ]);
+      translateBlogPostAllLanguages(data);
     }
     res.json({ ok: true, post: data });
   } catch (err) {
