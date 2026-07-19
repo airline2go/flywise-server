@@ -30,9 +30,12 @@ jest.mock('../src/clients/supabase', () => {
   };
 });
 
+jest.mock('../src/utils/triggerRebuild');
+
 const express = require('express');
 const request = require('supertest');
 const supa = require('../src/clients/supabase');
+const triggerRebuild = require('../src/utils/triggerRebuild');
 
 function buildApp() {
   const app = express();
@@ -46,6 +49,7 @@ const OWNER_AUTH = { Authorization: 'Bearer test-admin-token' };
 beforeEach(() => {
   supa.__reset();
   supa.from.mockClear();
+  triggerRebuild.mockClear();
 });
 
 describe('GET /admin/airlines', () => {
@@ -119,5 +123,37 @@ describe('DELETE /admin/airlines/:id', () => {
     const app = buildApp();
     const res = await request(app).delete('/admin/airlines/1').set(OWNER_AUTH);
     expect(res.status).toBe(200);
+  });
+});
+
+describe('[ON-DEMAND-REVALIDATE] airline edits refresh the airline page', () => {
+  test('creating a published airline triggers a rebuild for that airline', async () => {
+    supa.__push('airlines', { maybeSingle: { data: { id: '1', iata_code: 'LH', name: 'Lufthansa', status: 'published' }, error: null } });
+    const app = buildApp();
+    await request(app).post('/admin/airlines').set(OWNER_AUTH).send({ iata_code: 'LH', name: 'Lufthansa' });
+    expect(triggerRebuild).toHaveBeenCalledWith([{ type: 'airline', slug: 'LH' }]);
+  });
+
+  test('creating a DRAFT airline does NOT trigger a rebuild', async () => {
+    supa.__push('airlines', { maybeSingle: { data: { id: '1', iata_code: 'LH', name: 'Lufthansa', status: 'draft' }, error: null } });
+    const app = buildApp();
+    await request(app).post('/admin/airlines').set(OWNER_AUTH).send({ iata_code: 'LH', name: 'Lufthansa', status: 'draft' });
+    expect(triggerRebuild).not.toHaveBeenCalled();
+  });
+
+  test('updating a published airline triggers a rebuild', async () => {
+    supa.__push('airlines', { maybeSingle: { data: { id: '1', iata_code: 'BA', name: 'British Airways', status: 'published' }, error: null } });
+    const app = buildApp();
+    await request(app).put('/admin/airlines/1').set(OWNER_AUTH).send({ name: 'British Airways' });
+    expect(triggerRebuild).toHaveBeenCalledWith([{ type: 'airline', slug: 'BA' }]);
+  });
+
+  test('deleting a published airline triggers a rebuild for the removed page', async () => {
+    // First from() = pre-delete lookup (iata_code/status); second = the delete.
+    supa.__push('airlines', { maybeSingle: { data: { iata_code: 'EI', status: 'published' }, error: null } });
+    supa.__push('airlines', { result: { data: null, error: null } });
+    const app = buildApp();
+    await request(app).delete('/admin/airlines/1').set(OWNER_AUTH);
+    expect(triggerRebuild).toHaveBeenCalledWith([{ type: 'airline', slug: 'EI' }]);
   });
 });

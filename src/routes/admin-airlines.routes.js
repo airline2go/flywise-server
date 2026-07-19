@@ -11,6 +11,7 @@
 const supa = require('../clients/supabase');
 const rateLimit = require('../middleware/rateLimit');
 const { requireAdmin } = require('../middleware/auth');
+const triggerRebuild = require('../utils/triggerRebuild');
 
 module.exports = (app) => {
 
@@ -54,6 +55,11 @@ app.post('/admin/airlines', rateLimit('admin', 120, 60000), requireAdmin, async 
       hub_iata: hub_iata ? String(hub_iata).toUpperCase() : null,
     }).select().maybeSingle();
     if (error) throw new Error(error.message);
+    // [ON-DEMAND-REVALIDATE] Refresh the airline page immediately (all 7
+    // languages) instead of waiting for the daily window — only when it's
+    // actually public. A single entity → 7 paths; not wired into route
+    // publishes, so this adds no per-route fan-out.
+    if (data && data.status === 'published') triggerRebuild([{ type: 'airline', slug: data.iata_code }]);
     res.json({ ok: true, airline: data });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -73,6 +79,7 @@ app.put('/admin/airlines/:id', rateLimit('admin', 120, 60000), requireAdmin, asy
     const { data, error } = await supa.from('airlines').update(update).eq('id', req.params.id).select().maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return res.status(404).json({ ok: false, error: 'Airline nicht gefunden' });
+    if (data.status === 'published') triggerRebuild([{ type: 'airline', slug: data.iata_code }]);
     res.json({ ok: true, airline: data });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -82,8 +89,13 @@ app.put('/admin/airlines/:id', rateLimit('admin', 120, 60000), requireAdmin, asy
 app.delete('/admin/airlines/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    // Fetched before the delete — the iata_code is needed to tell the
+    // frontend which cached airline page to drop, and the row is gone
+    // right after.
+    const { data: existing } = await supa.from('airlines').select('iata_code, status').eq('id', req.params.id).maybeSingle();
     const { error } = await supa.from('airlines').delete().eq('id', req.params.id);
     if (error) throw new Error(error.message);
+    if (existing && existing.status === 'published') triggerRebuild([{ type: 'airline', slug: existing.iata_code }]);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });

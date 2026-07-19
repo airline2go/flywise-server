@@ -13,6 +13,7 @@ const log = require('../utils/log');
 const supa = require('../clients/supabase');
 const rateLimit = require('../middleware/rateLimit');
 const { requireAdmin } = require('../middleware/auth');
+const triggerRebuild = require('../utils/triggerRebuild');
 
 const LANGUAGES = ['en', 'de', 'ar', 'es', 'fr', 'it', 'nl'];
 
@@ -307,6 +308,11 @@ app.post('/admin/airports', rateLimit('admin', 120, 60000), requireAdmin, async 
       traveler_tips: traveler_tips ? String(traveler_tips).trim() : null,
     }).select().maybeSingle();
     if (error) throw new Error(error.message);
+    // [ON-DEMAND-REVALIDATE] Refresh this airport page immediately (all 7
+    // languages) when it's public. One entity → 7 paths; deliberately not
+    // fired from route publishes, so high-frequency route edits don't fan
+    // out to airport pages (those pick up new routes via the daily window).
+    if (data && data.status === 'published') triggerRebuild([{ type: 'airport', slug: data.iata_code }]);
     res.json({ ok: true, airport: data });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -332,6 +338,7 @@ app.put('/admin/airports/:id', rateLimit('admin', 120, 60000), requireAdmin, asy
     const { data, error } = await supa.from('airports').update(update).eq('id', req.params.id).select().maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return res.status(404).json({ ok: false, error: 'Flughafen nicht gefunden' });
+    if (data.status === 'published') triggerRebuild([{ type: 'airport', slug: data.iata_code }]);
     res.json({ ok: true, airport: data });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -341,8 +348,12 @@ app.put('/admin/airports/:id', rateLimit('admin', 120, 60000), requireAdmin, asy
 app.delete('/admin/airports/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    // Fetched before the delete — the iata_code identifies which cached
+    // airport page to drop, and the row is gone right after.
+    const { data: existing } = await supa.from('airports').select('iata_code, status').eq('id', req.params.id).maybeSingle();
     const { error } = await supa.from('airports').delete().eq('id', req.params.id);
     if (error) throw new Error(error.message);
+    if (existing && existing.status === 'published') triggerRebuild([{ type: 'airport', slug: existing.iata_code }]);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -371,6 +382,10 @@ app.put('/admin/airports/:id/translations', rateLimit('admin', 120, 60000), requ
     const { error } = await supa.from('airport_translations').upsert(rows, { onConflict: 'airport_id,language' });
     if (error) throw new Error(error.message);
     log('info', 'airport_translations_updated', { airport_id: req.params.id, languages: entries.map(([l]) => l) });
+    // A changed translated name changes the rendered page — refresh it now.
+    // The translations table is keyed by airport_id, so resolve the iata_code.
+    const { data: ap } = await supa.from('airports').select('iata_code, status').eq('id', req.params.id).maybeSingle();
+    if (ap && ap.status === 'published') triggerRebuild([{ type: 'airport', slug: ap.iata_code }]);
     res.json({ ok: true, updated: entries.length });
   } catch (err) {
     res.status(err.status || 500).json({ ok: false, error: err.message });

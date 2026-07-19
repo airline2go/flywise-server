@@ -33,10 +33,12 @@ jest.mock('../src/clients/supabase', () => {
 });
 
 jest.mock('../src/utils/log', () => jest.fn());
+jest.mock('../src/utils/triggerRebuild');
 
 const express = require('express');
 const request = require('supertest');
 const supa = require('../src/clients/supabase');
+const triggerRebuild = require('../src/utils/triggerRebuild');
 
 function buildApp() {
   const app = express();
@@ -50,6 +52,7 @@ const OWNER_AUTH = { Authorization: 'Bearer test-admin-token' };
 beforeEach(() => {
   supa.__reset();
   supa.from.mockClear();
+  triggerRebuild.mockClear();
 });
 
 function staffAuthHeaders() {
@@ -221,5 +224,46 @@ describe('DELETE /admin/airports/:id', () => {
     const app = buildApp();
     const res = await request(app).delete('/admin/airports/airport-1').set(OWNER_AUTH);
     expect(res.status).toBe(200);
+  });
+});
+
+describe('[ON-DEMAND-REVALIDATE] airport edits refresh the airport page', () => {
+  test('creating a published airport triggers a rebuild for that airport', async () => {
+    supa.__push('airports', { maybeSingle: { data: null, error: null } }); // dup check → none
+    supa.__push('airports', { maybeSingle: { data: { id: '1', iata_code: 'MUC', status: 'published' }, error: null } });
+    const app = buildApp();
+    await request(app).post('/admin/airports').set(OWNER_AUTH).send({ iata_code: 'MUC', airport_name: 'Munich' });
+    expect(triggerRebuild).toHaveBeenCalledWith([{ type: 'airport', slug: 'MUC' }]);
+  });
+
+  test('creating a DRAFT airport does NOT trigger a rebuild', async () => {
+    supa.__push('airports', { maybeSingle: { data: null, error: null } });
+    supa.__push('airports', { maybeSingle: { data: { id: '1', iata_code: 'MUC', status: 'draft' }, error: null } });
+    const app = buildApp();
+    await request(app).post('/admin/airports').set(OWNER_AUTH).send({ iata_code: 'MUC', airport_name: 'Munich', status: 'draft' });
+    expect(triggerRebuild).not.toHaveBeenCalled();
+  });
+
+  test('updating a published airport triggers a rebuild', async () => {
+    supa.__push('airports', { maybeSingle: { data: { id: '1', iata_code: 'BER', status: 'published' }, error: null } });
+    const app = buildApp();
+    await request(app).put('/admin/airports/1').set(OWNER_AUTH).send({ airport_name: 'Berlin Brandenburg' });
+    expect(triggerRebuild).toHaveBeenCalledWith([{ type: 'airport', slug: 'BER' }]);
+  });
+
+  test('deleting a published airport triggers a rebuild for the removed page', async () => {
+    supa.__push('airports', { maybeSingle: { data: { iata_code: 'HAM', status: 'published' }, error: null } });
+    supa.__push('airports', { result: { data: null, error: null } });
+    const app = buildApp();
+    await request(app).delete('/admin/airports/1').set(OWNER_AUTH);
+    expect(triggerRebuild).toHaveBeenCalledWith([{ type: 'airport', slug: 'HAM' }]);
+  });
+
+  test('editing translations of a published airport triggers a rebuild', async () => {
+    supa.__push('airport_translations', { result: { data: null, error: null } }); // upsert
+    supa.__push('airports', { maybeSingle: { data: { iata_code: 'CGN', status: 'published' }, error: null } });
+    const app = buildApp();
+    await request(app).put('/admin/airports/1/translations').set(OWNER_AUTH).send({ translations: { en: 'Cologne Bonn' } });
+    expect(triggerRebuild).toHaveBeenCalledWith([{ type: 'airport', slug: 'CGN' }]);
   });
 });
