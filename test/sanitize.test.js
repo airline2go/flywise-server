@@ -6,9 +6,16 @@ describe('sanitizeValue', () => {
     expect(sanitizeValue(withControlChars, 0)).toBe('helloworld');
   });
 
-  test('truncates strings past 2000 chars', () => {
-    const long = 'a'.repeat(2500);
-    expect(sanitizeValue(long, 0).length).toBe(2000);
+  test('does NOT truncate realistic long-form content (e.g. a blog article)', () => {
+    // [LONG-CONTENT-FIX] regression guard: a ~10k-char article must survive
+    // intact — the old 2000 cap silently chopped published posts mid-word.
+    const article = 'w'.repeat(10000);
+    expect(sanitizeValue(article, 0).length).toBe(10000);
+  });
+
+  test('caps a single string at 100000 chars', () => {
+    const huge = 'a'.repeat(120000);
+    expect(sanitizeValue(huge, 0).length).toBe(100000);
   });
 
   test('truncates arrays past 100 items', () => {
