@@ -1671,9 +1671,13 @@ app.get('/admin/api-logs/stats', rateLimit('admin', 120, 60000), requireFullAdmi
 // published route pages, cities, and countries.
 // ═══════════════════════════════════════════════════════════════
 
-const { processRoutes, generateStatistics, processSingleRoute, fetchRoutePagesForUpdate } = require('../services/seoBatchProcessor');
+const { processRoutes, generateStatistics, processSingleRoute, fetchRoutePagesForUpdate, PRIMARY_LANGUAGE } = require('../services/seoBatchProcessor');
 
-// Get statistics on pages ready for SEO generation
+// Live snapshot of the most recent (or in-flight) batch run — polled by the
+// admin UI via GET /admin/seo/batch-status. Only one batch runs at a time.
+let seoBatchState = { running: false, startedAt: null, finishedAt: null, progress: null, summary: null };
+
+// Readiness report: eligible vs. skipped (manual content / insufficient data).
 app.get('/admin/seo/statistics', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     const stats = await generateStatistics();
@@ -1683,53 +1687,51 @@ app.get('/admin/seo/statistics', rateLimit('admin', 120, 60000), requireAdmin, a
   }
 });
 
-// Generate SEO content for a single route
+// Generate (or preview) SEO content for a single route. The engine may skip the
+// route — a skip is a successful, expected outcome, not an error.
 app.post('/admin/seo/route/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
-    const { language = 'en' } = req.body;
-    const content = await processSingleRoute(req.params.id, language);
-    res.json({ ok: true, content });
+    const language = req.body?.language || PRIMARY_LANGUAGE;
+    const dryRun = req.body?.dry_run === true;
+    const result = await processSingleRoute(req.params.id, language, { dryRun });
+    res.json({ ok: true, ...result });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-// Batch generate SEO content for all routes (non-blocking, with progress)
+// Batch generate for all eligible routes (non-blocking). Refuses to start a
+// second run while one is in flight.
 app.post('/admin/seo/batch-generate', rateLimit('admin', 120, 60000), requireFullAdmin, async (req, res) => {
   try {
-    // Start the batch process in the background
-    let progress = { processed: 0, total: 0, updated: 0, failed: 0, current: '' };
+    if (seoBatchState.running) {
+      return res.status(409).json({ ok: false, error: 'A batch run is already in progress', progress: seoBatchState.progress });
+    }
+    const dryRun = req.body?.dry_run === true;
+    seoBatchState = { running: true, startedAt: new Date().toISOString(), finishedAt: null, progress: null, summary: null };
 
-    processRoutes((update) => {
-      progress = update;
-    }).then((result) => {
-      log('info', 'seo_batch_generation_completed', result);
-    }).catch((err) => {
-      log('error', 'seo_batch_generation_error', { error: err.message });
-    });
+    processRoutes((update) => { seoBatchState.progress = update; }, { dryRun })
+      .then((summary) => {
+        seoBatchState.running = false;
+        seoBatchState.finishedAt = new Date().toISOString();
+        seoBatchState.summary = summary;
+        log('info', 'seo_batch_generation_completed', summary);
+      })
+      .catch((err) => {
+        seoBatchState.running = false;
+        seoBatchState.finishedAt = new Date().toISOString();
+        seoBatchState.summary = { error: err.message };
+        log('error', 'seo_batch_generation_error', { error: err.message });
+      });
 
-    // Return immediately with initial response
-    res.json({
-      ok: true,
-      message: 'SEO content generation started',
-      status: 'processing'
-    });
+    res.json({ ok: true, message: 'SEO content generation started', status: 'processing', dryRun });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-// Get current batch generation progress
+// Progress / result of the current-or-last batch run.
 app.get('/admin/seo/batch-status', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
-  try {
-    const routes = await fetchRoutePagesForUpdate();
-    res.json({
-      ok: true,
-      total_routes: routes.length,
-      timestamp: new Date().toISOString()
-    });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
+  res.json({ ok: true, ...seoBatchState });
 });
 };
