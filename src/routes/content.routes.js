@@ -9,6 +9,7 @@ const supa = require('../clients/supabase');
 const rateLimit = require('../middleware/rateLimit');
 const { buildRouteIntelligenceSnapshot } = require('../services/routeIntelligence');
 const { effectiveRouteSeo } = require('../services/seo/effective');
+const { getAdminConfig } = require('../services/adminConfig');
 
 // [RATE-LIMIT-FIX] None of these routes had any rate limiting at all —
 // public, unauthenticated, and an unmetered surface for scraping/DB-
@@ -575,9 +576,23 @@ app.get('/route-pages/:slug', rateLimit('content', 2500, 60000), async (req, res
       log('warn', 'route_airlines_attach_failed', { slug: req.params.slug, error: e.message });
     }
 
+    // [SEO-META-PRICE] Attach the cached "from" price so the frontend can put
+    // "ab X €" in the META DESCRIPTION (never the title — a price-driven title
+    // would churn between crawls). This is a CACHE-ONLY read of the same
+    // route_price_<ORIGIN>_<DEST> entry the price warmer/on-demand endpoint
+    // maintains in admin_config — it never triggers a live Duffel call during a
+    // page render. A route never priced yet yields null and the meta simply
+    // omits the price clause.
+    let cached_price = null, cached_currency = null;
+    try {
+      const priceKey = 'route_price_' + String(data.origin_iata || '').toUpperCase() + '_' + String(data.destination_iata || '').toUpperCase();
+      const pc = await getAdminConfig(priceKey, null);
+      if (pc && pc.price != null) { cached_price = pc.price; cached_currency = pc.currency || 'EUR'; }
+    } catch (e) { /* best-effort — the meta just omits the price */ }
+
     // [SEO] Resolve effective SEO content (manual override wins over generated)
     // so the SSG build reads a single `seo` object without caring about source.
-    res.json({ ok: true, route: Object.assign({}, data, { airlines, intelligence: buildRouteIntelligenceSnapshot(data), seo: effectiveRouteSeo(data) }) });
+    res.json({ ok: true, route: Object.assign({}, data, { airlines, cached_price, cached_currency, intelligence: buildRouteIntelligenceSnapshot(data), seo: effectiveRouteSeo(data) }) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
