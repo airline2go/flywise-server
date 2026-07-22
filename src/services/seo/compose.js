@@ -106,17 +106,30 @@ function popularityBucket(route) {
   return 'niche';
 }
 
-// ─── Context builder ────────────────────────────────────────────
-// Normalizes a route row into a rich, bucketed context. `facts` lists which
-// real data dimensions are present — blocks and angle selection key off this.
-function buildContext(route) {
+// ═══════════════════════════════════════════════════════════════
+// Context = the union of every real data dimension known about a route.
+//
+// It is built by an ENRICHER PIPELINE: an ordered list of small functions,
+// each of which reads the route row (and optional joined `sources`) and adds
+// the fields + `facts` flags it is responsible for. This is the extensibility
+// backbone — a new data source (historical prices, airport guide, visa rules,
+// baggage, transport, tourism, seasonality, demand…) is added as ONE enricher
+// plus the block(s) that consume its facts. No existing code is rewritten.
+//
+// Contract for an enricher: (ctx, route, sources) => void
+//   • only set a field when the data is REAL and present (never guess);
+//   • call ctx.facts.add('<dimension>') for each dimension it makes available,
+//     so blocks/angles can declare their data requirements against it.
+// ═══════════════════════════════════════════════════════════════
+
+// Core enricher: everything derivable from the route_pages row itself.
+function coreEnricher(ctx, route) {
   const km = route.distance_km ? Math.round(route.distance_km) : null;
   const durMin = route.avg_duration_min || route.min_duration_min ||
     (km ? durationFromDistance(km) : null);
   const durationIsReal = !!(route.avg_duration_min || route.min_duration_min);
 
-  const ctx = {
-    slug: route.slug || `${route.origin_iata}-${route.destination_iata}`,
+  Object.assign(ctx, {
     o: route.origin_city, d: route.destination_city,
     oIata: route.origin_iata, dIata: route.destination_iata,
     oCountry: route.origin_country, dCountry: route.destination_country,
@@ -135,15 +148,13 @@ function buildContext(route) {
     routeScore: route.route_score != null ? Number(route.route_score) : null,
     scoreConfidence: route.route_score_confidence || null,
     stopDistribution: route.stop_distribution || null,
-  };
+  });
 
   ctx.priceB = priceBucket(ctx.priceMin, ctx.haul);
   ctx.airlineB = airlineBucket(ctx.airlineCount);
   ctx.directB = directnessBucket(route);
   ctx.popB = popularityBucket(route);
 
-  // The set of REAL data dimensions available on this route.
-  ctx.facts = new Set();
   if (ctx.km) ctx.facts.add('distance');
   if (ctx.durationIsReal) ctx.facts.add('duration');
   if (ctx.priceB) ctx.facts.add('price');
@@ -152,11 +163,35 @@ function buildContext(route) {
   if (ctx.directB) ctx.facts.add('directness');
   if (ctx.popB) ctx.facts.add('popularity');
   if (ctx.itineraryCount) ctx.facts.add('itineraries');
+}
+
+// The pipeline. Core is always first; future enrichers append here (or via
+// registerEnricher) and run in order. Kept module-level so the set of data
+// sources is one obvious list.
+const ENRICHERS = [coreEnricher];
+
+// Register an additional enricher (e.g. from a future data-source module).
+// Idempotent-friendly: callers should register once at require time.
+function registerEnricher(fn) {
+  if (typeof fn === 'function' && !ENRICHERS.includes(fn)) ENRICHERS.push(fn);
+}
+
+// Build the context by running every enricher. `sources` carries optional
+// joined data the batch layer fetched (price history rows, airport guides,
+// alternative-airport lists, …) — enrichers that need none simply ignore it.
+function buildContext(route, sources = {}) {
+  const ctx = {
+    slug: route.slug || `${route.origin_iata}-${route.destination_iata}`,
+    facts: new Set(),
+    sources,
+  };
+  for (const enrich of ENRICHERS) enrich(ctx, route, sources);
   return ctx;
 }
 
 module.exports = {
   makeRng, pick, shuffle, weightedPick,
-  buildContext, durationFromDistance, fmtHM,
+  buildContext, registerEnricher, ENRICHERS, coreEnricher,
+  durationFromDistance, fmtHM,
   priceBucket, airlineBucket, directnessBucket, popularityBucket,
 };
