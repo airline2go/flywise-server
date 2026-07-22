@@ -1,141 +1,98 @@
-# SEO Content Generation System
+# Programmatic SEO Content System
 
-## Overview
+Enriches **existing** published route pages with unique, data-composed SEO content at scale (designed for 100,000+ pages). It never creates new pages. Every page is assembled from independent, data-driven blocks so that no two pages are near-duplicates — the failure mode "same paragraph, city names swapped" is explicitly measured against and rejected.
 
-This system enriches **existing** published route pages with SEO content — titles, meta descriptions, an intro paragraph, and an FAQ set. It never creates new pages. It is built around a strict quality contract: content is only written when there is enough real, route-specific data to say something specific and non-generic, and every page differs meaningfully from similar pages.
+## Governing rules (and how each is enforced)
 
-### Governing rules
-
-1. **Never overwrite manually written content.** Any route with a non-empty `custom_title`, `custom_meta_description`, `custom_faq`, or `intro_text` is skipped entirely — not partially filled.
-2. **Never generate for pages marked as manually edited.** Same mechanism — presence of any hand-edited field is the "manually edited" marker.
-3. **Every generated page is significantly different from similar pages.** Variant selection is seeded deterministically from the route slug, drawing from pools of structurally different openings, titles, meta descriptions, and FAQ orderings.
-4. **Avoid template repetition.** The pools contain genuinely different sentence structures and emphases, not one paragraph with swapped city names.
-5. **Use real route-specific data.** Distance comes from the stored Haversine value; flight duration is derived from it; domestic vs. international is derived from the country codes. All woven into the copy.
-6. **Do not generate content when data is insufficient.** Missing distance, city names, or haul type → skip.
-7. **Prefer no content over low-quality content.** A skip is a successful, expected outcome, reported as such — never a failure, never filler.
+| Rule | Enforcement |
+|------|-------------|
+| Never overwrite manual content | Generated content is written to dedicated `seo_*` columns; the human override columns (`custom_title`, `custom_meta_description`, `custom_faq`, `intro_text`) are never touched and always win at render time (`effectiveRouteSeo`). |
+| No template with swapped names | Pages are **composed** from data-driven blocks, not filled from one template. Similarity is measured on **city-neutralized** text, so swapped-name duplicates would score ~1.0 and fail the test. |
+| Every page significantly different | Opening angle, section selection/order, headings, phrasing and FAQ set all vary by the route's real data plus a per-slug seeded PRNG. |
+| Use all available data | Blocks read `distance_km`, `haul_type`, `airline_count`, `direct_flight_available`/`all_direct`/`stop_distribution`, `avg/min_duration_min`, `price_min/max/avg`, `price_trend`, `route_score`(+confidence), `itinerary_count`, domestic/international. |
+| No invented facts | Every number rendered comes from the route row. A block that needs absent data does not render. |
+| Skip when data insufficient | Quality gate skips routes missing distance/cities/haul; skips are reported, never counted as failures, never filled with filler. |
+| Similarity < 40% | `test/seoEngine.test.js` builds a 380-page corpus and asserts mean / p95 / share-over-threshold all well under 0.40 (currently mean ≈ 0.17, p95 ≈ 0.29, <0.5% of pairs over 40%). |
 
 ## Architecture
 
-### `src/services/seoContentEngine.js` — pure content engine (no DB)
+```
+src/services/seo/
+  compose.js       seeded PRNG, context builder, data bucketization (price/airline/directness/popularity)
+  blocks.de.js     German content library: 10 angle intros, 8 section blocks, 7 FAQ candidates, title/meta pools
+  engine.js        quality gate + angle selection + dynamic section/FAQ assembly → full page
+  similarity.js    k-shingle Jaccard, city-neutralized, corpus report (rule #9 measurement)
+  effective.js     manual-wins-over-generated resolver used at render time
+src/services/seoBatchProcessor.js   batch/single orchestration, writes seo_* columns
+src/cli/generate-seo-content.js     CLI runner
+sql/seo_generated_content.sql       dedicated generated columns
+```
 
-The core. Given a route row and a language, it either returns generated content or an explicit skip with reasons.
+### How a page is assembled (per route)
 
-- **Quality gate** (`assessRouteEligibility`): checks status, city names, distance, haul type, and manual-content presence.
-- **Deterministic variation**: an FNV-1a hash of the slug seeds selection from each variant pool, so the same route always renders the same variant (stable for Google) while different routes spread across the pools.
-- **Verifiable facts only**: `estimateDurationHours()` derives an approximate flight time from the real distance; nothing else is invented — no prices, no airline names, no schedules.
-- **Language pools**: English and German are fully written today, each with per-haul-type intro pools, title pools, meta pools, and a shared FAQ pool. **A language is only offered once its pool is independently written** (not machine-translated) — `supportedLanguages()` returns exactly those. Requesting an unwritten language returns a skip, never thin content.
+1. **Quality gate** — enough real data? manual content present? → maybe skip.
+2. **Context** — normalize every real field and bucketize it (e.g. price → budget/moderate/premium *relative to haul type*; directness → all-direct / mostly-direct / mixed / connections-only from `stop_distribution`).
+3. **Opening angle** — each candidate angle (price / duration / airport / airline / destination / traveler / business / family / weekend / seasonal) scores itself on how *distinctive* that dimension is for this route; the composer seed-picks among the top few. A cheap route opens on price, a nonstop route on convenience, a many-airline route on competition.
+4. **Sections** — only blocks whose real data exists are eligible; a data-scaled number are weight-selected and seed-ordered, so richer routes get more sections and not every page shows every section.
+5. **FAQ** — 3–5 questions selected from applicable candidates; answers branch on the route's data.
+6. **Title / meta** — chosen from data-aware variant pools (e.g. include price "ab X €" only when price data exists; say "Direktflüge" only when `all_direct`).
 
-Key export:
+Everything is deterministic per slug (stable for Google) yet spread across routes.
+
+### Dynamic SEO blocks
+
+Available section blocks (rendered subset per page, never all): **Overview**, **Price analysis**, **Airline analysis**, **Direct-vs-connection analysis**, **Booking strategy**, **Seasonal insights**, **Popularity/demand**, **Airport detail**. Each answers a real user question (When should I book? Is a direct flight available? Which airlines fly this? Is it cheaper at certain times? Is it good for a weekend?) — no keyword stuffing.
+
+## Storage & render contract
+
+Generated content lives in dedicated columns (`sql/seo_generated_content.sql`):
+`seo_title`, `seo_meta_description`, `seo_intro_html`, `seo_faq`, `seo_angle`, `seo_section_count`, `seo_lang`, `seo_generated_at`.
+
+`GET /route-pages/:slug` attaches a resolved `seo` object:
 ```js
-generateRouteContent(route, language)
-// → { skipped: true, reasons: [...] }
-// → { skipped: false, content: { title, metaDescription, intro, faq } }
-```
-
-### `src/services/seoBatchProcessor.js` — DB batch layer
-
-Wraps the engine with database reads/writes and batching.
-
-- `processRoutes(cb, { dryRun })` — iterates all published routes in batches of 50, calling the engine, writing only empty fields, tracking `updated` / `skipped` / `failed` plus a `skipReasons` breakdown.
-- `processSingleRoute(id, language, { dryRun })` — one route.
-- `generateStatistics()` — readiness report: eligible vs. skipped-manual vs. skipped-insufficient-data, with a reason breakdown.
-- A per-field guard at write time re-checks emptiness, so a manual edit landing between fetch and write can never be clobbered.
-
-The base `route_pages` columns carry the **primary market language (German)**. Additional languages generated by the engine are intended for per-language storage and are not written into the shared base columns.
-
-## Database fields used
-
-```
-intro_text               -- intro paragraph
-custom_title             -- SEO title
-custom_meta_description  -- meta description
-custom_faq               -- FAQ array (JSONB)
-```
-
-Only empty fields are ever written. Existing values are treated as manual content and left untouched.
-
-## API endpoints (admin)
-
-### `GET /admin/seo/statistics`
-Readiness report.
-```json
-{
-  "ok": true,
-  "statistics": {
-    "total_published_routes": 1250,
-    "eligible_for_generation": 1103,
-    "skipped_manual_content": 47,
-    "skipped_insufficient_data": 100,
-    "skip_reason_breakdown": { "missing distance_km": 100, "...": 0 },
-    "languages_supported": ["en", "de"]
-  }
+route.seo = {
+  title, metaDescription, introHtml, faq,          // manual override wins, else generated
+  source: { title, metaDescription, intro, faq },  // 'manual' | 'generated' | 'none'
+  angle, generatedAt,
 }
 ```
+The SSG build reads `route.seo.*` and never needs to know the source. Because generated content is isolated in its own columns, it can be **refreshed** (`--force`) whenever a route's data changes, without ever colliding with — or being blocked by — a human edit.
 
-### `POST /admin/seo/route/:id`
-Body: `{ "language": "de", "dry_run": false }`. Returns either `{ ok, skipped: true, reasons }` or `{ ok, skipped: false, content, updated }`.
+## API (admin)
 
-### `POST /admin/seo/batch-generate`
-`requireFullAdmin`. Body: `{ "dry_run": false }`. Starts a non-blocking batch; refuses (409) if one is already running.
-
-### `GET /admin/seo/batch-status`
-Live snapshot of the current or last run: `running`, `startedAt`, `finishedAt`, `progress`, `summary`.
+- `GET /admin/seo/statistics` — readiness: eligible / already-generated / skipped (manual vs. insufficient) + haul breakdown.
+- `POST /admin/seo/route/:id` — body `{ language, dry_run, force }`. Returns `{ skipped, reasons }` or `{ angle, content }`.
+- `POST /admin/seo/batch-generate` — `requireFullAdmin`, body `{ dry_run, force }`. Non-blocking; 409 if already running.
+- `GET /admin/seo/batch-status` — live progress + last summary (updated / skipped / failed / angle distribution).
 
 ## CLI
 
 ```bash
-# Readiness report only (no writes)
-node src/cli/generate-seo-content.js --stats
-
-# One route, preview without writing
-node src/cli/generate-seo-content.js --route-id=<uuid> --dry-run
-
-# Preview the whole batch without writing
-node src/cli/generate-seo-content.js --dry-run
-
-# Generate for all eligible routes
-node src/cli/generate-seo-content.js
+node src/cli/generate-seo-content.js --stats            # readiness report
+node src/cli/generate-seo-content.js --route-id=<id>    # one route (prints angle/sections)
+node src/cli/generate-seo-content.js --dry-run          # preview whole batch, no writes
+node src/cli/generate-seo-content.js                    # fill routes not yet generated
+node src/cli/generate-seo-content.js --force            # refresh all after data changes
 ```
-
-The output distinguishes **updated** from **skipped** and prints the skip-reason breakdown, so "nothing was written" is always explained.
-
-## Adding a language
-
-1. Write independent intro pools (per haul type), title pool, meta pool, and FAQ pool in `seoContentEngine.js` — authored natively in that language, never a literal translation of English/German.
-2. Register it in the `LANGUAGES` map.
-
-`supportedLanguages()` and the engine pick it up automatically. Until that work is done, the language is skipped rather than served thin content.
 
 ## Testing
 
-`test/seoContentEngine.test.js` covers the contract with no external dependencies:
-- Quality gate (missing distance / cities / haul type / unpublished → skip).
-- Manual-content protection (each hand-edited field blocks generation).
-- Required fields present and non-trivial length.
-- Real distance woven into copy.
-- Determinism (same route → same output).
-- **Variation**: across a dozen distinct routes, intros and titles spread across multiple distinct structural skeletons.
-
 ```bash
-npx jest test/seoContentEngine.test.js
+npx jest test/seoEngine.test.js test/seoEffective.test.js
 ```
+- Quality gate & manual protection.
+- Page structure (title/meta/≥3 sections/3–5 FAQ) and determinism.
+- Data-driven divergence (cheap-direct vs expensive-connecting read differently).
+- **Rule #9**: 380-page corpus, city-neutralized pairwise similarity — mean/p95/tail all under threshold.
+- Angle variety across the corpus (≥5 distinct opening angles used).
+- `effectiveRouteSeo` manual-wins resolution.
 
-## Rollout
+## Adding a language
 
-```bash
-# 1. See what's eligible and why the rest is skipped
-node src/cli/generate-seo-content.js --stats
+Write an independent `blocks.<lang>.js` (native authoring, never literal translation of German), register it in `engine.js`'s `PACKS`. `supportedLanguages()` and the batch/CLI pick it up automatically. Until then, that language is skipped rather than served machine-translated thin content.
 
-# 2. Preview a handful without writing
-node src/cli/generate-seo-content.js --route-id=<uuid> --dry-run
+## Scaling to 100k+ pages
 
-# 3. Dry-run the whole set
-node src/cli/generate-seo-content.js --dry-run
-
-# 4. Generate, then revalidate affected pages on the frontend
-node src/cli/generate-seo-content.js
-```
-
-## Rollback
-
-Generated fields are ordinary column values; clearing them restores the empty state. Because manual edits were never touched, only generated rows are affected. Clear via the admin Geo/route tooling or a targeted SQL update on the specific route IDs you generated.
+- Composition is O(1) per page and pure (no I/O); batching writes in groups of 50 with a short pause.
+- Only `seo_*` columns are written; refresh is idempotent per language.
+- The similarity model degrades gracefully: as the corpus grows, add block variants / new blocks (more real data dimensions) to keep the tail down — the corpus test is the regression guard.

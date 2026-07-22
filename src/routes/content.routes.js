@@ -8,6 +8,7 @@ const log = require('../utils/log');
 const supa = require('../clients/supabase');
 const rateLimit = require('../middleware/rateLimit');
 const { buildRouteIntelligenceSnapshot } = require('../services/routeIntelligence');
+const { effectiveRouteSeo } = require('../services/seo/effective');
 
 // [RATE-LIMIT-FIX] None of these routes had any rate limiting at all —
 // public, unauthenticated, and an unmetered surface for scraping/DB-
@@ -574,7 +575,9 @@ app.get('/route-pages/:slug', rateLimit('content', 2500, 60000), async (req, res
       log('warn', 'route_airlines_attach_failed', { slug: req.params.slug, error: e.message });
     }
 
-    res.json({ ok: true, route: Object.assign({}, data, { airlines, intelligence: buildRouteIntelligenceSnapshot(data) }) });
+    // [SEO] Resolve effective SEO content (manual override wins over generated)
+    // so the SSG build reads a single `seo` object without caring about source.
+    res.json({ ok: true, route: Object.assign({}, data, { airlines, intelligence: buildRouteIntelligenceSnapshot(data), seo: effectiveRouteSeo(data) }) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
