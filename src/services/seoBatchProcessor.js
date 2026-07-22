@@ -49,6 +49,7 @@ async function writeGenerated(route, gen, language, { dryRun = false, force = fa
     seo_faq: gen.content.faq,
     seo_angle: gen.angle,
     seo_section_count: gen.content.sections.length,
+    seo_data_coverage: gen.dataCoverage || null,
     seo_lang: language,
     seo_generated_at: new Date().toISOString(),
   };

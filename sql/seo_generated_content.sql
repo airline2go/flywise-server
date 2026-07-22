@@ -24,6 +24,7 @@ alter table route_pages add column if not exists seo_intro_html text;         --
 alter table route_pages add column if not exists seo_faq jsonb;               -- [{question, answer}]
 alter table route_pages add column if not exists seo_angle text;             -- opening angle used (analytics/debug)
 alter table route_pages add column if not exists seo_section_count int;      -- number of assembled sections
+alter table route_pages add column if not exists seo_data_coverage jsonb;    -- real data dimensions that drove the page (transparency/analytics)
 alter table route_pages add column if not exists seo_lang text;              -- language the content was generated in
 alter table route_pages add column if not exists seo_generated_at timestamptz;
 
