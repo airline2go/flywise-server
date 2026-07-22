@@ -1693,7 +1693,10 @@ app.post('/admin/seo/route/:id', rateLimit('admin', 120, 60000), requireAdmin, a
   try {
     const language = req.body?.language || PRIMARY_LANGUAGE;
     const dryRun = req.body?.dry_run === true;
-    const result = await processSingleRoute(req.params.id, language, { dryRun });
+    // Single-route generation defaults to force:true (an admin asking for one
+    // route wants it (re)generated now), overridable via body.force === false.
+    const force = req.body?.force !== false;
+    const result = await processSingleRoute(req.params.id, language, { dryRun, force });
     res.json({ ok: true, ...result });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -1708,9 +1711,12 @@ app.post('/admin/seo/batch-generate', rateLimit('admin', 120, 60000), requireFul
       return res.status(409).json({ ok: false, error: 'A batch run is already in progress', progress: seoBatchState.progress });
     }
     const dryRun = req.body?.dry_run === true;
+    // force:true refreshes existing generated content (e.g. after route data
+    // changed); default only fills routes not yet generated.
+    const force = req.body?.force === true;
     seoBatchState = { running: true, startedAt: new Date().toISOString(), finishedAt: null, progress: null, summary: null };
 
-    processRoutes((update) => { seoBatchState.progress = update; }, { dryRun })
+    processRoutes((update) => { seoBatchState.progress = update; }, { dryRun, force })
       .then((summary) => {
         seoBatchState.running = false;
         seoBatchState.finishedAt = new Date().toISOString();
@@ -1724,7 +1730,7 @@ app.post('/admin/seo/batch-generate', rateLimit('admin', 120, 60000), requireFul
         log('error', 'seo_batch_generation_error', { error: err.message });
       });
 
-    res.json({ ok: true, message: 'SEO content generation started', status: 'processing', dryRun });
+    res.json({ ok: true, message: 'SEO content generation started', status: 'processing', dryRun, force });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
