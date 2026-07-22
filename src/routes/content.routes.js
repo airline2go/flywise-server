@@ -57,7 +57,7 @@ app.get('/blog-posts', rateLimit('content', 2500, 60000), async (req, res) => {
     }
 
     const { data, error } = await supa.from('blog_posts')
-      .select('slug,title,excerpt,cover_image_url,author,published_at')
+      .select('slug,title,excerpt,cover_image_url,author,published_at,updated_at')
       .eq('status', 'published')
       .order('published_at', { ascending: false })
       .limit(limit);
@@ -189,7 +189,7 @@ app.get('/route-pages', rateLimit('content', 2500, 60000), async (req, res) => {
     // added so the SSG build's computeRelatedRoutes() can rank alternatives
     // instead of only pure same-city matching — see generate-pages.js.
     const { data, error } = await supa.from('route_pages')
-      .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_country,destination_country,distance_km,haul_type,airline_count,route_score')
+      .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_country,destination_country,distance_km,haul_type,airline_count,route_score,updated_at,insights_updated_at,created_at')
       .eq('status', 'published')
       .order('origin_city', { ascending: true });
     if (error) throw new Error(error.message);
@@ -206,7 +206,7 @@ app.get('/route-pages', rateLimit('content', 2500, 60000), async (req, res) => {
 app.get('/countries', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { data, error } = await supa.from('countries').select('code,name').eq('status', 'published').order('name', { ascending: true });
+    const { data, error } = await supa.from('countries').select('code,name,created_at').eq('status', 'published').order('name', { ascending: true });
     if (error) throw new Error(error.message);
     const countries = data || [];
 
@@ -280,7 +280,7 @@ app.get('/cities', rateLimit('content', 2500, 60000), async (req, res) => {
     // city does this IATA code belong to" client-side (a city's name
     // translations apply to every airport serving it, e.g. LHR/LGW/STN/LTN
     // all localize to the same "London" translations).
-    const { data, error } = await supa.from('cities').select('id,city_slug,name,airport_codes').eq('status', 'published').order('name', { ascending: true });
+    const { data, error } = await supa.from('cities').select('id,city_slug,name,airport_codes,created_at').eq('status', 'published').order('name', { ascending: true });
     if (error) throw new Error(error.message);
     const cities = data || [];
 
@@ -463,7 +463,7 @@ app.get('/airports/:code', rateLimit('content', 2500, 60000), async (req, res) =
 app.get('/airlines', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { data, error } = await supa.from('airlines').select('iata_code,name').eq('status', 'published').order('name', { ascending: true });
+    const { data, error } = await supa.from('airlines').select('iata_code,name,created_at').eq('status', 'published').order('name', { ascending: true });
     if (error) throw new Error(error.message);
     res.json({ ok: true, airlines: data || [] });
   } catch (err) {
