@@ -1,142 +1,118 @@
 #!/usr/bin/env node
 
 // ═══════════════════════════════════════════════════════════════════════════
-// CLI script to generate SEO content for all published route pages.
-// Usage: node src/cli/generate-seo-content.js [--dry-run] [--route-id=<id>]
+// CLI: generate quality-gated SEO content for published route pages.
+//
+// Usage:
+//   node src/cli/generate-seo-content.js --stats            # readiness report
+//   node src/cli/generate-seo-content.js --route-id=<id>    # one route
+//   node src/cli/generate-seo-content.js --dry-run          # preview, no writes
+//   node src/cli/generate-seo-content.js                    # generate all
+//
+// The engine SKIPS routes with manual content or insufficient data — skips are
+// reported, not treated as failures.
 // ═══════════════════════════════════════════════════════════════════════════
 
-const env = require('../config/env');
-const supa = require('../clients/supabase');
-const log = require('../utils/log');
+require('../config/env');
 const {
   processRoutes,
   generateStatistics,
   processSingleRoute,
-  SUPPORTED_LANGUAGES
+  PRIMARY_LANGUAGE,
 } = require('../services/seoBatchProcessor');
 
-// Parse command line arguments
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
-const routeId = args.find(arg => arg.startsWith('--route-id='))?.split('=')[1];
-const listOnly = args.includes('--list');
+const routeId = args.find((a) => a.startsWith('--route-id='))?.split('=')[1];
 const statsOnly = args.includes('--stats');
 
-async function main() {
-  try {
-    console.log('\n╔════════════════════════════════════════════════════════════╗');
-    console.log('║        SEO CONTENT GENERATION FOR FLIGHT ROUTES            ║');
-    console.log('╚════════════════════════════════════════════════════════════╝\n');
-
-    // Show statistics
-    if (statsOnly || !routeId) {
-      console.log('📊 Analyzing pages...\n');
-      const stats = await generateStatistics();
-      console.log('Statistics:');
-      console.log(`  Total published routes:    ${stats.total_routes}`);
-      console.log(`  With manual SEO content:   ${stats.with_manual_seo}`);
-      console.log(`  Ready for generation:      ${stats.without_manual_seo}`);
-      console.log(`  Supported languages:       ${stats.languages_supported}\n`);
-
-      if (statsOnly) {
-        console.log('✅ Statistics generated. Use --batch to generate content.\n');
-        process.exit(0);
-      }
-    }
-
-    // Single route processing
-    if (routeId) {
-      console.log(`🔄 Processing single route (ID: ${routeId})...\n`);
-      for (const lang of SUPPORTED_LANGUAGES) {
-        try {
-          console.log(`  Generating content for ${lang.toUpperCase()}...`);
-          await processSingleRoute(routeId, lang);
-          console.log(`  ✓ ${lang.toUpperCase()} completed`);
-        } catch (err) {
-          console.log(`  ✗ ${lang.toUpperCase()} failed: ${err.message}`);
-        }
-      }
-      console.log('\n✅ Single route processing completed.\n');
-      process.exit(0);
-    }
-
-    // Batch processing
-    if (dryRun) {
-      console.log('🏃 DRY RUN MODE - No changes will be saved\n');
-    } else {
-      console.log('🏃 BATCH PROCESSING MODE - Generating content for all routes\n');
-    }
-
-    console.log('Starting batch generation...\n');
-
-    let lastUpdate = Date.now();
-    const results = await new Promise((resolve, reject) => {
-      processRoutes((progress) => {
-        const now = Date.now();
-        // Update every 2 seconds to avoid log spam
-        if (now - lastUpdate > 2000 || progress.processed === progress.total) {
-          const pct = Math.round((progress.processed / progress.total) * 100);
-          const bar = '█'.repeat(Math.floor(pct / 2)) + '░'.repeat(50 - Math.floor(pct / 2));
-          console.log(`[${bar}] ${progress.processed}/${progress.total} (${pct}%)`);
-          console.log(`   Current: ${progress.current}`);
-          console.log(`   Updated: ${progress.updated} | Failed: ${progress.failed}\n`);
-          lastUpdate = now;
-        }
-      }).then(resolve).catch(reject);
-    });
-
-    console.log('\n╔════════════════════════════════════════════════════════════╗');
-    console.log('║                    GENERATION COMPLETE                     ║');
-    console.log('╚════════════════════════════════════════════════════════════╝\n');
-
-    console.log('Summary:');
-    console.log(`  Total processed:  ${results.processed}`);
-    console.log(`  Successfully updated: ${results.updated}`);
-    console.log(`  Failed:           ${results.failed}`);
-    console.log(`  Skipped (manual content): ${results.total - results.processed}\n`);
-
-    if (results.failed > 0) {
-      console.log('⚠️  Some routes failed to process. Check server logs for details.\n');
-    } else {
-      console.log('✅ All routes processed successfully!\n');
-    }
-
-    process.exit(results.failed > 0 ? 1 : 0);
-  } catch (err) {
-    console.error('\n❌ Fatal error:\n', err.message);
-    process.exit(1);
-  }
-}
-
-// Show help
 if (args.includes('--help')) {
   console.log(`
 Usage: node src/cli/generate-seo-content.js [options]
 
-Options:
-  --stats              Show statistics only, don't process
-  --route-id=<id>      Generate content for a specific route
-  --dry-run            Show what would be generated without saving
-  --list               List all routes ready for generation
-  --help               Show this help message
+  --stats            Show a readiness report and exit (no writes)
+  --route-id=<id>    Generate for a single route
+  --dry-run          Preview generated fields without writing to the database
+  --help             Show this help
 
 Examples:
-  # Show statistics
   node src/cli/generate-seo-content.js --stats
-
-  # Generate for specific route
-  node src/cli/generate-seo-content.js --route-id=abc123def456
-
-  # Batch generate for all routes
+  node src/cli/generate-seo-content.js --route-id=abc123 --dry-run
   node src/cli/generate-seo-content.js
-
-  # Check results without modifying database
-  node src/cli/generate-seo-content.js --dry-run
 `);
   process.exit(0);
 }
 
-main().catch(err => {
-  console.error('Unexpected error:', err);
-  process.exit(1);
-});
+function printStats(stats) {
+  console.log('Readiness report:');
+  console.log(`  Published routes:            ${stats.total_published_routes}`);
+  console.log(`  Eligible for generation:     ${stats.eligible_for_generation}`);
+  console.log(`  Skipped — manual content:    ${stats.skipped_manual_content}`);
+  console.log(`  Skipped — insufficient data: ${stats.skipped_insufficient_data}`);
+  console.log(`  Languages with variant pools: ${stats.languages_supported.join(', ')}`);
+  const reasons = Object.entries(stats.skip_reason_breakdown || {});
+  if (reasons.length) {
+    console.log('\n  Skip reasons:');
+    reasons.sort((a, b) => b[1] - a[1]).forEach(([r, n]) => console.log(`    ${n.toString().padStart(5)}  ${r}`));
+  }
+  console.log('');
+}
+
+async function main() {
+  console.log('\n=== SEO content generation (quality-gated) ===\n');
+
+  if (statsOnly) {
+    printStats(await generateStatistics());
+    console.log('Statistics only — no changes made.\n');
+    return 0;
+  }
+
+  if (routeId) {
+    console.log(`Processing single route ${routeId} (${PRIMARY_LANGUAGE})${dryRun ? ' [dry-run]' : ''}...\n`);
+    const res = await processSingleRoute(routeId, PRIMARY_LANGUAGE, { dryRun });
+    if (res.skipped) {
+      console.log(`SKIPPED — ${res.reasons.join('; ')}\n`);
+      return 0;
+    }
+    console.log('Generated content:');
+    console.log(`  Title: ${res.content.title}`);
+    console.log(`  Meta:  ${res.content.metaDescription}`);
+    console.log(`  Intro: ${res.content.intro.slice(0, 120)}...`);
+    console.log(`  FAQ:   ${res.content.faq.length} questions`);
+    console.log(dryRun ? '\n[dry-run] Nothing written.\n' : `\n${res.updated ? 'Written.' : 'No empty fields to fill.'}\n`);
+    return 0;
+  }
+
+  console.log(`Batch generation${dryRun ? ' [dry-run]' : ''} — primary language ${PRIMARY_LANGUAGE}\n`);
+  let last = 0;
+  const results = await processRoutes((p) => {
+    const now = Date.now();
+    if (now - last > 1500 || p.processed === p.total) {
+      const pct = p.total ? Math.round((p.processed / p.total) * 100) : 100;
+      const filled = Math.floor(pct / 2);
+      const bar = '#'.repeat(filled) + '-'.repeat(50 - filled);
+      console.log(`[${bar}] ${p.processed}/${p.total} (${pct}%)  updated:${p.updated} skipped:${p.skipped} failed:${p.failed}`);
+      last = now;
+    }
+  }, { dryRun });
+
+  console.log('\n=== Summary ===');
+  console.log(`  Total published:  ${results.total}`);
+  console.log(`  Updated:          ${results.updated}${dryRun ? ' (dry-run, not written)' : ''}`);
+  console.log(`  Skipped:          ${results.skipped}`);
+  console.log(`  Failed:           ${results.failed}`);
+  const reasons = Object.entries(results.skipReasons || {});
+  if (reasons.length) {
+    console.log('\n  Skip reasons:');
+    reasons.sort((a, b) => b[1] - a[1]).forEach(([r, n]) => console.log(`    ${n.toString().padStart(5)}  ${r}`));
+  }
+  console.log('');
+  return results.failed > 0 ? 1 : 0;
+}
+
+main()
+  .then((code) => process.exit(code))
+  .catch((err) => {
+    console.error('\nFatal error:', err.message);
+    process.exit(1);
+  });

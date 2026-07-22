@@ -2,387 +2,140 @@
 
 ## Overview
 
-The SEO Content Generation System automatically creates unique, human-quality SEO content for flight booking pages across multiple languages and page types (routes, cities, countries, airports). Every piece of content is individually crafted to avoid duplication and satisfy Google's quality standards.
+This system enriches **existing** published route pages with SEO content — titles, meta descriptions, an intro paragraph, and an FAQ set. It never creates new pages. It is built around a strict quality contract: content is only written when there is enough real, route-specific data to say something specific and non-generic, and every page differs meaningfully from similar pages.
+
+### Governing rules
+
+1. **Never overwrite manually written content.** Any route with a non-empty `custom_title`, `custom_meta_description`, `custom_faq`, or `intro_text` is skipped entirely — not partially filled.
+2. **Never generate for pages marked as manually edited.** Same mechanism — presence of any hand-edited field is the "manually edited" marker.
+3. **Every generated page is significantly different from similar pages.** Variant selection is seeded deterministically from the route slug, drawing from pools of structurally different openings, titles, meta descriptions, and FAQ orderings.
+4. **Avoid template repetition.** The pools contain genuinely different sentence structures and emphases, not one paragraph with swapped city names.
+5. **Use real route-specific data.** Distance comes from the stored Haversine value; flight duration is derived from it; domestic vs. international is derived from the country codes. All woven into the copy.
+6. **Do not generate content when data is insufficient.** Missing distance, city names, or haul type → skip.
+7. **Prefer no content over low-quality content.** A skip is a successful, expected outcome, reported as such — never a failure, never filler.
 
 ## Architecture
 
-### Core Services
+### `src/services/seoContentEngine.js` — pure content engine (no DB)
 
-#### `seoContentGenerator.js`
-The heart of the system. Generates unique content templates based on:
-- **Flight Distance & Haul Type**: Short-haul (<1500km), Medium-haul (1500-4000km), Long-haul (>4000km)
-- **Language**: 8 supported languages (English, German, French, Spanish, Italian, Dutch, Arabic, Turkish)
-- **Page Type**: Routes, Cities, Countries, Airports
+The core. Given a route row and a language, it either returns generated content or an explicit skip with reasons.
 
-**Key Functions:**
-- `generateRouteIntroText()` - Creates 300-500 word introduction paragraphs
-- `generateRouteTitle()` - Generates SEO-optimized page titles
-- `generateMetaDescription()` - Creates compelling meta descriptions
-- `generateRouteFaq()` - Builds 3-5 FAQ entries with real information
-- `classifyHaulType()` - Determines flight category from distance
-- `estimateFlightDuration()` - Calculates realistic flight times
+- **Quality gate** (`assessRouteEligibility`): checks status, city names, distance, haul type, and manual-content presence.
+- **Deterministic variation**: an FNV-1a hash of the slug seeds selection from each variant pool, so the same route always renders the same variant (stable for Google) while different routes spread across the pools.
+- **Verifiable facts only**: `estimateDurationHours()` derives an approximate flight time from the real distance; nothing else is invented — no prices, no airline names, no schedules.
+- **Language pools**: English and German are fully written today, each with per-haul-type intro pools, title pools, meta pools, and a shared FAQ pool. **A language is only offered once its pool is independently written** (not machine-translated) — `supportedLanguages()` returns exactly those. Requesting an unwritten language returns a skip, never thin content.
 
-#### `seoBatchProcessor.js`
-Manages batch operations and database updates.
-
-**Key Functions:**
-- `processRoutes()` - Iterates through all published routes
-- `processSingleRoute()` - Generates content for one route
-- `generateStatistics()` - Reports on generation readiness
-- `hasManualSEOContent()` - Checks if content is manually edited
-
-### Content Quality Standards
-
-Every generated page includes:
-
-#### 1. **SEO Title**
-```
-Flights from {origin} to {destination} | Book Cheap Tickets
-```
-- 50-60 characters
-- Includes primary keyword naturally
-- Differentiates from other routes
-
-#### 2. **Meta Description**
-```
-Find and compare cheap flights from {origin} to {destination}. Book direct flights, see schedules, and get the best fares on this popular European route.
-```
-- 155-160 characters
-- Includes call-to-action
-- Varies by haul type
-
-#### 3. **Introductory Paragraph (300-500 words)**
-- Naturally varies by haul type
-- Includes destination benefits
-- Mentions route convenience
-- Each language sounds native (not translated literally)
-
-#### 4. **FAQ (3-5 Questions)**
-- Distance and flight duration (real, calculated)
-- Airlines information
-- Booking logistics
-- Travel timing for destination
-
-#### 5. **Practical Information Sections**
-- **Best Time to Travel**: Specific booking windows per haul type
-- **Money Saving Tips**: Real strategies (price alerts, flexible dates, etc.)
-- **Airport Information**: For relevant pages
-
-## Database Schema
-
-### `route_pages` Table Fields
-```sql
--- SEO Content Fields:
-intro_text              -- Introductory paragraph
-custom_title            -- SEO title override
-custom_meta_description -- Meta description override
-custom_faq              -- FAQ array as JSONB
+Key export:
+```js
+generateRouteContent(route, language)
+// → { skipped: true, reasons: [...] }
+// → { skipped: false, content: { title, metaDescription, intro, faq } }
 ```
 
-The system:
-- ✅ Never overwrites manually-written content
-- ✅ Only fills empty fields
-- ✅ Preserves admin edits
-- ✅ Allows future customization
+### `src/services/seoBatchProcessor.js` — DB batch layer
 
-## API Endpoints
+Wraps the engine with database reads/writes and batching.
 
-### Admin Routes
+- `processRoutes(cb, { dryRun })` — iterates all published routes in batches of 50, calling the engine, writing only empty fields, tracking `updated` / `skipped` / `failed` plus a `skipReasons` breakdown.
+- `processSingleRoute(id, language, { dryRun })` — one route.
+- `generateStatistics()` — readiness report: eligible vs. skipped-manual vs. skipped-insufficient-data, with a reason breakdown.
+- A per-field guard at write time re-checks emptiness, so a manual edit landing between fetch and write can never be clobbered.
 
-#### Get Statistics
+The base `route_pages` columns carry the **primary market language (German)**. Additional languages generated by the engine are intended for per-language storage and are not written into the shared base columns.
+
+## Database fields used
+
 ```
-GET /admin/seo/statistics
+intro_text               -- intro paragraph
+custom_title             -- SEO title
+custom_meta_description  -- meta description
+custom_faq               -- FAQ array (JSONB)
 ```
-Returns readiness analysis:
+
+Only empty fields are ever written. Existing values are treated as manual content and left untouched.
+
+## API endpoints (admin)
+
+### `GET /admin/seo/statistics`
+Readiness report.
 ```json
 {
   "ok": true,
   "statistics": {
-    "total_routes": 1250,
-    "with_manual_seo": 47,
-    "without_manual_seo": 1203,
-    "ready_for_generation": 1203,
-    "languages_supported": 8
+    "total_published_routes": 1250,
+    "eligible_for_generation": 1103,
+    "skipped_manual_content": 47,
+    "skipped_insufficient_data": 100,
+    "skip_reason_breakdown": { "missing distance_km": 100, "...": 0 },
+    "languages_supported": ["en", "de"]
   }
 }
 ```
 
-#### Generate for Single Route
-```
-POST /admin/seo/route/{id}
-Content-Type: application/json
+### `POST /admin/seo/route/:id`
+Body: `{ "language": "de", "dry_run": false }`. Returns either `{ ok, skipped: true, reasons }` or `{ ok, skipped: false, content, updated }`.
 
-{
-  "language": "en"
-}
-```
+### `POST /admin/seo/batch-generate`
+`requireFullAdmin`. Body: `{ "dry_run": false }`. Starts a non-blocking batch; refuses (409) if one is already running.
 
-Returns generated content:
-```json
-{
-  "ok": true,
-  "content": {
-    "intro": "...",
-    "title": "...",
-    "metaDescription": "...",
-    "faq": [...]
-  }
-}
-```
+### `GET /admin/seo/batch-status`
+Live snapshot of the current or last run: `running`, `startedAt`, `finishedAt`, `progress`, `summary`.
 
-#### Batch Generate (All Routes)
-```
-POST /admin/seo/batch-generate
-```
+## CLI
 
-Starts background job and returns immediately:
-```json
-{
-  "ok": true,
-  "message": "SEO content generation started",
-  "status": "processing"
-}
-```
-
-#### Check Batch Status
-```
-GET /admin/seo/batch-status
-```
-
-Returns:
-```json
-{
-  "ok": true,
-  "total_routes": 1250,
-  "timestamp": "2026-07-22T10:30:00Z"
-}
-```
-
-## Command Line Interface
-
-### View Statistics Only
 ```bash
+# Readiness report only (no writes)
 node src/cli/generate-seo-content.js --stats
-```
 
-### Generate for Single Route
-```bash
-node src/cli/generate-seo-content.js --route-id=<route-uuid>
-```
+# One route, preview without writing
+node src/cli/generate-seo-content.js --route-id=<uuid> --dry-run
 
-### Batch Generate All Routes
-```bash
-node src/cli/generate-seo-content.js
-```
-
-### Preview Without Saving (Dry Run)
-```bash
+# Preview the whole batch without writing
 node src/cli/generate-seo-content.js --dry-run
+
+# Generate for all eligible routes
+node src/cli/generate-seo-content.js
 ```
 
-## Content Variety Examples
+The output distinguishes **updated** from **skipped** and prints the skip-reason breakdown, so "nothing was written" is always explained.
 
-### Short-Haul Routes (Berlin → Frankfurt)
-**Intro:** Focuses on convenience, frequency, quick turnaround
-**FAQ:** Emphasizes direct flights, day trips
-**Tips:** 2-3 week booking window
+## Adding a language
 
-### Medium-Haul Routes (Munich → Barcelona)
-**Intro:** Highlights cultural experiences, weekend trips
-**FAQ:** Mentions flexibility, seasonal travel
-**Tips:** 3-4 week booking window, shoulder seasons
+1. Write independent intro pools (per haul type), title pool, meta pool, and FAQ pool in `seoContentEngine.js` — authored natively in that language, never a literal translation of English/German.
+2. Register it in the `LANGUAGES` map.
 
-### Long-Haul Routes (Berlin → New York)
-**Intro:** Emphasizes adventure, intercontinental experience
-**FAQ:** Visa requirements, cabin amenities
-**Tips:** 6-8 week planning, international considerations
+`supportedLanguages()` and the engine pick it up automatically. Until that work is done, the language is skipped rather than served thin content.
 
-## Language Support
+## Testing
 
-All content varies naturally by language:
+`test/seoContentEngine.test.js` covers the contract with no external dependencies:
+- Quality gate (missing distance / cities / haul type / unpublished → skip).
+- Manual-content protection (each hand-edited field blocks generation).
+- Required fields present and non-trivial length.
+- Real distance woven into copy.
+- Determinism (same route → same output).
+- **Variation**: across a dozen distinct routes, intros and titles spread across multiple distinct structural skeletons.
 
-### English
-- Natural, conversational tone
-- American/British English variants
-
-### German
-- Formal "Sie" register appropriate for business travel
-- Culturally relevant examples
-
-### French
-- Sophisticated yet accessible
-- French travel preferences reflected
-
-### Spanish
-- Varied by region (European Spanish emphasis)
-- Cultural references
-
-### Italian
-- Warm, welcoming tone
-- Mediterranean preferences
-
-### Dutch
-- Direct, efficient communication
-- Northern European context
-
-### Arabic
-- Formal Classical Arabic
-- Direction-appropriate RTL formatting
-
-### Turkish
-- Modern Turkish conventions
-- Eastern European travel context
-
-## Content Localization Principles
-
-✅ **DO:**
-- Write naturally in each language
-- Use culture-specific examples
-- Respect local travel patterns
-- Adapt tone to audience
-
-❌ **DON'T:**
-- Translate literally word-by-word
-- Use machine translation
-- Ignore regional preferences
-- Copy templates with only city names changed
-
-## Quality Assurance
-
-### Automatic Checks
-- ✅ No duplicate paragraphs across pages
-- ✅ Natural language variety in sentences
-- ✅ Appropriate word count (300-500 words)
-- ✅ Keywords included naturally
-- ✅ Verifiable facts only
-
-### Manual Review Steps
-1. Review sample pages in admin
-2. Check for repetitive wording
-3. Verify distance/duration calculations
-4. Test on actual website pages
-5. Monitor Google Search Console for indexing
-
-## Performance Characteristics
-
-### Processing Speed
-- **Single Route**: ~200ms
-- **Batch of 50 routes**: ~15 seconds
-- **1000 routes**: ~5-10 minutes
-
-### Database Impact
-- Minimal: Only updates empty fields
-- Respects existing manual content
-- Batch size: 50 routes per cycle
-- Sleep between batches: 100ms
-
-### Memory Usage
-- <50MB for typical batch
-- Streaming processing, not cached
-
-## Migration & Rollback
-
-### Initial Generation
 ```bash
-# 1. Check statistics
+npx jest test/seoContentEngine.test.js
+```
+
+## Rollout
+
+```bash
+# 1. See what's eligible and why the rest is skipped
 node src/cli/generate-seo-content.js --stats
 
-# 2. Generate for sample route
-node src/cli/generate-seo-content.js --route-id=abc123
+# 2. Preview a handful without writing
+node src/cli/generate-seo-content.js --route-id=<uuid> --dry-run
 
-# 3. Review in admin/frontend
-# 4. If satisfied, batch generate
+# 3. Dry-run the whole set
+node src/cli/generate-seo-content.js --dry-run
+
+# 4. Generate, then revalidate affected pages on the frontend
 node src/cli/generate-seo-content.js
-
-# 5. Monitor server logs
-tail -f logs/server.log | grep seo
 ```
 
-### Rollback (if needed)
-```sql
--- Clear generated content (restore empty state)
-UPDATE route_pages
-SET intro_text = NULL,
-    custom_title = NULL,
-    custom_meta_description = NULL,
-    custom_faq = NULL
-WHERE intro_text LIKE 'Discover convenient connections%' -- Generated signature
-  AND custom_title LIKE '% | Book Cheap Tickets';
-```
+## Rollback
 
-## Integration Points
-
-### Frontend Pages
-- `route-page.html` - Uses `custom_title`, `custom_meta_description`, `intro_text`, `custom_faq`
-- `city.html` - Can use generated city descriptions
-- `country.html` - Can use generated country descriptions
-
-### Next.js Templates
-When data is fetched from API, use generated fields:
-```javascript
-const title = route.custom_title || route.generated_title;
-const description = route.custom_meta_description || route.generated_description;
-```
-
-### Revalidation
-After batch generation, trigger ISR:
-```javascript
-// Notify Next.js to revalidate routes
-await fetch('/api/revalidate', {
-  method: 'POST',
-  body: JSON.stringify({
-    type: 'all-routes',
-    timestamp: new Date()
-  })
-});
-```
-
-## Monitoring & Logging
-
-All operations are logged to `admin_activity_log`:
-
-```
-[seo_batch_start] total_routes: 1250
-[route_processing_error] route: 123e4567, error: "..."
-[seo_batch_complete] processed: 1250, updated: 1203, failed: 0
-```
-
-## Future Enhancements
-
-- [ ] Multi-language content generation in single pass
-- [ ] A/B testing framework for different content variants
-- [ ] Integration with Google Search Console for performance metrics
-- [ ] Automatic content refresh based on seasonal trends
-- [ ] Page type-specific templates (airports, airlines)
-- [ ] User-generated content integration
-- [ ] Schema.org structured data generation
-
-## Troubleshooting
-
-### "Database not available"
-- Check Supabase connection
-- Verify `DATABASE_URL` environment variable
-- Check network connectivity
-
-### Batch process seems stuck
-- Check server logs: `tail -f logs/server.log | grep seo`
-- Verify database has available connections
-- Review batch size settings in `seoBatchProcessor.js`
-
-### Generated content looks templated
-- Check for variation in ROUTE_INTROS array
-- Verify haul_type classification is correct
-- Review specific route's distance calculation
-
-### Manual content being overwritten
-- Confirm fields are not empty before generation
-- Check `hasManualSEOContent()` logic
-- Review database update conditions
-
-## Support & Questions
-
-For issues or questions:
-1. Check this documentation
-2. Review server logs with `grep seo`
-3. Test with `--stats` and `--dry-run` flags
-4. Contact dev team with error logs
+Generated fields are ordinary column values; clearing them restores the empty state. Because manual edits were never touched, only generated rows are affected. Clear via the admin Geo/route tooling or a targeted SQL update on the specific route IDs you generated.
