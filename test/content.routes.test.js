@@ -10,6 +10,7 @@ jest.mock('../src/clients/supabase', () => {
       or: () => builder,
       in: () => builder,
       order: () => builder,
+      range: () => builder,
       limit: () => builder,
       update: () => builder,
       maybeSingle: () => Promise.resolve(cfg.maybeSingle || { data: null, error: null }),
@@ -29,6 +30,7 @@ jest.mock('../src/utils/log', () => jest.fn());
 const express = require('express');
 const request = require('supertest');
 const supa = require('../src/clients/supabase');
+const { clearIndexabilityCache } = require('../src/services/indexabilityData');
 
 function buildApp() {
   const app = express();
@@ -40,20 +42,29 @@ function buildApp() {
 beforeEach(() => {
   supa.__reset();
   supa.from.mockClear();
+  // The list endpoints memoize the published-route connectivity scan; drop it
+  // so each test computes `indexable` from its own mocked route data.
+  clearIndexabilityCache();
 });
 
 describe('GET /cities', () => {
   test('returns the published city list', async () => {
     supa.__setResponse('cities', { result: { data: [{ id: 'city-1', city_slug: 'berlin', name: 'Berlin' }, { id: 'city-2', city_slug: 'paris', name: 'Paris' }], error: null } });
     supa.__setResponse('city_translations', { result: { data: [{ city_id: 'city-1', language: 'en', name: 'Berlin' }], error: null } });
+    // Connectivity that makes both cities indexable (each reaches 2 distinct cities).
+    supa.__setResponse('route_pages', { result: { data: [
+      { origin_city_slug: 'berlin', destination_city_slug: 'muenchen', origin_iata: 'BER', destination_iata: 'MUC', origin_country: 'DE', destination_country: 'DE' },
+      { origin_city_slug: 'berlin', destination_city_slug: 'paris', origin_iata: 'BER', destination_iata: 'CDG', origin_country: 'DE', destination_country: 'FR' },
+      { origin_city_slug: 'paris', destination_city_slug: 'madrid', origin_iata: 'CDG', destination_iata: 'MAD', origin_country: 'FR', destination_country: 'ES' },
+    ], error: null } });
     const app = buildApp();
     const res = await request(app).get('/cities');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       ok: true,
       cities: [
-        { city_slug: 'berlin', name: 'Berlin', airport_codes: [], translations: { en: 'Berlin' } },
-        { city_slug: 'paris', name: 'Paris', airport_codes: [], translations: {} },
+        { city_slug: 'berlin', name: 'Berlin', airport_codes: [], translations: { en: 'Berlin' }, indexable: true },
+        { city_slug: 'paris', name: 'Paris', airport_codes: [], translations: {}, indexable: true },
       ],
     });
   });
@@ -174,10 +185,15 @@ describe('GET /countries', () => {
   test('returns the published country list', async () => {
     supa.__setResponse('countries', { result: { data: [{ code: 'DE', name: 'Deutschland' }], error: null } });
     supa.__setResponse('country_translations', { result: { data: [{ country_code: 'DE', language: 'en', name: 'Germany' }], error: null } });
+    // One domestic + one external route → DE connectivity score 2 → indexable.
+    supa.__setResponse('route_pages', { result: { data: [
+      { origin_city_slug: 'berlin', destination_city_slug: 'muenchen', origin_iata: 'BER', destination_iata: 'MUC', origin_country: 'DE', destination_country: 'DE' },
+      { origin_city_slug: 'berlin', destination_city_slug: 'paris', origin_iata: 'BER', destination_iata: 'CDG', origin_country: 'DE', destination_country: 'FR' },
+    ], error: null } });
     const app = buildApp();
     const res = await request(app).get('/countries');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, countries: [{ code: 'DE', name: 'Deutschland', translations: { en: 'Germany' } }] });
+    expect(res.body).toEqual({ ok: true, countries: [{ code: 'DE', name: 'Deutschland', translations: { en: 'Germany' }, indexable: true }] });
   });
 });
 

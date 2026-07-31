@@ -10,6 +10,11 @@ const rateLimit = require('../middleware/rateLimit');
 const { buildRouteIntelligenceSnapshot } = require('../services/routeIntelligence');
 const { effectiveRouteSeo } = require('../services/seo/effective');
 const { getAdminConfig } = require('../services/adminConfig');
+const {
+  routeIndexable, cityIndexable, airportIndexable, countryIndexable, airlineIndexable,
+  cityDestinationCount, airportDestinationCount, countryConnectivityScore,
+} = require('../services/indexability');
+const { getIndexabilityData } = require('../services/indexabilityData');
 
 // [RATE-LIMIT-FIX] None of these routes had any rate limiting at all —
 // public, unauthenticated, and an unmetered surface for scraping/DB-
@@ -189,12 +194,21 @@ app.get('/route-pages', rateLimit('content', 2500, 60000), async (req, res) => {
     // [ROUTE-INTELLIGENCE-3] distance_km/haul_type/airline_count/route_score
     // added so the SSG build's computeRelatedRoutes() can rank alternatives
     // instead of only pure same-city matching — see generate-pages.js.
+    // [INDEXABLE] avg_duration_min/stop_distribution/intro_text/custom_faq are
+    // pulled ONLY to compute the `indexable` flag (routeIndexable) and are then
+    // stripped from the response, so the payload shape stays as before plus the
+    // one boolean the sitemap generator filters on.
     const { data, error } = await supa.from('route_pages')
-      .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_country,destination_country,distance_km,haul_type,airline_count,route_score,updated_at,insights_updated_at,created_at')
+      .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_country,destination_country,distance_km,haul_type,airline_count,route_score,updated_at,insights_updated_at,created_at,avg_duration_min,stop_distribution,intro_text,custom_faq')
       .eq('status', 'published')
       .order('origin_city', { ascending: true });
     if (error) throw new Error(error.message);
-    res.json({ ok: true, routes: data || [] });
+    const routes = (data || []).map((r) => {
+      const indexable = routeIndexable(r);
+      const { avg_duration_min, stop_distribution, intro_text, custom_faq, ...rest } = r;
+      return { ...rest, indexable };
+    });
+    res.json({ ok: true, routes });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -207,9 +221,17 @@ app.get('/route-pages', rateLimit('content', 2500, 60000), async (req, res) => {
 app.get('/countries', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { data, error } = await supa.from('countries').select('code,name,created_at').eq('status', 'published').order('name', { ascending: true });
+    const { data, error } = await supa.from('countries').select('code,name,created_at,intro_text').eq('status', 'published').order('name', { ascending: true });
     if (error) throw new Error(error.message);
-    const countries = data || [];
+    const rows = data || [];
+    // [INDEXABLE] Flag each country from its route connectivity + intro_text,
+    // stripping intro_text from the response afterwards (shape unchanged + flag).
+    const { connectivity } = await getIndexabilityData();
+    const countries = rows.map((c) => {
+      const indexable = countryIndexable(c, countryConnectivityScore(connectivity, c.code));
+      const { intro_text, ...rest } = c;
+      return { ...rest, indexable };
+    });
 
     // [GEO-CMS] One bounded follow-up query for every country's
     // translations, grouped in JS — not N+1 queries. The SSG build fetches
@@ -281,9 +303,12 @@ app.get('/cities', rateLimit('content', 2500, 60000), async (req, res) => {
     // city does this IATA code belong to" client-side (a city's name
     // translations apply to every airport serving it, e.g. LHR/LGW/STN/LTN
     // all localize to the same "London" translations).
-    const { data, error } = await supa.from('cities').select('id,city_slug,name,airport_codes,created_at').eq('status', 'published').order('name', { ascending: true });
+    const { data, error } = await supa.from('cities').select('id,city_slug,name,airport_codes,created_at,intro_text').eq('status', 'published').order('name', { ascending: true });
     if (error) throw new Error(error.message);
     const cities = data || [];
+
+    // [INDEXABLE] Distinct-destination connectivity + intro_text decide the flag.
+    const { connectivity } = await getIndexabilityData();
 
     // [GEO-CMS] Same bounded-follow-up-query pattern as GET /countries.
     const ids = cities.map((c) => c.id);
@@ -297,7 +322,7 @@ app.get('/cities', rateLimit('content', 2500, 60000), async (req, res) => {
       });
     }
 
-    res.json({ ok: true, cities: cities.map((c) => ({ city_slug: c.city_slug, name: c.name, airport_codes: c.airport_codes || [], translations: translationsById[c.id] || {} })) });
+    res.json({ ok: true, cities: cities.map((c) => ({ city_slug: c.city_slug, name: c.name, airport_codes: c.airport_codes || [], translations: translationsById[c.id] || {}, indexable: cityIndexable(c, cityDestinationCount(connectivity, c.city_slug)) })) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -346,9 +371,17 @@ app.get('/cities/:slug', rateLimit('content', 2500, 60000), async (req, res) => 
 app.get('/airports', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { data, error } = await supa.from('airports').select('iata_code,airport_name,city_id,country_code').eq('status', 'published').order('iata_code', { ascending: true });
+    const { data, error } = await supa.from('airports').select('iata_code,airport_name,city_id,country_code,terminal_info,transit_options,traveler_tips').eq('status', 'published').order('iata_code', { ascending: true });
     if (error) throw new Error(error.message);
-    res.json({ ok: true, airports: data || [] });
+    // [INDEXABLE] Distinct-destination connectivity + admin traveler content
+    // decide the flag; the admin-content columns are stripped afterwards.
+    const { connectivity } = await getIndexabilityData();
+    const airports = (data || []).map((a) => {
+      const indexable = airportIndexable(a, airportDestinationCount(connectivity, a.iata_code));
+      const { terminal_info, transit_options, traveler_tips, ...rest } = a;
+      return { ...rest, indexable };
+    });
+    res.json({ ok: true, airports });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -464,9 +497,17 @@ app.get('/airports/:code', rateLimit('content', 2500, 60000), async (req, res) =
 app.get('/airlines', rateLimit('content', 2500, 60000), async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { data, error } = await supa.from('airlines').select('iata_code,name,created_at').eq('status', 'published').order('name', { ascending: true });
+    const { data, error } = await supa.from('airlines').select('id,iata_code,name,created_at,intro_text').eq('status', 'published').order('name', { ascending: true });
     if (error) throw new Error(error.message);
-    res.json({ ok: true, airlines: data || [] });
+    // [INDEXABLE] Distinct published-route count (from route_airlines) + intro_text
+    // decide the flag; id/intro_text are stripped afterwards (shape unchanged + flag).
+    const { airlineCounts } = await getIndexabilityData();
+    const airlines = (data || []).map((a) => {
+      const indexable = airlineIndexable(a, airlineCounts.get(a.id) || 0);
+      const { id, intro_text, ...rest } = a;
+      return { ...rest, indexable };
+    });
+    res.json({ ok: true, airlines });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
