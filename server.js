@@ -100,6 +100,7 @@ require('./src/routes/loyalty.routes')(app);
 require('./src/routes/referral.routes')(app);
 require('./src/routes/promo.routes')(app);
 require('./src/routes/content.routes')(app);
+require('./src/routes/sitemap.routes')(app);
 require('./src/routes/tracking.routes')(app);
 require('./src/routes/admin.routes')(app);
 require('./src/routes/admin-staff.routes')(app);
