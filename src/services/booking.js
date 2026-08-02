@@ -602,6 +602,10 @@ async function bookFromSession(session_id, session) {
     sendBookingConfirmationEmail(recipientEmail, {
       bookingRef,
       orderId,
+      // [TICKET-PDF-I18N] The user's UI language, captured at checkout and
+      // persisted with the booking payload, so the attached ticket PDF is
+      // rendered in that language (falls back to German if absent).
+      lang: booking.lang || 'de',
       route: booking.route_label || '',
       passengers: booking.passengers || [],
       // [CONTACT-EMAIL-DISPLAY] The page-5 contact email — distinct from

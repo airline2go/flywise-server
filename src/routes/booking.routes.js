@@ -264,8 +264,13 @@ app.post('/create-checkout-session', rateLimit('pay', 15, 60000), attachUserIfPr
     const {
       offer_id, passengers, services = [],
       duffel_amount, customer_amount, currency = 'EUR', promo_code, device_id,
-      route_label, success_url, cancel_url,
+      route_label, success_url, cancel_url, lang,
     } = req.body;
+    // [TICKET-PDF-I18N] The customer's UI language, used later to render the
+    // confirmation ticket PDF in their language. Only the 7 supported codes
+    // are accepted; anything else falls back to German at render time.
+    const TICKET_LANGS = ['de', 'en', 'fr', 'es', 'it', 'nl', 'ar'];
+    const bookingLang = TICKET_LANGS.includes(lang) ? lang : 'de';
 
     // [SCHEMA-VALIDATION] Full structural check — catches a malformed
     // passenger (missing name, garbage date, invalid email format) before
@@ -376,6 +381,7 @@ app.post('/create-checkout-session', rateLimit('pay', 15, 60000), attachUserIfPr
       loyalty_discount: pricing.loyaltyDiscount,
       device_id: device_id || null,
       user_id: req.userId || null,
+      lang: bookingLang,
       customer_amount: pricing.customerAmount,
     });
     setBookingStatus(session.id, 'pending');

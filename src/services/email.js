@@ -109,6 +109,11 @@ function buildOrderSummaryForEmail(order, money) {
       dur: isoMinSrv(s.duration), al: s.marketing_carrier?.name || '',
       fn: `${s.marketing_carrier?.iata_code || ''}${s.marketing_carrier_flight_number || ''}`,
       aircraft: s.aircraft?.name || null,
+      // [DUFFEL-PARITY] Cabin class marketing name (e.g. "Economy") — same
+      // field the offer normalizer reads; not every carrier returns it, so
+      // it's nullable and the PDF omits it when absent.
+      cabin: (s.passengers && s.passengers[0]
+        && (s.passengers[0].cabin_class_marketing_name || s.passengers[0].cabin_class)) || null,
       seats, baggageByPax,
     };
   }
@@ -133,6 +138,36 @@ function buildOrderSummaryForEmail(order, money) {
     segs: (slice.segments || []).map(mapSeg),
   }));
   const allSeats = legs.flatMap((leg) => leg.segs).flatMap((s) => s.seats);
+
+  // [DUFFEL-PARITY] Per-passenger flight info (seat + baggage on each
+  // individual segment), keyed by passenger id — this is what the ticket
+  // PDF's "Fluginformationen" block lists under each traveller, mirroring
+  // Duffel's official ticket. Built straight from the raw order segments so
+  // it stays correct for any passenger count and any number of legs.
+  const paxFlights = {};
+  (order.slices || []).forEach((slice) => {
+    (slice.segments || []).forEach((s) => {
+      (s.passengers || []).forEach((sp) => {
+        const pid = sp.passenger_id;
+        if (!pid) return;
+        (paxFlights[pid] = paxFlights[pid] || []).push({
+          from: s.origin?.iata_code || '', to: s.destination?.iata_code || '',
+          dep: s.departing_at ? new Date(s.departing_at) : null,
+          seat: (sp.seat && sp.seat.designator) || null,
+          bags: (sp.baggages || []).map((b) => ({ type: b.type, quantity: b.quantity || 1 })),
+        });
+      });
+    });
+  });
+  const passengers = (order.passengers || []).map((p) => ({
+    id: p.id,
+    name: `${p.given_name || ''} ${p.family_name || ''}`.trim(),
+    dob: p.born_on || null,
+    // Raw gender code — the ticket PDF localizes it to the user's language.
+    genderCode: p.gender === 'f' ? 'f' : p.gender === 'm' ? 'm' : null,
+    type: p.type || 'adult',
+    flights: paxFlights[p.id] || [],
+  }));
 
   const purchasedBags = (order.services || []).filter((svc) => {
     const t = (svc.type || '').toLowerCase();
@@ -186,7 +221,7 @@ function buildOrderSummaryForEmail(order, money) {
   }
 
   return {
-    legs, allSeats, purchasedBags, ticketByPax,
+    legs, allSeats, purchasedBags, ticketByPax, passengers,
     ticketPrice: Math.round(ticketPrice * 100) / 100,
     bagsPrice: Math.round(bagsPrice * 100) / 100,
     seatsPrice: Math.round(seatsPrice * 100) / 100,
@@ -386,29 +421,42 @@ async function sendBookingConfirmationEmail(to, data) {
   let attachments;
   if (summary) {
     try {
+      // [DUFFEL-PARITY] Pass the full segment detail (airport names, cities,
+      // terminals, cabin) and the leg's stop info through to the PDF so it can
+      // render Duffel's level of detail. Everything is nullable — the PDF omits
+      // whatever a given carrier didn't return.
       const legsForPdf = (summary.legs || []).map((leg) => ({
+        legNumber: leg.legNumber, nonStop: leg.nonStop,
         segs: (leg.segs || []).map((seg) => ({
           from: seg.from, to: seg.to,
-          fromLabel: seg.fromCity && seg.fromName ? `${seg.from} · ${seg.fromCity}` : seg.from,
-          toLabel: seg.toCity && seg.toName ? `${seg.to} · ${seg.toCity}` : seg.to,
+          fromName: seg.fromName, toName: seg.toName,
+          fromCity: seg.fromCity, toCity: seg.toCity,
           fromTerminal: seg.fromTerminal, toTerminal: seg.toTerminal,
           dep: seg.dep, arr: seg.arr, dur: seg.dur, al: seg.al, fn: seg.fn,
-          aircraft: seg.aircraft, baggageByPax: seg.baggageByPax,
+          aircraft: seg.aircraft, cabin: seg.cabin,
         })),
       }));
-      const passengersForPdf = (data.passengers || []).map((p) => ({
-        name: `${p.given_name || ''} ${p.family_name || ''}`.trim(),
-        dob: p.born_on || null,
-        gender: p.gender === 'f' ? 'Weiblich' : p.gender === 'm' ? 'Männlich' : null,
-      }));
-      const priceRows = [{ label: 'Flugticket', value: fmtMoney(summary.ticketPrice, summary.currency) }];
-      if (summary.bagsPrice > 0) priceRows.push({ label: 'Gepäck', value: '+ ' + fmtMoney(summary.bagsPrice, summary.currency) });
-      if (summary.seatsPrice > 0) priceRows.push({ label: 'Sitzplätze', value: '+ ' + fmtMoney(summary.seatsPrice, summary.currency) });
-      if (summary.loyaltyDiscount > 0) priceRows.push({ label: 'Treueguthaben verwendet', value: '− ' + fmtMoney(summary.loyaltyDiscount, summary.currency) });
+      // Prefer the Duffel-order passenger list (carries type + gender + the
+      // per-segment seat/bag breakdown); fall back to the booking record.
+      const passengersForPdf = (summary.passengers && summary.passengers.length)
+        ? summary.passengers
+        : (data.passengers || []).map((p) => ({
+          name: `${p.given_name || ''} ${p.family_name || ''}`.trim(),
+          dob: p.born_on || null,
+          genderCode: p.gender === 'f' ? 'f' : p.gender === 'm' ? 'm' : null,
+          type: 'adult', flights: [],
+        }));
+      // Price rows carry a stable KEY (not a German label) so the PDF can
+      // localize each line to the user's language; the value string is shared.
+      const priceRows = [{ key: 'ticket', value: fmtMoney(summary.ticketPrice, summary.currency) }];
+      if (summary.bagsPrice > 0) priceRows.push({ key: 'bags', value: '+ ' + fmtMoney(summary.bagsPrice, summary.currency) });
+      if (summary.seatsPrice > 0) priceRows.push({ key: 'seats', value: '+ ' + fmtMoney(summary.seatsPrice, summary.currency) });
+      if (summary.loyaltyDiscount > 0) priceRows.push({ key: 'loyalty', value: '− ' + fmtMoney(summary.loyaltyDiscount, summary.currency) });
       const grandTotalForPdf = Math.round((summary.ticketPrice + summary.bagsPrice + summary.seatsPrice - summary.discountAmount) * 100) / 100;
-      priceRows.push({ label: 'Gesamtbetrag', value: fmtMoney(grandTotalForPdf, summary.currency), bold: true });
+      priceRows.push({ key: 'total', value: fmtMoney(grandTotalForPdf, summary.currency), bold: true });
 
       const pdfBuffer = await buildTicketPdf({
+        lang: data.lang || 'de',
         bookingRef: data.bookingRef, legs: legsForPdf,
         passengers: passengersForPdf, ticketByPax: summary.ticketByPax,
         priceRows,
