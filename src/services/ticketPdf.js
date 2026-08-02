@@ -1,152 +1,289 @@
 // ═══════════════════════════════════════════════════════════════
 // src/services/ticketPdf.js
-// [NEW] بيولّد PDF رسمي لتذكرة الحجز — نفس بنية تذكرة Duffel
-// الأصلية (تفاصيل الطيران، الركاب، أرقام التذاكر) بس بتصميم
-// Airpiv الخاص بينا (الألوان، الشعار، الخط). بيستخدم pdfkit —
-// مكتبة JS خالصة، مفيش محتاج متصفح مخفي أو حاجة تقيلة على السيرفر.
+// بيولّد PDF رسمي لتذكرة الحجز — بنفس مستوى تفصيل تذكرة Duffel
+// الأصلية (تفاصيل كل رحلة بأسماء المطارات الكاملة والصالات ودرجة
+// المقصورة، وقسم ركاب مجمّع لكل مسافر مع المقعد والحقائب لكل قطعة
+// رحلة)، بس بهوية Airpiv. متعدّد اللغات (de/en/fr/es/it/nl/ar) حسب
+// لغة المستخدم، مع دعم كامل للعربي (خط Amiri مضمّن + تشكيل/اتجاه
+// يمين-يسار عبر fontkit). كله data-gated — أي معلومة مش راجعة من
+// Duffel بتتحذف بدل ما تظهر فاضية. بيستخدم pdfkit (JS خالص).
 // ═══════════════════════════════════════════════════════════════
 
+const path = require('path');
 const PDFDocument = require('pdfkit');
 
 const TEAL = '#0FB5A0';
-const TEAL_DARK = '#0A9384';
 const NAVY = '#0A1822';
-const NAVY2 = '#16283a';
 const TX = '#101d2c';
 const TX2 = '#46586c';
 const TX3 = '#8fa4b4';
 const BORDER = '#e1e7ec';
-const BG2 = '#f6f8fa';
+
+const FONT_DIR = path.join(__dirname, '..', '..', 'assets', 'fonts');
+
+// ── i18n ──────────────────────────────────────────────────────
+// One flat dictionary per supported language. `depart`/`arrive` include
+// their own separator/preposition so each language reads naturally.
+const T = {
+  de: { bookingCode: 'BUCHUNGSCODE', flightDetails: 'Flugdetails', travelers: 'Reisende', ticketNumbers: 'Ticketnummern', priceSummary: 'Preisübersicht', outbound: 'Hinflug', return: 'Rückflug', flight: 'Flug', nonstop: 'Nonstop', stop: 'Zwischenstopp', stops: 'Zwischenstopps', multipleAirlines: 'Mehrere Airlines', depart: 'Abflug:', arrive: 'Ankunft:', duration: 'Flugdauer:', layover: 'Umstieg in', adult: 'Erwachsener', child: 'Kind', infant: 'Kleinkind', name: 'Name', dob: 'Geburtsdatum', gender: 'Geschlecht', flightInfo: 'Fluginformationen', seat: 'Sitz', bagChecked: 'Aufgabegepäck', bagCarry: 'Handgepäck', male: 'Männlich', female: 'Weiblich', pTicket: 'Flugticket', pBags: 'Gepäck', pSeats: 'Sitzplätze', pLoyalty: 'Treueguthaben verwendet', pTotal: 'Gesamtbetrag', disclaimer: 'Diese Übersicht ersetzt nicht das offizielle Ticket der Fluggesellschaft.' },
+  en: { bookingCode: 'BOOKING REFERENCE', flightDetails: 'Flight details', travelers: 'Passengers', ticketNumbers: 'Ticket numbers', priceSummary: 'Price summary', outbound: 'Outbound', return: 'Return', flight: 'Flight', nonstop: 'Non-stop', stop: 'stop', stops: 'stops', multipleAirlines: 'Multiple airlines', depart: 'Depart from', arrive: 'Arrive at', duration: 'Flight duration:', layover: 'Layover in', adult: 'Adult', child: 'Child', infant: 'Infant', name: 'Name', dob: 'Date of birth', gender: 'Gender', flightInfo: 'Flight information', seat: 'Seat', bagChecked: 'Checked bag', bagCarry: 'Carry-on bag', male: 'Male', female: 'Female', pTicket: 'Flight ticket', pBags: 'Baggage', pSeats: 'Seats', pLoyalty: 'Loyalty credit applied', pTotal: 'Total', disclaimer: "This summary does not replace the airline's official ticket." },
+  fr: { bookingCode: 'RÉFÉRENCE DE RÉSERVATION', flightDetails: 'Détails du vol', travelers: 'Passagers', ticketNumbers: 'Numéros de billet', priceSummary: 'Récapitulatif des prix', outbound: 'Aller', return: 'Retour', flight: 'Vol', nonstop: 'Direct', stop: 'escale', stops: 'escales', multipleAirlines: 'Plusieurs compagnies', depart: 'Départ :', arrive: 'Arrivée :', duration: 'Durée du vol :', layover: 'Escale à', adult: 'Adulte', child: 'Enfant', infant: 'Bébé', name: 'Nom', dob: 'Date de naissance', gender: 'Sexe', flightInfo: 'Informations sur le vol', seat: 'Siège', bagChecked: 'Bagage en soute', bagCarry: 'Bagage à main', male: 'Homme', female: 'Femme', pTicket: "Billet d'avion", pBags: 'Bagages', pSeats: 'Sièges', pLoyalty: 'Crédit fidélité utilisé', pTotal: 'Total', disclaimer: "Ce récapitulatif ne remplace pas le billet officiel de la compagnie aérienne." },
+  es: { bookingCode: 'CÓDIGO DE RESERVA', flightDetails: 'Detalles del vuelo', travelers: 'Pasajeros', ticketNumbers: 'Números de billete', priceSummary: 'Resumen de precios', outbound: 'Ida', return: 'Vuelta', flight: 'Vuelo', nonstop: 'Directo', stop: 'escala', stops: 'escalas', multipleAirlines: 'Varias aerolíneas', depart: 'Salida:', arrive: 'Llegada:', duration: 'Duración del vuelo:', layover: 'Escala en', adult: 'Adulto', child: 'Niño', infant: 'Bebé', name: 'Nombre', dob: 'Fecha de nacimiento', gender: 'Sexo', flightInfo: 'Información del vuelo', seat: 'Asiento', bagChecked: 'Equipaje facturado', bagCarry: 'Equipaje de mano', male: 'Hombre', female: 'Mujer', pTicket: 'Billete de avión', pBags: 'Equipaje', pSeats: 'Asientos', pLoyalty: 'Crédito de fidelidad aplicado', pTotal: 'Total', disclaimer: 'Este resumen no sustituye el billete oficial de la aerolínea.' },
+  it: { bookingCode: 'CODICE DI PRENOTAZIONE', flightDetails: 'Dettagli del volo', travelers: 'Passeggeri', ticketNumbers: 'Numeri di biglietto', priceSummary: 'Riepilogo prezzi', outbound: 'Andata', return: 'Ritorno', flight: 'Volo', nonstop: 'Diretto', stop: 'scalo', stops: 'scali', multipleAirlines: 'Più compagnie', depart: 'Partenza:', arrive: 'Arrivo:', duration: 'Durata del volo:', layover: 'Scalo a', adult: 'Adulto', child: 'Bambino', infant: 'Neonato', name: 'Nome', dob: 'Data di nascita', gender: 'Sesso', flightInfo: 'Informazioni sul volo', seat: 'Posto', bagChecked: 'Bagaglio da stiva', bagCarry: 'Bagaglio a mano', male: 'Uomo', female: 'Donna', pTicket: 'Biglietto aereo', pBags: 'Bagagli', pSeats: 'Posti', pLoyalty: 'Credito fedeltà applicato', pTotal: 'Totale', disclaimer: "Questo riepilogo non sostituisce il biglietto ufficiale della compagnia aerea." },
+  nl: { bookingCode: 'BOEKINGSCODE', flightDetails: 'Vluchtdetails', travelers: 'Passagiers', ticketNumbers: 'Ticketnummers', priceSummary: 'Prijsoverzicht', outbound: 'Heenvlucht', return: 'Terugvlucht', flight: 'Vlucht', nonstop: 'Non-stop', stop: 'tussenstop', stops: 'tussenstops', multipleAirlines: 'Meerdere maatschappijen', depart: 'Vertrek:', arrive: 'Aankomst:', duration: 'Vluchtduur:', layover: 'Overstap in', adult: 'Volwassene', child: 'Kind', infant: 'Baby', name: 'Naam', dob: 'Geboortedatum', gender: 'Geslacht', flightInfo: 'Vluchtinformatie', seat: 'Stoel', bagChecked: 'Ruimbagage', bagCarry: 'Handbagage', male: 'Man', female: 'Vrouw', pTicket: 'Vliegticket', pBags: 'Bagage', pSeats: 'Stoelen', pLoyalty: 'Loyaliteitstegoed gebruikt', pTotal: 'Totaal', disclaimer: 'Dit overzicht vervangt niet het officiële ticket van de luchtvaartmaatschappij.' },
+  ar: { bookingCode: 'رمز الحجز', flightDetails: 'تفاصيل الرحلة', travelers: 'المسافرون', ticketNumbers: 'أرقام التذاكر', priceSummary: 'ملخص الأسعار', outbound: 'رحلة الذهاب', return: 'رحلة العودة', flight: 'رحلة', nonstop: 'مباشر', stop: 'توقف', stops: 'توقفات', multipleAirlines: 'عدة شركات طيران', depart: 'المغادرة من:', arrive: 'الوصول إلى:', duration: 'مدة الرحلة:', layover: 'توقف في', adult: 'بالغ', child: 'طفل', infant: 'رضيع', name: 'الاسم', dob: 'تاريخ الميلاد', gender: 'الجنس', flightInfo: 'معلومات الرحلة', seat: 'المقعد', bagChecked: 'حقيبة مسجّلة', bagCarry: 'حقيبة يد', male: 'ذكر', female: 'أنثى', pTicket: 'تذكرة الطيران', pBags: 'الأمتعة', pSeats: 'المقاعد', pLoyalty: 'رصيد الولاء المستخدم', pTotal: 'الإجمالي', disclaimer: 'هذا الملخص لا يُغني عن التذكرة الرسمية لشركة الطيران.' },
+};
+const LOCALES = { de: 'de-DE', en: 'en-GB', fr: 'fr-FR', es: 'es-ES', it: 'it-IT', nl: 'nl-NL', ar: 'ar' };
+const SUPPORTED = Object.keys(T);
+function normLang(lang) { return SUPPORTED.includes(lang) ? lang : 'de'; }
 
 function fmtTime(d) {
   if (!d) return '--:--';
   return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
 }
-function fmtDate(d) {
+function fmtDateLong(d, locale) {
   if (!d) return '';
-  return d.toLocaleDateString('de-DE', { day: '2-digit', month: 'long', year: 'numeric', timeZone: 'UTC' });
+  return d.toLocaleDateString(locale, { weekday: 'short', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
 }
 function durStr(m) {
-  if (!m) return '';
+  if (!m && m !== 0) return '';
   return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
 }
 
-// [PDF-HEADER] شريط علوي بلون Airpiv الداكن + الشعار + كود الحجز —
-// نفس الترتيب اللي شوفناه في تذكرة Duffel (الشركة على الشمال،
-// Booking Reference على اليمين)، بس بألوان Airpiv.
-function drawHeader(doc, bookingRef) {
+// ── per-render context (language, direction, dictionary, fonts) ──
+function makeCtx(doc, lang) {
+  const L = normLang(lang);
+  const rtl = L === 'ar';
+  const t = T[L];
+  const locale = LOCALES[L];
+  const reg = rtl ? 'NotoAr' : 'Helvetica';
+  const bold = rtl ? 'NotoArBold' : 'Helvetica-Bold';
+  return {
+    lang: L, rtl, t, locale,
+    // start = leading edge for the reading direction; end = trailing edge.
+    alignStart: rtl ? 'right' : 'left',
+    alignEnd: rtl ? 'left' : 'right',
+    font: (b) => doc.font(b ? bold : reg),
+    // Bump Arabic up a touch — Amiri's x-height reads smaller than Helvetica's.
+    fs: (n) => (rtl ? n + 1 : n),
+  };
+}
+
+function stopsLabel(t, n) {
+  if (n <= 0) return t.nonstop;
+  return `${n} ${n === 1 ? t.stop : t.stops}`;
+}
+function bagLabel(t, b) {
+  const label = b.type === 'checked' ? t.bagChecked : t.bagCarry;
+  return (b.quantity > 1 ? `${b.quantity}× ` : '') + label;
+}
+function paxTypeLabel(ctx, type, n) {
+  const base = type === 'child' ? ctx.t.child
+    : (type === 'infant_without_seat' || type === 'infant') ? ctx.t.infant
+      : ctx.t.adult;
+  const s = `${base} ${n}`;
+  return ctx.rtl ? s : s.toUpperCase();
+}
+// "Berlin Brandenburg Airport (BER), Terminal 2" — every piece optional.
+function airportLine(ctx, name, iata, terminal) {
+  let s = name || iata || '';
+  if (name && iata) s = `${name} (${iata})`;
+  if (terminal) s += `, Terminal ${terminal}`;
+  return s;
+}
+
+function drawHeader(doc, ctx, bookingRef) {
   doc.rect(0, 0, doc.page.width, 70).fill(NAVY);
+  const logoX = ctx.rtl ? doc.page.width - 90 : 40;
   doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(20)
-    .text('Air', 40, 24, { continued: true })
+    .text('Air', logoX, 24, { continued: true })
     .fillColor(TEAL).text('piv', { continued: false });
-  doc.fillColor(TX3).font('Helvetica').fontSize(9)
-    .text('BUCHUNGSCODE', doc.page.width - 200, 20, { width: 160, align: 'right' });
-  doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(16)
-    .text(bookingRef || '—', doc.page.width - 200, 33, { width: 160, align: 'right' });
+  const codeX = ctx.rtl ? 40 : doc.page.width - 200;
+  const codeAlign = ctx.rtl ? 'left' : 'right';
+  ctx.font(false); doc.fillColor(TX3).fontSize(9)
+    .text(ctx.t.bookingCode, codeX, 20, { width: 160, align: codeAlign });
+  ctx.font(true); doc.fillColor('#ffffff').fontSize(16)
+    .text(bookingRef || '—', codeX, 33, { width: 160, align: codeAlign });
   doc.y = 95;
 }
 
-function sectionTitle(doc, text) {
+function sectionTitle(doc, ctx, text, x, width) {
   doc.moveDown(0.3);
-  doc.fillColor(TX).font('Helvetica-Bold').fontSize(13).text(text);
-  doc.moveDown(0.4);
-}
-
-// [PDF-FLIGHT-BOX] صندوق واحد لكل قطعة طيران — نفس بنية تذكرة
-// Duffel (وقت المغادرة + المطار على الشمال، شركة الطيران ورقم
-// الرحلة والمدة في النص، وقت الوصول + المطار على اليمين)، وتحته
-// صف بالصالة ونوع الطائرة والحقائب المضمّنة لو متوفرين.
-function drawFlightBox(doc, seg, x, width) {
-  const boxTop = doc.y;
-  const boxHeight = 70;
-  doc.roundedRect(x, boxTop, width, boxHeight, 6).strokeColor(BORDER).lineWidth(1).stroke();
-
-  const pad = 14;
-  const colW = (width - pad * 2) / 3;
-
-  // Departure
-  doc.fillColor(TX).font('Helvetica-Bold').fontSize(15)
-    .text(fmtTime(seg.dep), x + pad, boxTop + 12, { width: colW });
-  doc.fillColor(TX2).font('Helvetica').fontSize(9)
-    .text(seg.fromLabel || seg.from, x + pad, boxTop + 32, { width: colW });
-  doc.fillColor(TX3).fontSize(8)
-    .text(fmtDate(seg.dep), x + pad, boxTop + 46, { width: colW });
-
-  // Middle: duration + airline + flight number
-  const midX = x + pad + colW;
-  doc.fillColor(TX3).font('Helvetica').fontSize(9)
-    .text(durStr(seg.dur), midX, boxTop + 12, { width: colW, align: 'center' });
-  doc.moveTo(midX + 10, boxTop + 27).lineTo(midX + colW - 10, boxTop + 27)
-    .dash(2, { space: 2 }).strokeColor(BORDER).stroke().undash();
-  doc.fillColor(TX2).font('Helvetica-Bold').fontSize(9)
-    .text(`${seg.al || ''} ${seg.fn || ''}`, midX, boxTop + 32, { width: colW, align: 'center' });
-  if (seg.aircraft) {
-    doc.fillColor(TX3).font('Helvetica').fontSize(8)
-      .text(seg.aircraft, midX, boxTop + 46, { width: colW, align: 'center' });
-  }
-
-  // Arrival
-  const rightX = x + pad + colW * 2;
-  doc.fillColor(TX).font('Helvetica-Bold').fontSize(15)
-    .text(fmtTime(seg.arr), rightX, boxTop + 12, { width: colW - pad, align: 'right' });
-  doc.fillColor(TX2).font('Helvetica').fontSize(9)
-    .text(seg.toLabel || seg.to, rightX, boxTop + 32, { width: colW - pad, align: 'right' });
-  doc.fillColor(TX3).fontSize(8)
-    .text(fmtDate(seg.arr), rightX, boxTop + 46, { width: colW - pad, align: 'right' });
-
-  doc.y = boxTop + boxHeight + 10;
-
-  // Terminal + baggage line, if we have it — small print under the box.
-  const extras = [];
-  if (seg.fromTerminal) extras.push(`Terminal ${seg.fromTerminal} (${seg.from})`);
-  if (seg.toTerminal) extras.push(`Terminal ${seg.toTerminal} (${seg.to})`);
-  const baggageNames = Object.keys(seg.baggageByPax || {});
-  if (baggageNames.length) {
-    baggageNames.forEach((name) => {
-      const parts = seg.baggageByPax[name].map((b) => {
-        const label = b.type === 'checked' ? 'Aufgabegepäck' : 'Handgepäck';
-        return b.quantity > 1 ? `${b.quantity}× ${label}` : label;
-      });
-      extras.push(`${name}: ${parts.join(', ')}`);
-    });
-  }
-  if (extras.length) {
-    doc.fillColor(TX3).font('Helvetica').fontSize(8).text(extras.join('  ·  '), x, doc.y, { width });
-    doc.moveDown(0.6);
-  }
-}
-
-function drawTableHeader(doc, cols, x) {
-  doc.font('Helvetica-Bold').fontSize(9).fillColor(TX3);
-  let cx = x;
-  cols.forEach((c) => {
-    doc.text(c.label.toUpperCase(), cx, doc.y, { width: c.width });
-    cx += c.width;
-  });
-  doc.moveDown(0.9);
-  doc.moveTo(x, doc.y).lineTo(x + cols.reduce((s, c) => s + c.width, 0), doc.y).strokeColor(BORDER).stroke();
+  ctx.font(true); doc.fillColor(TX).fontSize(ctx.fs(13)).text(text, x, doc.y, { width, align: ctx.alignStart });
   doc.moveDown(0.5);
 }
 
-function drawTableRow(doc, cols, values, x) {
-  const rowTop = doc.y;
-  doc.font('Helvetica').fontSize(10).fillColor(TX);
-  let cx = x;
-  let maxH = 0;
-  cols.forEach((c, i) => {
-    const h = doc.heightOfString(String(values[i] || ''), { width: c.width });
-    if (h > maxH) maxH = h;
-  });
-  cols.forEach((c, i) => {
-    doc.text(String(values[i] || ''), cx, rowTop, { width: c.width });
-    cx += c.width;
-  });
-  doc.y = rowTop + maxH + 8;
-  doc.moveTo(x, doc.y - 4).lineTo(x + cols.reduce((s, c) => s + c.width, 0), doc.y - 4).strokeColor(BG2).stroke();
+function ensureSpace(doc, needed) {
+  const bottom = doc.page.height - doc.page.margins.bottom;
+  if (doc.y + needed > bottom) doc.addPage();
 }
 
-// [MAIN-EXPORT] بيبني PDF كامل ويرجّعه كـBuffer (عشان يترفق في
-// الإيميل مباشرة). بيرجع Promise لأن pdfkit بيكتب بالـstream.
+// A label/value row with the label on the reading-start edge and the value
+// on the trailing edge — mirrored for RTL. Used by price summary + tickets.
+function twoColRow(doc, ctx, x, width, left, right, opts) {
+  const o = opts || {};
+  const wL = width * 0.62;
+  const wR = width * 0.38;
+  const y = doc.y;
+  ctx.font(!!o.leftBold); doc.fontSize(ctx.fs(o.leftSize || 10)).fillColor(o.leftColor || TX2);
+  ctx.font(!!o.rightBold); // set below per element
+  if (!ctx.rtl) {
+    ctx.font(!!o.leftBold); doc.fontSize(ctx.fs(o.leftSize || 10)).fillColor(o.leftColor || TX2).text(left, x, y, { width: wL, align: 'left' });
+    ctx.font(!!o.rightBold); doc.fontSize(ctx.fs(o.rightSize || 10)).fillColor(o.rightColor || TX).text(right, x + wL, y, { width: wR, align: 'right' });
+  } else {
+    ctx.font(!!o.leftBold); doc.fontSize(ctx.fs(o.leftSize || 10)).fillColor(o.leftColor || TX2).text(left, x + wR, y, { width: wL, align: 'right' });
+    ctx.font(!!o.rightBold); doc.fontSize(ctx.fs(o.rightSize || 10)).fillColor(o.rightColor || TX).text(right, x, y, { width: wR, align: 'left' });
+  }
+  doc.y = y;
+}
+
+// One bordered card per LEG; the border is stroked after the inner content so
+// its height wraps whatever actually rendered (variable per carrier).
+function drawLegCard(doc, ctx, leg, x, width) {
+  const segs = leg.segs || [];
+  if (!segs.length) return;
+  const first = segs[0];
+  const last = segs[segs.length - 1];
+  const legDur = (first.dep && last.arr)
+    ? Math.round((last.arr.getTime() - first.dep.getTime()) / 60000)
+    : segs.reduce((s, sg) => s + (sg.dur || 0), 0);
+  const carriers = [...new Set(segs.map((s) => s.al).filter(Boolean))];
+  const airlineLabel = carriers.length === 1 ? carriers[0] : (carriers.length > 1 ? ctx.t.multipleAirlines : '');
+  const stops = stopsLabel(ctx.t, segs.length - 1);
+
+  ensureSpace(doc, 120);
+  const boxTop = doc.y;
+  const pad = 14;
+  const innerX = x + pad;
+  const innerW = width - pad * 2;
+  const c1 = innerW * 0.42;
+  const c2 = innerW * 0.33;
+  const c3 = innerW * 0.25;
+  // Mirror the three header columns for RTL (time on the right, stops on the left).
+  const x1 = ctx.rtl ? innerX + c3 + c2 : innerX;
+  const x2 = ctx.rtl ? innerX + c3 : innerX + c1;
+  const x3 = ctx.rtl ? innerX : innerX + c1 + c2;
+  const hTop = boxTop + pad;
+
+  ctx.font(true); doc.fillColor(TX).fontSize(ctx.fs(13))
+    .text(`${fmtTime(first.dep)} – ${fmtTime(last.arr)}`, x1, hTop, { width: c1, align: ctx.alignStart });
+  if (airlineLabel) {
+    ctx.font(false); doc.fillColor(TX2).fontSize(ctx.fs(9)).text(airlineLabel, x1, hTop + 18, { width: c1, align: ctx.alignStart });
+  }
+  ctx.font(true); doc.fillColor(TX).fontSize(ctx.fs(11)).text(durStr(legDur), x2, hTop, { width: c2, align: ctx.alignStart });
+  ctx.font(false); doc.fillColor(TX2).fontSize(ctx.fs(9)).text(`${first.from} – ${last.to}`, x2, hTop + 17, { width: c2, align: ctx.alignStart });
+  ctx.font(false); doc.fillColor(TX2).fontSize(ctx.fs(9)).text(stops, x3, hTop, { width: c3, align: ctx.alignEnd });
+
+  doc.y = hTop + 34;
+  doc.moveTo(innerX, doc.y).lineTo(innerX + innerW, doc.y).strokeColor(BORDER).stroke();
+  doc.moveDown(0.5);
+
+  const dateW = innerW * 0.42;
+  const placeW = innerW * 0.58;
+  const dateX = ctx.rtl ? innerX + placeW : innerX;
+  const placeX = ctx.rtl ? innerX : innerX + dateW;
+
+  segs.forEach((seg, i) => {
+    let ry = doc.y;
+    ctx.font(true); doc.fillColor(TX).fontSize(ctx.fs(9.5))
+      .text(fmtDateLong(seg.dep, ctx.locale) + (seg.dep ? `, ${fmtTime(seg.dep)}` : ''), dateX, ry, { width: dateW, align: ctx.alignStart });
+    ctx.font(false); doc.fillColor(TX2).fontSize(ctx.fs(9.5))
+      .text(`${ctx.t.depart} ${airportLine(ctx, seg.fromName, seg.from, seg.fromTerminal)}`, placeX, ry, { width: placeW, align: ctx.alignStart });
+    doc.y = Math.max(doc.y, ry + 4);
+    doc.moveDown(0.2);
+
+    ctx.font(false); doc.fillColor(TX3).fontSize(ctx.fs(8.5))
+      .text(`${ctx.t.duration} ${durStr(seg.dur)}`, innerX, doc.y, { width: innerW, align: ctx.alignStart });
+    doc.moveDown(0.2);
+
+    ry = doc.y;
+    ctx.font(true); doc.fillColor(TX).fontSize(ctx.fs(9.5))
+      .text(fmtDateLong(seg.arr, ctx.locale) + (seg.arr ? `, ${fmtTime(seg.arr)}` : ''), dateX, ry, { width: dateW, align: ctx.alignStart });
+    ctx.font(false); doc.fillColor(TX2).fontSize(ctx.fs(9.5))
+      .text(`${ctx.t.arrive} ${airportLine(ctx, seg.toName, seg.to, seg.toTerminal)}`, placeX, ry, { width: placeW, align: ctx.alignStart });
+    doc.y = Math.max(doc.y, ry + 4);
+    doc.moveDown(0.35);
+
+    const foot = [seg.cabin, seg.al, seg.aircraft, seg.fn].filter(Boolean).join('  ·  ');
+    if (foot) {
+      ctx.font(false); doc.fillColor(TX3).fontSize(ctx.fs(8.5)).text(foot, innerX, doc.y, { width: innerW, align: ctx.alignStart });
+    }
+    doc.moveDown(0.4);
+
+    if (i < segs.length - 1) {
+      const nxt = segs[i + 1];
+      if (seg.arr && nxt.dep) {
+        const lay = Math.round((nxt.dep.getTime() - seg.arr.getTime()) / 60000);
+        if (lay > 0) {
+          ctx.font(false); doc.fillColor(TX3).fontSize(ctx.fs(8.5))
+            .text(`${ctx.t.layover} ${seg.toCity || seg.to} · ${durStr(lay)}`, innerX, doc.y, { width: innerW, align: ctx.alignStart });
+          doc.moveDown(0.4);
+        }
+      }
+    }
+  });
+
+  const boxBottom = doc.y + 4;
+  doc.roundedRect(x, boxTop, width, boxBottom - boxTop, 8).strokeColor(BORDER).lineWidth(1).stroke();
+  doc.y = boxBottom + 12;
+}
+
+function drawPassengerBlock(doc, ctx, pax, idx, x, width) {
+  ensureSpace(doc, 90);
+  const pad = 14;
+  const innerX = x + pad;
+  const innerW = width - pad * 2;
+  const boxTop = doc.y;
+
+  ctx.font(true); doc.fillColor(TX3).fontSize(ctx.fs(8.5))
+    .text(paxTypeLabel(ctx, pax.type, idx), innerX, boxTop + pad, { width: innerW, align: ctx.alignStart });
+  doc.moveDown(0.4);
+
+  // Name / DOB / gender — three columns, mirrored for RTL.
+  const w = [innerW * 0.45, innerW * 0.25, innerW * 0.3];
+  const labels = [ctx.t.name, ctx.t.dob, ctx.t.gender];
+  const genderStr = pax.genderCode === 'f' ? ctx.t.female : pax.genderCode === 'm' ? ctx.t.male : '—';
+  const vals = [pax.name || '—', pax.dob || '—', genderStr];
+  const xs = ctx.rtl
+    ? [innerX + w[1] + w[2], innerX + w[2], innerX]
+    : [innerX, innerX + w[0], innerX + w[0] + w[1]];
+  const labY = doc.y;
+  ctx.font(false); doc.fontSize(ctx.fs(8)).fillColor(TX3);
+  labels.forEach((l, i) => doc.text(l, xs[i], labY, { width: w[i], align: ctx.alignStart }));
+  doc.moveDown(0.15);
+  const valY = doc.y;
+  ctx.font(true); doc.fontSize(ctx.fs(10.5)).fillColor(TX);
+  vals.forEach((v, i) => doc.text(String(v), xs[i], valY, { width: w[i], align: ctx.alignStart }));
+  doc.y = valY;
+  doc.moveDown(1);
+
+  const flights = pax.flights || [];
+  if (flights.length) {
+    ctx.font(true); doc.fillColor(TX2).fontSize(ctx.fs(9)).text(ctx.t.flightInfo, innerX, doc.y, { width: innerW, align: ctx.alignStart });
+    doc.moveDown(0.4);
+    flights.forEach((f) => {
+      const fTop = doc.y;
+      const routeLine = `${f.from} → ${f.to}` + (f.dep ? ` · ${fmtDateLong(f.dep, ctx.locale)}, ${fmtTime(f.dep)}` : '');
+      ctx.font(true); doc.fillColor(TX).fontSize(ctx.fs(9)).text(routeLine, innerX + 10, fTop + 6, { width: innerW - 20, align: ctx.alignStart });
+      const extras = [];
+      if (f.seat) extras.push(`${ctx.t.seat} ${f.seat}`);
+      (f.bags || []).forEach((b) => extras.push(bagLabel(ctx.t, b)));
+      if (extras.length) {
+        ctx.font(false); doc.fillColor(TX2).fontSize(ctx.fs(8.5))
+          .text(extras.join('   ·   '), innerX + 10, doc.y + 1, { width: innerW - 20, align: ctx.alignStart });
+      }
+      const fBottom = doc.y + 6;
+      doc.roundedRect(innerX, fTop, innerW, fBottom - fTop, 5).strokeColor(BORDER).lineWidth(0.8).stroke();
+      doc.y = fBottom + 6;
+    });
+  }
+
+  const boxBottom = doc.y + 4;
+  doc.roundedRect(x, boxTop, width, boxBottom - boxTop, 8).strokeColor(BORDER).lineWidth(1).stroke();
+  doc.y = boxBottom + 12;
+}
+
+// [MAIN-EXPORT] بيبني PDF كامل ويرجّعه كـBuffer. data.lang يحدّد اللغة.
 function buildTicketPdf(data) {
   return new Promise((resolve, reject) => {
     try {
@@ -156,60 +293,66 @@ function buildTicketPdf(data) {
       doc.on('end', () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
 
+      // Register the embedded Arabic font (Amiri) — used only when lang=ar;
+      // Latin languages keep pdfkit's built-in Helvetica.
+      doc.registerFont('NotoAr', path.join(FONT_DIR, 'NotoSansArabic-Regular.ttf'));
+      doc.registerFont('NotoArBold', path.join(FONT_DIR, 'NotoSansArabic-Bold.ttf'));
+
+      const ctx = makeCtx(doc, data.lang);
       const marginX = 40;
       const contentWidth = doc.page.width - marginX * 2;
+      const legs = data.legs || [];
 
-      drawHeader(doc, data.bookingRef);
+      drawHeader(doc, ctx, data.bookingRef);
 
       // ── Flight details ──
-      sectionTitle(doc, 'Flugdetails');
-      (data.legs || []).forEach((leg, legIdx) => {
-        if ((data.legs || []).length > 1) {
-          doc.fillColor(TX3).font('Helvetica-Bold').fontSize(9)
-            .text((data.legs.length > 2 ? `Flug ${legIdx + 1}` : legIdx === 0 ? 'Hinflug' : 'Rückflug').toUpperCase(), marginX, doc.y);
-          doc.moveDown(0.4);
+      sectionTitle(doc, ctx, ctx.t.flightDetails, marginX, contentWidth);
+      legs.forEach((leg, legIdx) => {
+        if (legs.length > 1) {
+          const label = legs.length > 2 ? `${ctx.t.flight} ${legIdx + 1}` : (legIdx === 0 ? ctx.t.outbound : ctx.t.return);
+          ensureSpace(doc, 130);
+          ctx.font(true); doc.fillColor(TX3).fontSize(ctx.fs(9))
+            .text(ctx.rtl ? label : label.toUpperCase(), marginX, doc.y, { width: contentWidth, align: ctx.alignStart });
+          doc.moveDown(0.35);
         }
-        (leg.segs || []).forEach((seg) => drawFlightBox(doc, seg, marginX, contentWidth));
+        drawLegCard(doc, ctx, leg, marginX, contentWidth);
       });
 
       // ── Passengers ──
       doc.moveDown(0.4);
-      sectionTitle(doc, 'Reisende');
-      const paxCols = [
-        { label: 'Name', width: contentWidth * 0.45 },
-        { label: 'Geburtsdatum', width: contentWidth * 0.25 },
-        { label: 'Geschlecht', width: contentWidth * 0.3 },
-      ];
-      drawTableHeader(doc, paxCols, marginX);
+      sectionTitle(doc, ctx, ctx.t.travelers, marginX, contentWidth);
+      const paxByType = {};
       (data.passengers || []).forEach((p) => {
-        drawTableRow(doc, paxCols, [p.name, p.dob || '—', p.gender || '—'], marginX);
+        const key = p.type || 'adult';
+        paxByType[key] = (paxByType[key] || 0) + 1;
+        drawPassengerBlock(doc, ctx, p, paxByType[key], marginX, contentWidth);
       });
 
-      // ── Ticket numbers (only if we actually have them) ──
+      // ── Ticket numbers ──
       const ticketNames = Object.keys(data.ticketByPax || {});
       if (ticketNames.length) {
-        doc.moveDown(0.6);
-        sectionTitle(doc, 'Ticketnummern');
-        const tCols = [
-          { label: 'Name', width: contentWidth * 0.6 },
-          { label: 'Ticketnummer', width: contentWidth * 0.4 },
-        ];
-        drawTableHeader(doc, tCols, marginX);
+        doc.moveDown(0.2);
+        sectionTitle(doc, ctx, ctx.t.ticketNumbers, marginX, contentWidth);
         ticketNames.forEach((name) => {
-          drawTableRow(doc, tCols, [name, data.ticketByPax[name]], marginX);
+          ensureSpace(doc, 24);
+          twoColRow(doc, ctx, marginX, contentWidth, name, String(data.ticketByPax[name]), { rightBold: true });
+          doc.moveDown(0.6);
         });
       }
 
       // ── Price summary ──
       if (data.priceRows && data.priceRows.length) {
-        doc.moveDown(0.6);
-        sectionTitle(doc, 'Preisübersicht');
+        doc.moveDown(0.4);
+        sectionTitle(doc, ctx, ctx.t.priceSummary, marginX, contentWidth);
+        const labelFor = { ticket: ctx.t.pTicket, bags: ctx.t.pBags, seats: ctx.t.pSeats, loyalty: ctx.t.pLoyalty, total: ctx.t.pTotal };
         data.priceRows.forEach((row) => {
-          doc.font(row.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(row.bold ? 12 : 10)
-            .fillColor(row.bold ? TX : TX2);
-          const y = doc.y;
-          doc.text(row.label, marginX, y, { width: contentWidth * 0.7 });
-          doc.text(row.value, marginX + contentWidth * 0.7, y, { width: contentWidth * 0.3, align: 'right' });
+          ensureSpace(doc, 24);
+          const label = labelFor[row.key] || row.key;
+          twoColRow(doc, ctx, marginX, contentWidth, label, row.value, {
+            leftBold: !!row.bold, rightBold: !!row.bold,
+            leftColor: row.bold ? TX : TX2, rightColor: row.bold ? TX : TX2,
+            leftSize: row.bold ? 12 : 10, rightSize: row.bold ? 12 : 10,
+          });
           doc.moveDown(0.5);
           if (row.bold) {
             doc.moveTo(marginX, doc.y).lineTo(marginX + contentWidth, doc.y).strokeColor(BORDER).stroke();
@@ -219,16 +362,13 @@ function buildTicketPdf(data) {
       }
 
       // ── Footer ──
-      // [PDF-FOOTER-FIX] بيتبع تدفق المحتوى العادي دلوقتي، بدل ما
-      // يُحسب مكانه الثابت من نهاية الصفحة — الحساب الثابت كان بيعمل
-      // صفحة تانية شبه فاضية لو المحتوى مش وصل بالضبط لآخر الصفحة.
       doc.moveDown(1.2);
       doc.moveTo(marginX, doc.y).lineTo(doc.page.width - marginX, doc.y).strokeColor(BORDER).stroke();
       doc.moveDown(0.6);
-      doc.fillColor(TX3).font('Helvetica').fontSize(8.5)
+      ctx.font(false); doc.fillColor(TX3).fontSize(ctx.fs(8.5))
         .text('Airpiv · support@airpiv.com · +49 30 568 37 100', marginX, doc.y, { width: contentWidth, align: 'center' });
       doc.moveDown(0.3);
-      doc.text('Diese Übersicht ersetzt nicht das offizielle Ticket der Fluggesellschaft.', marginX, doc.y, { width: contentWidth, align: 'center' });
+      doc.text(ctx.t.disclaimer, marginX, doc.y, { width: contentWidth, align: 'center' });
 
       doc.end();
     } catch (err) {
@@ -237,4 +377,4 @@ function buildTicketPdf(data) {
   });
 }
 
-module.exports = { buildTicketPdf };
+module.exports = { buildTicketPdf, SUPPORTED_TICKET_LANGS: SUPPORTED };
