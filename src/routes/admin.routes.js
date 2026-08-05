@@ -618,6 +618,22 @@ app.delete('/admin/social-posts/:id', rateLimit('admin', 120, 60000), requireAdm
   }
 });
 
+// [CONTENT-OPPORTUNITY] "Recommended Today" candidates for the Social Studio:
+// routes with a real price drop (recent vs. baseline in route_price_history)
+// or a high route_score, with their raw signals. Computed by the
+// content_opportunities() SQL function; the frontend applies the scoring model.
+app.get('/admin/content-opportunities', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 60, 1), 200);
+    const { data, error } = await supa.rpc('content_opportunities', { limit_n: limit });
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, opportunities: data || [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.post('/admin/route-pages/clear-price-cache', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
