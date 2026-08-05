@@ -540,6 +540,84 @@ app.delete('/admin/blog-posts/:id', rateLimit('admin', 120, 60000), requireAdmin
   }
 });
 
+// ─── Social Studio: generated social-post queue ───
+// Frontend-authored content stored in social_posts (RLS-gated; only this
+// service-role client reaches it). Mirrors the blog-posts admin CRUD shape,
+// so the Next.js admin can proxy to it via adminFetch — no separate DB key
+// in the frontend.
+const SOCIAL_STATUS = ['draft', 'pending_review', 'approved', 'scheduled', 'published', 'failed'];
+
+app.get('/admin/social-posts', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    let q = supa.from('social_posts').select('*').order('created_at', { ascending: false }).limit(200);
+    if (req.query.status && SOCIAL_STATUS.includes(req.query.status)) q = q.eq('status', req.query.status);
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, posts: data || [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/admin/social-posts', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const b = req.body || {};
+    const row = {
+      status: SOCIAL_STATUS.includes(b.status) ? b.status : 'draft',
+      platform: b.platform, language: b.language, template_type: b.template_type,
+      subject_type: b.subject_type || null, subject_ref: b.subject_ref || null,
+      title: b.title || null, body: b.body,
+      hashtags: Array.isArray(b.hashtags) ? b.hashtags.slice(0, 40).map(String) : [],
+      cta_label: b.cta_label || null, cta_url: b.cta_url || null, image_brief: b.image_brief || null,
+      scheduled_at: b.scheduled_at || null, created_by: req.adminUserId || 'admin', notes: b.notes || null,
+    };
+    if (!row.platform || !row.language || !row.template_type || !row.body) {
+      return res.status(400).json({ ok: false, error: 'missing required fields (platform, language, template_type, body)' });
+    }
+    const { data, error } = await supa.from('social_posts').insert(row).select().maybeSingle();
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, post: data });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.put('/admin/social-posts/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const b = req.body || {};
+    const update = {};
+    if (b.status !== undefined) {
+      if (!SOCIAL_STATUS.includes(b.status)) return res.status(400).json({ ok: false, error: 'invalid status' });
+      update.status = b.status;
+    }
+    if (b.scheduled_at !== undefined) update.scheduled_at = b.scheduled_at || null;
+    if (b.published_at !== undefined) update.published_at = b.published_at || null;
+    if (b.external_url !== undefined) update.external_url = b.external_url || null;
+    if (b.notes !== undefined) update.notes = b.notes || null;
+    if (Object.keys(update).length === 0) return res.status(400).json({ ok: false, error: 'nothing to update' });
+    const { data, error } = await supa.from('social_posts').update(update).eq('id', req.params.id).select().maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) return res.status(404).json({ ok: false, error: 'Beitrag nicht gefunden' });
+    res.json({ ok: true, post: data });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.delete('/admin/social-posts/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { error } = await supa.from('social_posts').delete().eq('id', req.params.id);
+    if (error) throw new Error(error.message);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.post('/admin/route-pages/clear-price-cache', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
