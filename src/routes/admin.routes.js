@@ -553,6 +553,7 @@ app.get('/admin/social-posts', rateLimit('admin', 120, 60000), requireAdmin, asy
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     let q = supa.from('social_posts').select('*').order('created_at', { ascending: false }).limit(200);
     if (req.query.status && SOCIAL_STATUS.includes(req.query.status)) q = q.eq('status', req.query.status);
+    if (req.query.campaign) q = q.eq('campaign', String(req.query.campaign).slice(0, 120));
     const { data, error } = await q;
     if (error) throw new Error(error.message);
     res.json({ ok: true, posts: data || [] });
@@ -573,6 +574,7 @@ app.post('/admin/social-posts', rateLimit('admin', 120, 60000), requireAdmin, as
       hashtags: Array.isArray(b.hashtags) ? b.hashtags.slice(0, 40).map(String) : [],
       cta_label: b.cta_label || null, cta_url: b.cta_url || null, image_brief: b.image_brief || null,
       scheduled_at: b.scheduled_at || null, created_by: req.adminUserId || 'admin', notes: b.notes || null,
+      campaign: b.campaign ? String(b.campaign).slice(0, 120) : null,
     };
     if (!row.platform || !row.language || !row.template_type || !row.body) {
       return res.status(400).json({ ok: false, error: 'missing required fields (platform, language, template_type, body)' });
@@ -598,6 +600,7 @@ app.put('/admin/social-posts/:id', rateLimit('admin', 120, 60000), requireAdmin,
     if (b.published_at !== undefined) update.published_at = b.published_at || null;
     if (b.external_url !== undefined) update.external_url = b.external_url || null;
     if (b.notes !== undefined) update.notes = b.notes || null;
+    if (b.campaign !== undefined) update.campaign = b.campaign ? String(b.campaign).slice(0, 120) : null;
     if (Object.keys(update).length === 0) return res.status(400).json({ ok: false, error: 'nothing to update' });
     const { data, error } = await supa.from('social_posts').update(update).eq('id', req.params.id).select().maybeSingle();
     if (error) throw new Error(error.message);

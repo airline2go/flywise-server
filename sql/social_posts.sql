@@ -23,11 +23,13 @@ create table if not exists public.social_posts (
   external_url text,
   metrics jsonb not null default '{}'::jsonb,
   created_by text,
-  notes text
+  notes text,
+  campaign text
 );
 create index if not exists social_posts_status_idx on public.social_posts (status);
 create index if not exists social_posts_scheduled_idx on public.social_posts (scheduled_at);
 create index if not exists social_posts_created_idx on public.social_posts (created_at desc);
+create index if not exists social_posts_campaign_idx on public.social_posts (campaign) where campaign is not null;
 
 create or replace function public.social_posts_touch_updated_at()
 returns trigger as $$
