@@ -548,6 +548,34 @@ app.delete('/admin/blog-posts/:id', rateLimit('admin', 120, 60000), requireAdmin
 // in the frontend.
 const SOCIAL_STATUS = ['draft', 'pending_review', 'approved', 'scheduled', 'published', 'failed'];
 
+// [SOCIAL-ACTIVITY] Fire-and-forget audit trail for social_posts mutations.
+// Deliberately never awaited and never throws: a logging hiccup must not turn a
+// successful create/update/delete into a 500 for the operator.
+function logSocialActivity(entry) {
+  if (!supa) return;
+  Promise.resolve(supa.from('social_activity').insert({
+    action: entry.action,
+    post_id: entry.post_id || null,
+    subject_ref: entry.subject_ref || null,
+    platform: entry.platform || null,
+    actor: entry.actor || null,
+    detail: entry.detail || {},
+  })).then(({ error } = {}) => { if (error) log('warn', 'social_activity_log_failed', { error: error.message }); })
+    .catch((e) => log('warn', 'social_activity_log_failed', { error: e.message }));
+}
+
+app.get('/admin/social-activity', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { data, error } = await supa.from('social_activity')
+      .select('*').order('created_at', { ascending: false }).limit(100);
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, activity: data || [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/admin/social-posts', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
@@ -581,6 +609,10 @@ app.post('/admin/social-posts', rateLimit('admin', 120, 60000), requireAdmin, as
     }
     const { data, error } = await supa.from('social_posts').insert(row).select().maybeSingle();
     if (error) throw new Error(error.message);
+    logSocialActivity({
+      action: 'created', post_id: data && data.id, subject_ref: row.subject_ref, platform: row.platform,
+      actor: req.adminUserId || 'admin', detail: { template_type: row.template_type, language: row.language, campaign: row.campaign },
+    });
     res.json({ ok: true, post: data });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -605,6 +637,11 @@ app.put('/admin/social-posts/:id', rateLimit('admin', 120, 60000), requireAdmin,
     const { data, error } = await supa.from('social_posts').update(update).eq('id', req.params.id).select().maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return res.status(404).json({ ok: false, error: 'Beitrag nicht gefunden' });
+    logSocialActivity({
+      action: update.status !== undefined ? 'status_changed' : 'updated',
+      post_id: data.id, subject_ref: data.subject_ref, platform: data.platform,
+      actor: req.adminUserId || 'admin', detail: update,
+    });
     res.json({ ok: true, post: data });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -614,8 +651,14 @@ app.put('/admin/social-posts/:id', rateLimit('admin', 120, 60000), requireAdmin,
 app.delete('/admin/social-posts/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { data: existing } = await supa.from('social_posts').select('subject_ref, platform').eq('id', req.params.id).maybeSingle();
     const { error } = await supa.from('social_posts').delete().eq('id', req.params.id);
     if (error) throw new Error(error.message);
+    logSocialActivity({
+      action: 'deleted', post_id: req.params.id,
+      subject_ref: existing && existing.subject_ref, platform: existing && existing.platform,
+      actor: req.adminUserId || 'admin',
+    });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
