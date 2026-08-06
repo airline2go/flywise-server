@@ -27,6 +27,7 @@ const { haversineDistanceKm, classifyHaul, ensureCountryExists, ensureCityExists
 const triggerRebuild = require('../utils/triggerRebuild');
 const { translateAndStoreAllLanguages } = require('../services/blogTranslation');
 const { DEFAULT_ROUTE_SCORE_CONFIG } = require('../services/routeScore');
+const socialAuto = require('../services/socialAutoGenerate');
 
 // [MULTILANG-BLOG] Fire-and-forget: translate a just-published German post into
 // every other site language and store each in blog_post_translations, then
@@ -632,6 +633,28 @@ app.get('/admin/content-opportunities', rateLimit('admin', 120, 60000), requireA
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
+});
+
+// [SOCIAL-AUTOMATION] Daily auto-generation config + manual trigger.
+app.get('/admin/social-auto-generate/config', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
+  try {
+    res.json({ ok: true, config: await socialAuto.getConfig() });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.put('/admin/social-auto-generate/config', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
+  try {
+    res.json({ ok: true, config: await socialAuto.setConfig(req.body || {}) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/admin/social-auto-generate/run', rateLimit('admin', 30, 60000), requireAdmin, async (req, res) => {
+  const result = await socialAuto.autoGenerateOnce(true);
+  res.status(result.ok ? 200 : 500).json(result);
 });
 
 app.post('/admin/route-pages/clear-price-cache', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
