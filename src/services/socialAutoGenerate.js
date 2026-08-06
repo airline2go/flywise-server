@@ -14,7 +14,8 @@ const { generateSocialPost } = require('./socialGenerator');
 const CONFIG_KEY = 'social_auto_generate';
 const LAST_RUN_KEY = 'social_auto_generate_last_run';
 const CHECK_INTERVAL_MS = 60 * 60 * 1000; // hourly; a per-day guard limits real runs
-const DEFAULT_CONFIG = { enabled: false, platforms: ['instagram'], languages: ['de'], dailyCount: 3 };
+const FREQUENCIES = ['off', 'daily', 'weekly'];
+const DEFAULT_CONFIG = { frequency: 'off', platforms: ['instagram'], languages: ['de'], dailyCount: 3 };
 const VALID_PLATFORMS = ['facebook', 'instagram', 'x', 'linkedin', 'pinterest', 'threads'];
 const VALID_LANGS = ['en', 'de', 'es', 'fr', 'it', 'nl', 'ar'];
 
@@ -22,10 +23,14 @@ function clampCount(n) { return Math.min(Math.max(parseInt(n, 10) || 3, 1), 20);
 
 async function getConfig() {
   const cfg = (await getAdminConfig(CONFIG_KEY, DEFAULT_CONFIG)) || DEFAULT_CONFIG;
+  // frequency is the on/off + cadence control; fall back to the legacy
+  // `enabled` boolean (enabled -> daily) so old config keeps working.
+  const frequency = FREQUENCIES.includes(cfg.frequency) ? cfg.frequency : (cfg.enabled ? 'daily' : 'off');
   const platforms = Array.isArray(cfg.platforms) ? cfg.platforms.filter((p) => VALID_PLATFORMS.includes(p)) : [];
   const languages = Array.isArray(cfg.languages) ? cfg.languages.filter((l) => VALID_LANGS.includes(l)) : [];
   return {
-    enabled: !!cfg.enabled,
+    frequency,
+    enabled: frequency !== 'off',
     platforms: platforms.length ? platforms : DEFAULT_CONFIG.platforms,
     languages: languages.length ? languages : DEFAULT_CONFIG.languages,
     dailyCount: clampCount(cfg.dailyCount),
@@ -34,8 +39,11 @@ async function getConfig() {
 
 async function setConfig(patch = {}) {
   const cur = await getConfig();
+  let frequency = cur.frequency;
+  if (patch.frequency !== undefined) frequency = FREQUENCIES.includes(patch.frequency) ? patch.frequency : cur.frequency;
+  else if (patch.enabled !== undefined) frequency = patch.enabled ? (cur.frequency === 'off' ? 'daily' : cur.frequency) : 'off';
   const next = {
-    enabled: patch.enabled !== undefined ? !!patch.enabled : cur.enabled,
+    frequency,
     platforms: Array.isArray(patch.platforms) ? patch.platforms.filter((p) => VALID_PLATFORMS.includes(p)) : cur.platforms,
     languages: Array.isArray(patch.languages) ? patch.languages.filter((l) => VALID_LANGS.includes(l)) : cur.languages,
     dailyCount: patch.dailyCount !== undefined ? clampCount(patch.dailyCount) : cur.dailyCount,
@@ -43,7 +51,7 @@ async function setConfig(patch = {}) {
   if (!next.platforms.length) next.platforms = DEFAULT_CONFIG.platforms;
   if (!next.languages.length) next.languages = DEFAULT_CONFIG.languages;
   await setAdminConfig(CONFIG_KEY, next);
-  return next;
+  return { ...next, enabled: frequency !== 'off' };
 }
 
 // Real price with its currency symbol — never invented.
@@ -62,12 +70,16 @@ async function autoGenerateOnce(force = false) {
   if (!supa) return { ok: false, error: 'Datenbank nicht verfügbar' };
   try {
     const cfg = await getConfig();
-    if (!force && !cfg.enabled) return { ok: true, created: 0, skipped: 'disabled' };
+    if (!force && cfg.frequency === 'off') return { ok: true, created: 0, skipped: 'off' };
 
     const today = new Date().toISOString().slice(0, 10);
     if (!force) {
       const last = await getAdminConfig(LAST_RUN_KEY, null);
-      if (last === today) return { ok: true, created: 0, skipped: 'already_ran_today' };
+      if (last) {
+        const daysSince = Math.floor((Date.parse(today) - Date.parse(last)) / 86400000);
+        if (cfg.frequency === 'daily' && daysSince < 1) return { ok: true, created: 0, skipped: 'ran_today' };
+        if (cfg.frequency === 'weekly' && daysSince < 7) return { ok: true, created: 0, skipped: 'ran_this_week' };
+      }
     }
 
     const { data: opps, error } = await supa.rpc('content_opportunities', { limit_n: cfg.dailyCount });
