@@ -564,6 +564,23 @@ function logSocialActivity(entry) {
     .catch((e) => log('warn', 'social_activity_log_failed', { error: e.message }));
 }
 
+// [SOCIAL-VERSIONS] Snapshot a post's current content before it's overwritten,
+// so edits and reverts are undoable. Awaited (ordering matters) but never
+// throws — a snapshot failure must not block the edit the operator asked for.
+async function snapshotVersion(post, editor) {
+  if (!supa || !post) return;
+  try {
+    const { error } = await supa.from('social_post_versions').insert({
+      post_id: post.id, editor: editor || null,
+      title: post.title, body: post.body, hashtags: post.hashtags || [],
+      cta_label: post.cta_label, cta_url: post.cta_url, image_brief: post.image_brief, campaign: post.campaign,
+    });
+    if (error) log('warn', 'social_version_snapshot_failed', { error: error.message });
+  } catch (e) {
+    log('warn', 'social_version_snapshot_failed', { error: e.message });
+  }
+}
+
 app.get('/admin/social-activity', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
@@ -633,12 +650,30 @@ app.put('/admin/social-posts/:id', rateLimit('admin', 120, 60000), requireAdmin,
     if (b.external_url !== undefined) update.external_url = b.external_url || null;
     if (b.notes !== undefined) update.notes = b.notes || null;
     if (b.campaign !== undefined) update.campaign = b.campaign ? String(b.campaign).slice(0, 120) : null;
+
+    // Content edits — versioned. Any of these changing snapshots the prior
+    // version first, so the edit can be undone.
+    let contentChanged = false;
+    if (b.title !== undefined) { update.title = b.title || null; contentChanged = true; }
+    if (b.body !== undefined) {
+      if (!String(b.body).trim()) return res.status(400).json({ ok: false, error: 'body cannot be empty' });
+      update.body = String(b.body); contentChanged = true;
+    }
+    if (b.hashtags !== undefined) { update.hashtags = Array.isArray(b.hashtags) ? b.hashtags.slice(0, 40).map(String) : []; contentChanged = true; }
+    if (b.cta_label !== undefined) { update.cta_label = b.cta_label || null; contentChanged = true; }
+    if (b.cta_url !== undefined) { update.cta_url = b.cta_url || null; contentChanged = true; }
+    if (b.image_brief !== undefined) { update.image_brief = b.image_brief || null; contentChanged = true; }
+
     if (Object.keys(update).length === 0) return res.status(400).json({ ok: false, error: 'nothing to update' });
+    if (contentChanged) {
+      const { data: cur } = await supa.from('social_posts').select('*').eq('id', req.params.id).maybeSingle();
+      if (cur) await snapshotVersion(cur, req.adminUserId || 'admin');
+    }
     const { data, error } = await supa.from('social_posts').update(update).eq('id', req.params.id).select().maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return res.status(404).json({ ok: false, error: 'Beitrag nicht gefunden' });
     logSocialActivity({
-      action: update.status !== undefined ? 'status_changed' : 'updated',
+      action: update.status !== undefined ? 'status_changed' : (contentChanged ? 'edited' : 'updated'),
       post_id: data.id, subject_ref: data.subject_ref, platform: data.platform,
       actor: req.adminUserId || 'admin', detail: update,
     });
@@ -660,6 +695,46 @@ app.delete('/admin/social-posts/:id', rateLimit('admin', 120, 60000), requireAdm
       actor: req.adminUserId || 'admin',
     });
     res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// [SOCIAL-VERSIONS] Prior content snapshots for a post (newest first).
+app.get('/admin/social-posts/:id/versions', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { data, error } = await supa.from('social_post_versions')
+      .select('*').eq('post_id', req.params.id).order('created_at', { ascending: false }).limit(50);
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, versions: data || [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// [SOCIAL-VERSIONS] Restore a post's content to an earlier snapshot. The
+// current content is snapshotted first, so the revert is itself undoable.
+app.post('/admin/social-posts/:id/revert', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const versionId = (req.body || {}).version_id;
+    if (!versionId) return res.status(400).json({ ok: false, error: 'version_id required' });
+    const { data: version } = await supa.from('social_post_versions').select('*').eq('id', versionId).eq('post_id', req.params.id).maybeSingle();
+    if (!version) return res.status(404).json({ ok: false, error: 'Version nicht gefunden' });
+    const { data: cur } = await supa.from('social_posts').select('*').eq('id', req.params.id).maybeSingle();
+    if (!cur) return res.status(404).json({ ok: false, error: 'Beitrag nicht gefunden' });
+    await snapshotVersion(cur, req.adminUserId || 'admin');
+    const { data, error } = await supa.from('social_posts').update({
+      title: version.title, body: version.body, hashtags: version.hashtags || [],
+      cta_label: version.cta_label, cta_url: version.cta_url, image_brief: version.image_brief,
+    }).eq('id', req.params.id).select().maybeSingle();
+    if (error) throw new Error(error.message);
+    logSocialActivity({
+      action: 'reverted', post_id: req.params.id, subject_ref: data && data.subject_ref, platform: data && data.platform,
+      actor: req.adminUserId || 'admin', detail: { version_id: versionId },
+    });
+    res.json({ ok: true, post: data });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
