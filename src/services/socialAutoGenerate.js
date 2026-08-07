@@ -121,6 +121,12 @@ async function autoGenerateOnce(force = false) {
       const { error: insErr } = await supa.from('social_posts').insert(rows);
       if (insErr) throw new Error(insErr.message);
       created = rows.length;
+      // Fire-and-forget audit entry so the Studio's activity feed shows
+      // automated batches alongside manual actions. Never blocks the run.
+      supa.from('social_activity').insert({
+        action: 'auto_generated', actor: 'auto',
+        detail: { count: created, platforms: cfg.platforms, language: cfg.languages[0], force },
+      }).then(() => {}, () => {});
     }
     await setAdminConfig(LAST_RUN_KEY, today);
     log('info', 'social_auto_generated', { created, force });
