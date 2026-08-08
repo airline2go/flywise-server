@@ -65,6 +65,30 @@ module.exports = (app) => {
     }
   });
 
+  // ── Store a client-provided suggestion (e.g. the rules fallback) ────────
+  // Lets a suggestion generated outside this endpoint (the deterministic rule
+  // engine in the frontend, when the AI path is unavailable) still be persisted
+  // for the review lifecycle, so an operator can approve/apply it too.
+  app.post('/admin/seo/optimizations', rateLimit('admin', 60, 60000), requireAdmin, async (req, res) => {
+    const body = req.body || {};
+    const slug = typeof body.slug === 'string' && SLUG_RE.test(body.slug) ? body.slug : null;
+    if (!slug) return res.status(400).json({ ok: false, error: 'slug erforderlich' });
+    if (!body.suggestions || typeof body.suggestions !== 'object') {
+      return res.status(400).json({ ok: false, error: 'suggestions erforderlich' });
+    }
+    const id = await store.storeOptimization({
+      slug,
+      language: typeof body.language === 'string' ? body.language : 'de',
+      source: body.source === 'ai' ? 'ai' : 'rules',
+      model: typeof body.model === 'string' ? body.model : null,
+      dominantIntent: typeof body.dominantIntent === 'string' ? body.dominantIntent : null,
+      gsc: body.gsc && typeof body.gsc === 'object' ? body.gsc : null,
+      suggestions: body.suggestions,
+      createdBy: req.adminUserId || req.adminRole || null,
+    });
+    return res.json({ ok: true, id, configured: id != null });
+  });
+
   // ── History for a route ────────────────────────────────────────────────
   app.get('/admin/seo/optimizations', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
     const slug = (req.query.slug || '').trim();

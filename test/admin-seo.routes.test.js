@@ -102,6 +102,23 @@ describe('POST /admin/seo/optimize — auth + validation + degradation', () => {
   });
 });
 
+describe('POST /admin/seo/optimizations — store a client-provided suggestion', () => {
+  test('rejects without a slug or suggestions', async () => {
+    const r1 = await request(buildApp()).post('/admin/seo/optimizations').set(OWNER_AUTH).send({ suggestions: {} });
+    expect(r1.status).toBe(400);
+    const r2 = await request(buildApp()).post('/admin/seo/optimizations').set(OWNER_AUTH).send({ slug: 'hamburg-barcelona' });
+    expect(r2.status).toBe(400);
+  });
+
+  test('stores a rules suggestion and returns its id', async () => {
+    supa.__push('seo_route_optimizations', { single: { data: { id: 'o9' }, error: null } });
+    const res = await request(buildApp()).post('/admin/seo/optimizations').set(OWNER_AUTH)
+      .send({ slug: 'hamburg-barcelona', language: 'de', source: 'rules', suggestions: { title: { proposed: 'X | Airpiv', changeRecommended: true } } });
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe('o9');
+  });
+});
+
 describe('GET /admin/seo/optimizations — history', () => {
   test('requires a valid slug', async () => {
     const res = await request(buildApp()).get('/admin/seo/optimizations').set(OWNER_AUTH);
