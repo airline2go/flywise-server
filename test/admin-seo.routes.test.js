@@ -239,4 +239,15 @@ describe('parseSuggestion — tolerant + non-fabricating', () => {
     expect(out.cities).toBeNull(); // never fabricated
     expect(out.title.proposed).toBeNull();
   });
+
+  test('recovers JSON wrapped in prose or an unclosed fence', () => {
+    const obj = { cities: { origin: 'Berlin', destination: 'Rom' }, opportunity: false, title: { proposed: 'X | Airpiv', changeRecommended: true } };
+    const withProse = `Sure! Here is the JSON you asked for:\n\n${JSON.stringify(obj)}\n\nLet me know if you need changes.`;
+    const out = parseSuggestion(withProse);
+    expect(out.cities).toEqual({ origin: 'Berlin', destination: 'Rom' });
+    expect(out.title.proposed).toBe('X | Airpiv');
+    // A leftover ```json fence without a closing fence still parses.
+    const fenced = '```json\n' + JSON.stringify(obj);
+    expect(parseSuggestion(fenced).title.changeRecommended).toBe(true);
+  });
 });
