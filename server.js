@@ -108,6 +108,7 @@ require('./src/routes/admin-customers.routes')(app);
 require('./src/routes/admin-geo.routes')(app);
 require('./src/routes/admin-airlines.routes')(app);
 require('./src/routes/admin-seo.routes')(app);
+require('./src/routes/admin-gsc.routes')(app);
 
 // [ROUTE-SCORE-4A] Not route registrars — each of these self-starts its
 // own background timer the moment it's required (same pattern as
