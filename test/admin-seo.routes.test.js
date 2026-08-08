@@ -37,11 +37,15 @@ jest.mock('../src/clients/supabase', () => {
   };
 });
 
+jest.mock('../src/utils/triggerRebuild');
+
 const express = require('express');
 const request = require('supertest');
 const supa = require('../src/clients/supabase');
 const env = require('../src/config/env');
+const triggerRebuild = require('../src/utils/triggerRebuild');
 const { parseSuggestion, generateRouteOptimization } = require('../src/services/seoOptimizer');
+const { buildSeoPatch, parseContentBlock } = require('../src/services/seoApply');
 
 function buildApp() {
   const app = express();
@@ -52,7 +56,17 @@ function buildApp() {
 
 const OWNER_AUTH = { Authorization: 'Bearer test-admin-token' };
 
-beforeEach(() => { supa.__reset(); supa.from.mockClear(); });
+beforeEach(() => { supa.__reset(); supa.from.mockClear(); triggerRebuild.mockClear(); });
+
+const APPROVED_OPT = {
+  id: 'o1', slug: 'hamburg-barcelona', language: 'de', status: 'approved',
+  suggestions: {
+    title: { changeRecommended: true, proposed: 'Hamburg → Barcelona: Flugzeit | Airpiv' },
+    meta: { changeRecommended: false, proposed: null },
+    content: { changeRecommended: true, proposed: 'Kurzer Intro-Text zur Strecke.\n\nQ: Wie lange dauert der Flug?\nA: Etwa 2h 20min.' },
+  },
+};
+const ROUTE_ROW = { id: 'rp1', slug: 'hamburg-barcelona', seo_title: 'alt', seo_meta_description: 'alt-meta', seo_intro_html: null, seo_faq: null, seo_lang: 'de' };
 
 describe('POST /admin/seo/optimize — auth + validation + degradation', () => {
   test('rejects an unauthenticated request', async () => {
@@ -120,6 +134,84 @@ describe('PATCH /admin/seo/optimizations/:id — review lifecycle', () => {
     supa.__push('seo_route_optimizations', { maybeSingle: { data: null, error: null } });
     const res = await request(buildApp()).patch('/admin/seo/optimizations/missing').set(OWNER_AUTH).send({ status: 'reviewed' });
     expect(res.status).toBe(404);
+  });
+});
+
+describe('buildSeoPatch / parseContentBlock — only proposed fields, safe HTML', () => {
+  test('writes only the fields with a real proposed change', () => {
+    const { patch, changedKeys } = buildSeoPatch(APPROVED_OPT.suggestions);
+    expect(patch.seo_title).toBe('Hamburg → Barcelona: Flugzeit | Airpiv');
+    expect(patch.seo_meta_description).toBeUndefined(); // meta not proposed → untouched
+    expect(patch.seo_intro_html).toMatch(/^<p>/);
+    expect(patch.seo_faq).toEqual([{ question: 'Wie lange dauert der Flug?', answer: 'Etwa 2h 20min.' }]);
+    expect(changedKeys).toContain('seo_title');
+  });
+
+  test('empty patch when nothing is proposed', () => {
+    const { changedKeys } = buildSeoPatch({ title: { changeRecommended: false, proposed: null }, meta: {}, content: {} });
+    expect(changedKeys).toHaveLength(0);
+  });
+
+  test('parseContentBlock escapes HTML and splits FAQ pairs', () => {
+    const { introHtml, faq } = parseContentBlock('Intro <script>x</script>\n\nQ: A?\nA: B.');
+    expect(introHtml).toContain('&lt;script&gt;'); // no raw markup injected
+    expect(faq).toEqual([{ question: 'A?', answer: 'B.' }]);
+  });
+});
+
+describe('POST /admin/seo/optimizations/:id/apply — write + revalidate', () => {
+  test('rejects unauthenticated', async () => {
+    const res = await request(buildApp()).post('/admin/seo/optimizations/o1/apply');
+    expect(res.status).toBe(401);
+  });
+
+  test('applies an APPROVED optimization, writes seo_* + captures old values, revalidates', async () => {
+    supa.__push('seo_route_optimizations', { maybeSingle: { data: APPROVED_OPT, error: null } });   // getOptimization
+    supa.__push('route_pages', { maybeSingle: { data: ROUTE_ROW, error: null } });                   // fetch current
+    supa.__push('route_pages', { result: { data: null, error: null } });                             // update (atomic)
+    supa.__push('seo_route_optimizations', { maybeSingle: { data: { ...APPROVED_OPT, status: 'applied' }, error: null } }); // audit
+    const res = await request(buildApp()).post('/admin/seo/optimizations/o1/apply').set(OWNER_AUTH);
+    expect(res.status).toBe(200);
+    expect(res.body.optimization.status).toBe('applied');
+    expect(res.body.oldValues.seo_title).toBe('alt');            // previous value captured
+    expect(res.body.newValues.seo_title).toBe('Hamburg → Barcelona: Flugzeit | Airpiv');
+    expect(triggerRebuild).toHaveBeenCalledWith([{ type: 'route', slug: 'hamburg-barcelona' }]);
+  });
+
+  test('refuses to apply a non-APPROVED optimization', async () => {
+    supa.__push('seo_route_optimizations', { maybeSingle: { data: { ...APPROVED_OPT, status: 'generated' }, error: null } });
+    const res = await request(buildApp()).post('/admin/seo/optimizations/o1/apply').set(OWNER_AUTH);
+    expect(res.status).toBe(409);
+    expect(triggerRebuild).not.toHaveBeenCalled();
+  });
+
+  test('a DB write failure aborts before the status flips to applied', async () => {
+    supa.__push('seo_route_optimizations', { maybeSingle: { data: APPROVED_OPT, error: null } });
+    supa.__push('route_pages', { maybeSingle: { data: ROUTE_ROW, error: null } });
+    supa.__push('route_pages', { result: { data: null, error: { message: 'boom' } } }); // update fails
+    const res = await request(buildApp()).post('/admin/seo/optimizations/o1/apply').set(OWNER_AUTH);
+    expect(res.status).toBe(500);
+    expect(triggerRebuild).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /admin/seo/optimizations/:id/rollback — restore previous values', () => {
+  const APPLIED = { id: 'o1', slug: 'hamburg-barcelona', status: 'applied', route_page_id: 'rp1', applied_old_values: { seo_title: 'alt', seo_meta_description: 'alt-meta', seo_intro_html: null, seo_faq: null, seo_lang: 'de' } };
+
+  test('restores the exact captured values and marks rolled_back', async () => {
+    supa.__push('seo_route_optimizations', { maybeSingle: { data: APPLIED, error: null } });     // getOptimization
+    supa.__push('route_pages', { result: { data: null, error: null } });                          // restore write
+    supa.__push('seo_route_optimizations', { maybeSingle: { data: { ...APPLIED, status: 'rolled_back' }, error: null } });
+    const res = await request(buildApp()).post('/admin/seo/optimizations/o1/rollback').set(OWNER_AUTH).send({ reason: 'worse CTR' });
+    expect(res.status).toBe(200);
+    expect(res.body.optimization.status).toBe('rolled_back');
+    expect(triggerRebuild).toHaveBeenCalledWith([{ type: 'route', slug: 'hamburg-barcelona' }]);
+  });
+
+  test('refuses to roll back something not APPLIED', async () => {
+    supa.__push('seo_route_optimizations', { maybeSingle: { data: { ...APPLIED, status: 'approved' }, error: null } });
+    const res = await request(buildApp()).post('/admin/seo/optimizations/o1/rollback').set(OWNER_AUTH);
+    expect(res.status).toBe(409);
   });
 });
 
