@@ -142,14 +142,21 @@ function coerceNode(node, extra) {
   return out;
 }
 
-// Tolerant parse of the model reply into the canonical suggestion shape. Strips
-// an optional ```json fence, JSON-parses, and normalizes each field. Returns
-// null on any problem so a bad reply degrades to the caller's fallback.
+// Tolerant parse of the model reply into the canonical suggestion shape. Handles
+// a ```json fence AND any prose the model may wrap around the object (e.g. "Here
+// is the JSON:") by falling back to the outermost {…} span. Returns null on any
+// problem so a bad reply degrades to the caller's fallback.
+function tryParse(s) { try { return JSON.parse(s); } catch { return null; } }
 function parseSuggestion(text) {
   if (!text) return null;
-  const cleaned = String(text).trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/, '');
-  let parsed;
-  try { parsed = JSON.parse(cleaned); } catch { return null; }
+  const cleaned = String(text).trim().replace(/```json/gi, '').replace(/```/g, '').trim();
+  let parsed = tryParse(cleaned);
+  if (!parsed) {
+    // Extract the outermost JSON object span and try again.
+    const first = cleaned.indexOf('{');
+    const last = cleaned.lastIndexOf('}');
+    if (first !== -1 && last > first) parsed = tryParse(cleaned.slice(first, last + 1));
+  }
   if (!parsed || typeof parsed !== 'object') return null;
   const cities = parsed.cities && typeof parsed.cities === 'object' && parsed.cities.origin && parsed.cities.destination
     ? { origin: String(parsed.cities.origin), destination: String(parsed.cities.destination) }
@@ -188,7 +195,7 @@ async function generateRouteOptimization({ elements, gsc, dominantIntent, langua
       },
       body: JSON.stringify({
         model,
-        max_tokens: 3000,
+        max_tokens: 4000,
         system: SYSTEM_PROMPT,
         messages: [{ role: 'user', content: `Analyze this route page and return ONLY the JSON suggestion.\n\n${buildUserContent({ elements, gsc, dominantIntent, language: lang })}` }],
       }),
