@@ -142,21 +142,9 @@ function coerceNode(node, extra) {
   return out;
 }
 
-// Tolerant parse of the model reply into the canonical suggestion shape. Handles
-// a ```json fence AND any prose the model may wrap around the object (e.g. "Here
-// is the JSON:") by falling back to the outermost {…} span. Returns null on any
-// problem so a bad reply degrades to the caller's fallback.
-function tryParse(s) { try { return JSON.parse(s); } catch { return null; } }
-function parseSuggestion(text) {
-  if (!text) return null;
-  const cleaned = String(text).trim().replace(/```json/gi, '').replace(/```/g, '').trim();
-  let parsed = tryParse(cleaned);
-  if (!parsed) {
-    // Extract the outermost JSON object span and try again.
-    const first = cleaned.indexOf('{');
-    const last = cleaned.lastIndexOf('}');
-    if (first !== -1 && last > first) parsed = tryParse(cleaned.slice(first, last + 1));
-  }
+// Normalize an already-parsed suggestion object into the canonical shape. Never
+// fabricates — a missing/blank city pair stays null.
+function normalizeSuggestion(parsed) {
   if (!parsed || typeof parsed !== 'object') return null;
   const cities = parsed.cities && typeof parsed.cities === 'object' && parsed.cities.origin && parsed.cities.destination
     ? { origin: String(parsed.cities.origin), destination: String(parsed.cities.destination) }
@@ -171,6 +159,66 @@ function parseSuggestion(text) {
     content: coerceNode(parsed.content, { factsUsed: true }),
   };
 }
+
+// Tolerant parse of a TEXT reply (fallback path only). Handles a ```json fence
+// AND any prose wrapped around the object by falling back to the outermost {…}
+// span. Returns null on any problem so a bad reply degrades to the caller's
+// fallback.
+function tryParse(s) { try { return JSON.parse(s); } catch { return null; } }
+function parseSuggestion(text) {
+  if (!text) return null;
+  const cleaned = String(text).trim().replace(/```json/gi, '').replace(/```/g, '').trim();
+  let parsed = tryParse(cleaned);
+  if (!parsed) {
+    const first = cleaned.indexOf('{');
+    const last = cleaned.lastIndexOf('}');
+    if (first !== -1 && last > first) parsed = tryParse(cleaned.slice(first, last + 1));
+  }
+  return normalizeSuggestion(parsed);
+}
+
+// A JSON-schema for the suggestion, used as a TOOL input schema. Forcing a tool
+// call makes Claude return the fields as a structured object (guaranteed-valid
+// JSON — no free-text parsing that can break on an unescaped quote/newline).
+const NODE_SCHEMA = {
+  type: 'object',
+  properties: {
+    current: { type: ['string', 'null'] },
+    proposed: { type: ['string', 'null'] },
+    changeRecommended: { type: 'boolean' },
+    reason: { type: 'string' },
+  },
+  required: ['proposed', 'changeRecommended', 'reason'],
+};
+const SEO_TOOL = {
+  name: 'emit_seo_optimization',
+  description: 'Return the BEFORE/PROPOSED SEO optimization for this route, following every rule in the system prompt. Call this exactly once with the full result.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      cities: {
+        type: ['object', 'null'],
+        properties: { origin: { type: 'string' }, destination: { type: 'string' } },
+      },
+      opportunity: { type: 'boolean' },
+      dominantIntent: { type: 'string' },
+      title: NODE_SCHEMA,
+      meta: NODE_SCHEMA,
+      h1: NODE_SCHEMA,
+      content: {
+        type: 'object',
+        properties: {
+          proposed: { type: ['string', 'null'] },
+          changeRecommended: { type: 'boolean' },
+          reason: { type: 'string' },
+          factsUsed: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['proposed', 'changeRecommended', 'reason', 'factsUsed'],
+      },
+    },
+    required: ['opportunity', 'dominantIntent', 'title', 'meta', 'h1', 'content'],
+  },
+};
 
 // Generate a route optimization. Returns one of:
 //   { source: 'ai', model, suggestions }        — a usable AI suggestion
@@ -199,15 +247,24 @@ async function generateRouteOptimization({ elements, gsc, dominantIntent, langua
         model,
         max_tokens: 4000,
         system: SYSTEM_PROMPT,
-        messages: [{ role: 'user', content: `Analyze this route page and return ONLY the JSON suggestion.\n\n${buildUserContent({ elements, gsc, dominantIntent, language: lang })}` }],
+        tools: [SEO_TOOL],
+        tool_choice: { type: 'tool', name: SEO_TOOL.name },
+        messages: [{ role: 'user', content: `Analyze this route page and call emit_seo_optimization with the result.\n\n${buildUserContent({ elements, gsc, dominantIntent, language: lang })}` }],
       }),
       signal: ctrl.signal,
     });
     if (!resp.ok) { log('warn', 'seo_optimize_ai_http', { status: resp.status }); return { source: 'unavailable', reason: `http_${resp.status}` }; }
     const json = await resp.json();
     if (json.stop_reason === 'refusal') return { source: 'unavailable', reason: 'refusal' };
-    const text = json.content && json.content[0] && json.content[0].text;
-    const suggestions = parseSuggestion(text);
+    const blocks = Array.isArray(json.content) ? json.content : [];
+    // Preferred: the forced tool call — its input is guaranteed-valid JSON.
+    const toolBlock = blocks.find((b) => b && b.type === 'tool_use' && b.name === SEO_TOOL.name);
+    let suggestions = toolBlock ? normalizeSuggestion(toolBlock.input) : null;
+    // Fallback: some older models may still answer in text.
+    if (!suggestions) {
+      const textBlock = blocks.find((b) => b && b.type === 'text');
+      suggestions = parseSuggestion(textBlock && textBlock.text);
+    }
     if (!suggestions) return { source: 'unavailable', reason: 'parse_failed' };
     return { source: 'ai', model, suggestions };
   } catch (e) {
@@ -218,4 +275,4 @@ async function generateRouteOptimization({ elements, gsc, dominantIntent, langua
   }
 }
 
-module.exports = { generateRouteOptimization, parseSuggestion, buildUserContent, SUPPORTED_LANGS };
+module.exports = { generateRouteOptimization, parseSuggestion, normalizeSuggestion, buildUserContent, SUPPORTED_LANGS, SEO_TOOL };

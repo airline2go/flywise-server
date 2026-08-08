@@ -44,7 +44,7 @@ const request = require('supertest');
 const supa = require('../src/clients/supabase');
 const env = require('../src/config/env');
 const triggerRebuild = require('../src/utils/triggerRebuild');
-const { parseSuggestion, generateRouteOptimization } = require('../src/services/seoOptimizer');
+const { parseSuggestion, normalizeSuggestion, generateRouteOptimization } = require('../src/services/seoOptimizer');
 const { buildSeoPatch, parseContentBlock } = require('../src/services/seoApply');
 
 function buildApp() {
@@ -238,6 +238,23 @@ describe('parseSuggestion — tolerant + non-fabricating', () => {
     const out = parseSuggestion(JSON.stringify({ opportunity: false, title: {}, meta: {}, h1: {}, content: {} }));
     expect(out.cities).toBeNull(); // never fabricated
     expect(out.title.proposed).toBeNull();
+  });
+
+  test('normalizeSuggestion accepts a structured object (tool_use.input path)', () => {
+    const input = {
+      cities: { origin: 'Hamburg', destination: 'Barcelona' },
+      opportunity: true,
+      dominantIntent: 'duration',
+      title: { proposed: 'T | Airpiv', changeRecommended: true, reason: 'r' },
+      meta: { proposed: null, changeRecommended: false, reason: 'r' },
+      h1: { proposed: null, changeRecommended: false, reason: 'r' },
+      content: { proposed: 'intro\n\nQ: a?\nA: b.', changeRecommended: true, reason: 'r', factsUsed: ['distance: 1.100 km'] },
+    };
+    const out = normalizeSuggestion(input);
+    expect(out.cities).toEqual({ origin: 'Hamburg', destination: 'Barcelona' });
+    expect(out.title.proposed).toBe('T | Airpiv');
+    expect(out.content.current).toBeNull(); // content has no single "current" to diff
+    expect(out.content.factsUsed).toContain('distance: 1.100 km');
   });
 
   test('recovers JSON wrapped in prose or an unclosed fence', () => {
