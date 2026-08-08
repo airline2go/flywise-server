@@ -41,6 +41,19 @@ module.exports = {
   // Defaults to the same model the rest of the backend's AI calls use.
   ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL || 'claude-sonnet-5',
 
+  // [GSC-OAUTH] Google Search Console connection (OAuth 2.0 — no service-account
+  // key needed). All server-side only. GOOGLE_OAUTH_REDIRECT_URI must exactly
+  // match the redirect URI registered on the Google OAuth client, and point at
+  // this server's callback, e.g. https://api.airpiv.com/admin/seo/gsc/callback.
+  // GSC_SITE_URL is the Search Console property: 'sc-domain:airpiv.com' for a
+  // Domain property, or 'https://airpiv.com/' for a URL-prefix property.
+  // ADMIN_APP_URL is the admin frontend base the callback redirects back to.
+  GOOGLE_OAUTH_CLIENT_ID: process.env.GOOGLE_OAUTH_CLIENT_ID,
+  GOOGLE_OAUTH_CLIENT_SECRET: process.env.GOOGLE_OAUTH_CLIENT_SECRET,
+  GOOGLE_OAUTH_REDIRECT_URI: process.env.GOOGLE_OAUTH_REDIRECT_URI,
+  GSC_SITE_URL: process.env.GSC_SITE_URL,
+  ADMIN_APP_URL: process.env.ADMIN_APP_URL || 'https://airpiv.com',
+
   REDIS_URL: process.env.REDIS_URL,
 
   // [NEXTJS-MIGRATION] flywise-app-amber.vercel.app is the new Next.js
