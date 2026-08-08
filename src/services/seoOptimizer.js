@@ -184,7 +184,9 @@ async function generateRouteOptimization({ elements, gsc, dominantIntent, langua
 
   const model = env.ANTHROPIC_MODEL || DEFAULT_MODEL;
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 30000);
+  // 50s: a cold backend + a longer completion can exceed 30s; the frontend proxy
+  // allows 60s, so this stays comfortably inside that budget.
+  const timer = setTimeout(() => ctrl.abort(), 50000);
   try {
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
