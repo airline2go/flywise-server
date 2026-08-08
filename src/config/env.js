@@ -35,6 +35,12 @@ module.exports = {
   // as-is — never a hard failure, never blocks publishing.
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
 
+  // [SEO-AI-OPTIMIZE] The Claude model used by the SEO route-optimization
+  // endpoint (POST /admin/seo/optimize). Configurable so the model can be
+  // switched from Render's env without a code change or a frontend rebuild.
+  // Defaults to the same model the rest of the backend's AI calls use.
+  ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL || 'claude-sonnet-5',
+
   REDIS_URL: process.env.REDIS_URL,
 
   // [NEXTJS-MIGRATION] flywise-app-amber.vercel.app is the new Next.js
