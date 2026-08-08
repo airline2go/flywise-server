@@ -20,6 +20,8 @@ const rateLimit = require('../middleware/rateLimit');
 const { requireAdmin } = require('../middleware/auth');
 const { generateRouteOptimization } = require('../services/seoOptimizer');
 const store = require('../services/seoOptimizationStore');
+const { applyOptimization, rollbackOptimization } = require('../services/seoApply');
+const triggerRebuild = require('../utils/triggerRebuild');
 
 const SLUG_RE = /^[a-z0-9-]{2,80}$/i;
 
@@ -80,6 +82,36 @@ module.exports = (app) => {
     try {
       const row = await store.updateOptimizationStatus({ id, status, reviewedBy: req.adminUserId || req.adminRole || null });
       return res.json({ ok: true, optimization: row });
+    } catch (e) {
+      return res.status(e.status || 500).json({ ok: false, error: e.message });
+    }
+  });
+
+  // ── Apply an APPROVED optimization to the live route (§7/§9) ────────────
+  // Writes only the four generated seo_* columns, captures the previous values
+  // for rollback, then revalidates the affected route. Individual apply only —
+  // there is deliberately NO "apply all".
+  app.post('/admin/seo/optimizations/:id/apply', rateLimit('admin-seo-apply', 30, 60000), requireAdmin, async (req, res) => {
+    const id = (req.params.id || '').trim();
+    try {
+      const result = await applyOptimization({ id, appliedBy: req.adminUserId || req.adminRole || null });
+      // Refresh the public page so the change is visible now, not on the next ISR
+      // window (fire-and-forget — never blocks or fails the apply).
+      triggerRebuild([{ type: 'route', slug: result.slug }]);
+      return res.json({ ok: true, optimization: result.optimization, oldValues: result.oldValues, newValues: result.newValues });
+    } catch (e) {
+      return res.status(e.status || 500).json({ ok: false, error: e.message });
+    }
+  });
+
+  // ── Roll an APPLIED optimization back to the exact previous values (§18) ─
+  app.post('/admin/seo/optimizations/:id/rollback', rateLimit('admin-seo-apply', 30, 60000), requireAdmin, async (req, res) => {
+    const id = (req.params.id || '').trim();
+    const reason = req.body && typeof req.body.reason === 'string' ? req.body.reason : null;
+    try {
+      const result = await rollbackOptimization({ id, rolledBackBy: req.adminUserId || req.adminRole || null, reason });
+      triggerRebuild([{ type: 'route', slug: result.slug }]);
+      return res.json({ ok: true, optimization: result.optimization });
     } catch (e) {
       return res.status(e.status || 500).json({ ok: false, error: e.message });
     }
