@@ -458,6 +458,12 @@ async function bookFromSession(session_id, session) {
       const { error: bookingInsertError } = await supa.from('bookings').insert({
         stripe_session_id: session_id,
         duffel_order_id: orderId || null,
+        // [M1-OFFER-ID] Persist the Duffel offer id the order was created
+        // from — previously only stored on the transient pending_bookings
+        // payload, so an admin/audit could not tie a confirmed booking back
+        // to its originating offer without the session lookup. Additive,
+        // nullable column (see sql migration add_bookings_duffel_offer_id).
+        duffel_offer_id: booking.offer_id || null,
         booking_reference: bookingRef || null,
         route_label: booking.route_label || null,
         status: 'confirmed',
