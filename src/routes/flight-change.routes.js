@@ -18,6 +18,7 @@ const { attachUserIfPresent } = require('../middleware/auth');
 const { checkOrderOwnership } = require('../services/booking');
 const { rememberBooking, getPendingBooking } = require('../services/pendingBookings');
 const { recordSyncFailureEvent } = require('../services/adminConfig');
+const { buildCheckoutRedirects } = require('../utils/redirectUrls');
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -320,6 +321,10 @@ app.post('/change-pay', attachUserIfPresent, rateLimit('pay', 10, 60000), async 
       return res.status(400).json({ ok: false, error: 'Für diese Änderung ist keine Zahlung erforderlich — bitte /change-confirm verwenden' });
     }
 
+    // [SECURITY · OPEN-REDIRECT] Whitelist client redirect URLs against
+    // env.ALLOWED_ORIGINS, same as the booking checkout endpoints.
+    const redirects = buildCheckoutRedirects(success_url, cancel_url, { successParam: 'change_session_id' });
+
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       payment_method_types: ['card'],
@@ -331,8 +336,8 @@ app.post('/change-pay', attachUserIfPresent, rateLimit('pay', 10, 60000), async 
           product_data: { name: 'Flugdatum-Änderung · Buchung ' + order_id },
         },
       }],
-      success_url: (success_url || 'https://example.com/success') + '?change_session_id={CHECKOUT_SESSION_ID}',
-      cancel_url: cancel_url || 'https://example.com/cancel',
+      success_url: redirects.success_url,
+      cancel_url: redirects.cancel_url,
       metadata: { airpiv_flight_change: '1', order_id },
     });
 

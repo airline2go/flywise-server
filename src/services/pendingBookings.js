@@ -69,10 +69,46 @@ function getBookingStatus(sessionId) {
   return bookingStatus.get(sessionId) || null;
 }
 
+// [DURABLE-STATUS] The in-memory bookingStatus Map above is process-local:
+// a Render restart/redeploy, or a second instance handling the poll,
+// returns "unknown" for a booking that actually succeeded — the customer
+// paid, Duffel confirmed, the row is in the DB, but /booking-status can't
+// see it. This resolver keeps the fast in-memory read as the primary
+// source (it carries the richest detail: error text, refunded flag) and
+// falls back to the durable pending_bookings row (persisted at
+// checkout-session creation, updated to 'booked' with the Duffel order id
+// once the order is confirmed) so status survives restarts and works
+// across instances. Purely additive — the sync getBookingStatus() above is
+// unchanged for callers that only need the in-memory value.
+async function resolveBookingStatus(sessionId) {
+  if (!sessionId) return null;
+  const mem = bookingStatus.get(sessionId);
+  if (mem) return mem;
+  if (supa) {
+    try {
+      const { data } = await supa.from('pending_bookings')
+        .select('status, duffel_order_id, duffel_ref')
+        .eq('session_id', sessionId)
+        .maybeSingle();
+      if (data) {
+        return {
+          status: data.status || 'pending',
+          order_id: data.duffel_order_id || null,
+          booking_reference: data.duffel_ref || null,
+        };
+      }
+    } catch (e) {
+      log('warn', 'resolve_booking_status_db_failed', { error: e.message });
+    }
+  }
+  return null;
+}
+
 module.exports = {
   rememberBooking,
   getPendingBooking,
   markPendingBooked,
   setBookingStatus,
   getBookingStatus,
+  resolveBookingStatus,
 };

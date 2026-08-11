@@ -50,6 +50,7 @@ jest.mock('../src/services/pendingBookings', () => ({
   getPendingBooking: jest.fn(),
   setBookingStatus: jest.fn(),
   getBookingStatus: jest.fn(),
+  resolveBookingStatus: jest.fn(),
 }));
 
 const express = require('express');
@@ -185,5 +186,45 @@ describe('POST /add-services — IDOR protection', () => {
 
     expect(res.status).toBe(404);
     expect(mockDuffelFn).toHaveBeenCalled();
+  });
+});
+
+// [DURABLE-STATUS · §6] GET /booking-status/:sessionId must report a real
+// status even when the in-memory Map has been wiped (restart) or the poll
+// lands on a different instance — it now resolves through the durable
+// pending_bookings row via resolveBookingStatus().
+describe('GET /booking-status/:sessionId — durable status', () => {
+  const pending = require('../src/services/pendingBookings');
+
+  beforeEach(() => { pending.resolveBookingStatus.mockReset(); });
+
+  test('returns "unknown" when nothing is found in memory or the DB', async () => {
+    pending.resolveBookingStatus.mockResolvedValueOnce(null);
+    const res = await request(app).get('/booking-status/cs_missing').set('X-Forwarded-For', nextIp());
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, status: 'unknown' });
+  });
+
+  test('reports the durable booked status recovered from the DB after a restart', async () => {
+    // Simulates: in-memory Map is empty (post-restart), resolver falls back
+    // to the persisted pending_bookings row.
+    pending.resolveBookingStatus.mockResolvedValueOnce({
+      status: 'booked', order_id: 'ord_9', booking_reference: 'REF9',
+    });
+    const res = await request(app).get('/booking-status/cs_live').set('X-Forwarded-For', nextIp());
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, status: 'booked', order_id: 'ord_9', booking_reference: 'REF9' });
+  });
+
+  test('awaits the async resolver (regression: route must not read the Map synchronously)', async () => {
+    let resolved = false;
+    pending.resolveBookingStatus.mockImplementationOnce(async () => {
+      await new Promise((r) => setTimeout(r, 5));
+      resolved = true;
+      return { status: 'paid' };
+    });
+    const res = await request(app).get('/booking-status/cs_async').set('X-Forwarded-For', nextIp());
+    expect(resolved).toBe(true);
+    expect(res.body.status).toBe('paid');
   });
 });

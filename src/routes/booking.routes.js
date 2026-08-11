@@ -14,10 +14,11 @@ const supa = require('../clients/supabase');
 const rateLimit = require('../middleware/rateLimit');
 const { attachUserIfPresent } = require('../middleware/auth');
 const { validate, PASSENGER_SCHEMA } = require('../utils/validate');
+const { buildCheckoutRedirects } = require('../utils/redirectUrls');
 const duffel = require('../services/duffel');
 const { getTicketProfitTiers, getAncillaryProfitTiers, computeTieredMargin, recordBookingFailureEvent } = require('../services/adminConfig');
 const { normalizeOffer } = require('../services/normalizeOffer');
-const { rememberBooking, getPendingBooking, setBookingStatus, getBookingStatus } = require('../services/pendingBookings');
+const { rememberBooking, getPendingBooking, setBookingStatus, resolveBookingStatus } = require('../services/pendingBookings');
 const { computeAuthoritativePricing, bookFromSession, inFlight, checkOrderOwnership } = require('../services/booking');
 
 module.exports = (app) => {
@@ -345,6 +346,13 @@ app.post('/create-checkout-session', rateLimit('pay', 15, 60000), attachUserIfPr
     // Stripe wants the amount in the smallest currency unit (cents)
     const amountCents = Math.round(pricing.customerAmount * 100);
 
+    // [SECURITY · OPEN-REDIRECT] Never trust the browser's raw success_url/
+    // cancel_url — an arbitrary external/javascript:/data: value here is a
+    // classic open redirect off a payment flow. Accept them only if their
+    // origin is whitelisted (env.ALLOWED_ORIGINS), otherwise fall back to
+    // the canonical site base. See src/utils/redirectUrls.js.
+    const redirects = buildCheckoutRedirects(success_url, cancel_url, { successParam: 'session_id' });
+
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       payment_method_types: ['card'],
@@ -356,8 +364,8 @@ app.post('/create-checkout-session', rateLimit('pay', 15, 60000), attachUserIfPr
           product_data: { name: route_label ? ('Flug ' + route_label) : 'Flugbuchung (FlyWise)' },
         },
       }],
-      success_url: (success_url || 'https://example.com/success') + '?session_id={CHECKOUT_SESSION_ID}',
-      cancel_url: cancel_url || 'https://example.com/cancel',
+      success_url: redirects.success_url,
+      cancel_url: redirects.cancel_url,
       metadata: { flywise: '1' },
     });
 
@@ -475,8 +483,12 @@ app.post('/price-preview', rateLimit('pay', 30, 60000), attachUserIfPresent, asy
 // frequently without adding load anywhere the original slow_request
 // warnings were coming from. error/refunded are forwarded so a failed
 // outcome can be explained accurately without a second heavy round trip.
-app.get('/booking-status/:sessionId', (req, res) => {
-  const s = getBookingStatus(req.params.sessionId);
+app.get('/booking-status/:sessionId', async (req, res) => {
+  // [DURABLE-STATUS] resolveBookingStatus() reads the in-memory Map first
+  // (richest detail) and falls back to the durable pending_bookings row so
+  // a status set on another instance — or before a restart — is still
+  // reported correctly instead of a misleading "unknown".
+  const s = await resolveBookingStatus(req.params.sessionId);
   if (!s) return res.json({ ok: true, status: 'unknown' });
   res.json({
     ok: true,
@@ -700,6 +712,11 @@ app.post('/add-services', attachUserIfPresent, rateLimit('pay', 10, 60000), asyn
 
     const currency = (available[0] && available[0].total_currency) || 'EUR';
 
+    // [SECURITY · OPEN-REDIRECT] Same whitelist protection as
+    // /create-checkout-session — client-supplied redirect URLs are only
+    // honored when their origin is in env.ALLOWED_ORIGINS.
+    const redirects = buildCheckoutRedirects(success_url, cancel_url, { successParam: 'add_session_id' });
+
     // 4) Create Stripe session for the customer-facing amount (net + margin)
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
@@ -712,8 +729,8 @@ app.post('/add-services', attachUserIfPresent, rateLimit('pay', 10, 60000), asyn
           product_data: { name: route_label ? ('Zusatzleistungen · ' + route_label) : 'Zusatzleistungen' },
         },
       }],
-      success_url: (success_url || 'https://example.com/success') + '?add_session_id={CHECKOUT_SESSION_ID}',
-      cancel_url: cancel_url || 'https://example.com/cancel',
+      success_url: redirects.success_url,
+      cancel_url: redirects.cancel_url,
       metadata: { airpiv_add_services: '1', order_id },
     });
 
