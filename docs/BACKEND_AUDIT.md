@@ -36,15 +36,15 @@ the areas the brief prioritizes.
 |---|---------|----------|--------|
 | F1 | Client-controlled Stripe `success_url`/`cancel_url` (open redirect) | **HIGH** | ✅ Fixed (Phase 1) |
 | F2 | In-memory booking status → `unknown` after restart / across instances | **HIGH** | ✅ Fixed (Phase 1) |
-| F3 | Stripe webhook not durable; no event store / dedup by `stripe_event_id` | **HIGH** | ⏳ Phase 2 |
-| F4 | Idempotency is process-local (`inFlight` Set); no DB unique guard on `bookings.stripe_session_id` | **HIGH** | ⏳ Phase 2 |
-| F5 | Duffel webhook: no timestamp-freshness / replay protection / event dedup | **MED-HIGH** | ⏳ Phase 2 |
+| F3 | Stripe webhook not durable; no event store / dedup by `stripe_event_id` | **HIGH** | ✅ Fixed (Phase 2) |
+| F4 | Idempotency is process-local (`inFlight` Set); no DB unique guard on `bookings.stripe_session_id` | **HIGH** | ✅ Fixed (Phase 2) |
+| F5 | Duffel webhook: no timestamp-freshness / replay protection / event dedup | **MED-HIGH** | ✅ Fixed (Phase 2) |
 | F6 | Payment ledger records **supplier (Duffel) net** as the customer payment amount | **MED-HIGH** | ⏳ Phase 3 |
 | F7 | Money handled as floating-point (`parseFloat`, `*`, round-to-cents) | **MEDIUM** | ⏳ Phase 3 |
 | F8 | Promo `used_count` increment is read-then-write (race → over-redemption) | **MEDIUM** | ⏳ Phase 3 |
 | F9 | Guest booking access by `order_id`/`session_id` alone (no secret token) | **MEDIUM** | ⏳ Phase 4 (design) |
-| F10 | `npm audit`: 2 high (transitive dev), 1 low (`body-parser`, runtime) | **LOW-MED** | ⏳ Phase 2 |
-| F11 | No dedicated `/readiness`; `/health` returns 503 if any dependency down | **LOW** | ⏳ Phase 2 |
+| F10 | `npm audit`: 2 high (transitive dev), 1 low (`body-parser`, runtime) | **LOW-MED** | ✅ Fixed (Phase 2) |
+| F11 | No dedicated `/readiness`; `/health` returns 503 if any dependency down | **LOW** | ✅ Fixed (Phase 2) |
 
 Items the brief lists that were **reviewed and found already adequate** are in
 [§ "Already adequate"](#already-adequate-no-change-needed) so they are not
@@ -125,72 +125,80 @@ from baseline (no new errors/warnings). No API-contract or money-math change.
 
 ---
 
-## Phase 2 — durability & idempotency (recommended next PR)
+## Phase 2 — durability & idempotency (implemented)
 
-### F3 — Stripe webhook is not durable — **HIGH** ⏳
+> **Migrations required before/with deploy:** `sql/webhook_events.sql`
+> (`stripe_webhook_events`, `duffel_webhook_events`) and
+> `sql/booking_idempotency.sql` (unique indexes on
+> `bookings.stripe_session_id`, `bookings.stripe_payment_id`,
+> `payments.stripe_payment_id`). All idempotent / safe to re-run. Every code
+> path degrades gracefully when the tables/constraints are absent (best-effort,
+> same behavior as before), so code and SQL can deploy in either order — but the
+> guarantees only take effect once the SQL is applied.
 
-**File:** `src/routes/webhooks.routes.js` (`POST /webhooks/stripe`).
+**Result:** Jest **576/576 pass** (45 suites, +14). ESLint at baseline. `npm audit`
+**0 vulnerabilities**. No API-contract or money-math change.
 
-Signature is verified (good) and the handler ACKs 200 immediately (good, avoids
-Stripe retry storms). But there is **no event store**: if `bookFromSession()`
-fails after the 200 ACK, the event is only sent to Sentry — it is not persisted,
-not marked `processing_failed`, and not retryable. A crash/restart between ACK
-and completion loses it (brief §4).
+### F3 — Durable Stripe webhook events + dedup — **HIGH** ✅
 
-**Recommended fix (brief §4.1–§4.7):**
-1. New table `stripe_events (stripe_event_id text unique, type, session_id,
-   payment_intent, received_at, processed_at, status, error, retry_count)`.
-2. On receipt: verify signature → `insert ... on conflict (stripe_event_id) do
-   nothing`. If the row already exists and is `processed`, ACK and stop
-   (idempotent, brief §4.4/§7.4). Then ACK 200.
-3. Process asynchronously; on success set `processed_at`/`status='processed'`, on
-   failure set `status='processing_failed'` + `error` + `retry_count`.
-4. A reconciliation/worker job (brief §34/§49) retries `processing_failed` rows
-   idempotently.
+**Files:** `src/services/webhookEvents.js` (new), `src/routes/webhooks.routes.js`,
+`sql/webhook_events.sql` (new).
 
-### F4 — Idempotency is process-local — **HIGH** ⏳
+Every Stripe event is recorded in `stripe_webhook_events` (PK `stripe_event_id`)
+**before** processing. A re-delivery already marked `processed` is skipped
+(dedup); a processing failure marks the row `processing_failed` + `last_error` +
+`retry_count` instead of being Sentry-only — leaving it recoverable by a
+reconciliation/worker job (brief §4.1–§4.7). `beginStripeEvent` degrades to
+best-effort (behaves exactly as before) when Supabase is unconfigured or the
+event carries no id.
 
-**Files:** `src/services/booking.js` (`inFlight = new Set()`),
-`src/routes/booking.routes.js`, `src/routes/webhooks.routes.js`.
+**Tests:** `test/webhookEvents.test.js` (begin/complete/fail state machine:
+processed→skip, failed→retry, first-seen→process, 23505 race, non-conflict
+error→best-effort) + `test/webhooks.routes.test.js` (dedup-skip on a
+`processed` event, first-seen still books).
 
-`inFlight` de-dupes only **within one process**. Two instances (webhook +
-`/confirm-payment`) can both pass `inFlight.has(session.id)` and both call
-`bookFromSession`. Duffel's `Idempotency-Key: order_<session_id>` prevents a
-double Duffel order (good), but the **`bookings` and `payments` inserts are not
-guarded by a DB unique constraint** → duplicate financial rows are possible
-(brief §7.5, §21.7).
+### F4 — Cross-instance booking idempotency — **HIGH** ✅
 
-**Recommended fix:**
-- `alter table bookings add constraint bookings_stripe_session_id_key unique
-  (stripe_session_id)`; switch the insert to upsert / `on conflict do nothing`.
-- Unique on `payments.stripe_payment_id` and `bookings.stripe_payment_id`.
-- Optionally a Redis `SET NX` lock keyed by `session_id` as a cross-instance
-  guard in front of `bookFromSession` (brief §7.3), with the DB constraint as
-  the hard backstop.
+**Files:** `src/services/booking.js`, `sql/booking_idempotency.sql` (new).
 
-### F5 — Duffel webhook replay / freshness — **MED-HIGH** ⏳
+The `bookings` write is now an **upsert on `stripe_session_id` with
+`ignoreDuplicates`** (INSERT … ON CONFLICT DO NOTHING), backed by UNIQUE indexes
+on `bookings.stripe_session_id`, `bookings.stripe_payment_id`, and
+`payments.stripe_payment_id`. If the Stripe webhook and `/confirm-payment` both
+reach `bookFromSession` on separate instances for the same paid session, only one
+financial row is ever written — the DB constraint is the hard cross-instance
+backstop the in-process `inFlight` Set cannot provide (brief §7.5, §21.7). Duffel's
+existing `Idempotency-Key` continues to prevent a double Duffel order.
 
-**File:** `src/routes/webhooks.routes.js` (`POST /webhooks/duffel`).
+### F5 — Duffel webhook replay/freshness + dedup — **MED-HIGH** ✅
 
-Signature verification uses `timingSafeEqual` (good), but there is **no
-timestamp-freshness check** and **no processed-event dedup** — a captured valid
-request can be replayed indefinitely (brief §10.3–§10.6).
+**Files:** `src/routes/webhooks.routes.js`, `src/services/webhookEvents.js`,
+`sql/webhook_events.sql` (`duffel_webhook_events`).
 
-**Recommended fix:** reject when `|now - t| > 5 min` (with small clock-drift
-allowance); persist `duffel_event_id` (unique) and skip already-processed events.
+Added a **timestamp-freshness check** — a correctly-signed payload whose signed
+`t` is more than `MAX_WEBHOOK_AGE_SEC` (300s) from now (past or future) is
+rejected `400` before any work — plus **per-event dedup** on `duffel_event_id`,
+so a captured/replayed or re-delivered event is not re-applied (brief §10.3–§10.6).
 
-### F10 — Dependency vulnerabilities — **LOW-MED** ⏳
+**Tests:** stale-timestamp rejected, duplicate `processed` event skipped, plus the
+full existing Duffel webhook suite (valid/invalid signature, DB-error, unknown
+type).
 
-`npm audit`: `brace-expansion` (high, transitive via eslint — dev only),
-`js-yaml` (high, transitive via eslint — dev only), `body-parser <1.20.6` (low,
-runtime via express). All fixable with a **non-major** `npm audit fix`. Recommend
-applying in Phase 2 and re-running the suite (brief §39).
+### F10 — Dependency vulnerabilities — **LOW-MED** ✅
 
-### F11 — Readiness vs liveness — **LOW** ⏳
+`npm audit fix` (non-major, lockfile-only) → **0 vulnerabilities** (was 2 high /
+1 low). No `package.json` range changes; full suite re-run green (brief §39).
 
-`/health` returns 503 if **any** dependency (incl. Duffel) is down, which can make
-an otherwise-serving process look dead (brief §32 warns against exactly this). Add
-a separate `/readiness` (process + DB) distinct from a deep `/health`.
+### F11 — Readiness vs liveness — **LOW** ✅
+
+**Files:** `src/routes/health.routes.js`, `src/middleware/globalMiddleware.js`.
+
+New `GET /readiness` gates **only** on the database (the critical serving
+dependency) and is excluded from the maintenance kill-switch — a Duffel/Stripe/
+Redis outage no longer makes an otherwise-serving process look un-ready (brief
+§32). Deep `/health` (all dependencies) is unchanged; liveness stays `/`.
+
+**Tests:** `test/health.readiness.test.js` (200 when DB reachable, 503 on DB error).
 
 ---
 

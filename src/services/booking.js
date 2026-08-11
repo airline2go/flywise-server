@@ -455,7 +455,14 @@ async function bookFromSession(session_id, session) {
     // reach the browser.
     try {
       const primaryPax = (booking.passengers && booking.passengers[0]) || {};
-      const { error: bookingInsertError } = await supa.from('bookings').insert({
+      // [F4 · CROSS-INSTANCE IDEMPOTENCY] Upsert on stripe_session_id with
+      // ignoreDuplicates (INSERT ... ON CONFLICT DO NOTHING) so that if the
+      // Stripe webhook and /confirm-payment both reach here on separate
+      // instances for the same paid session, only one bookings row is ever
+      // written — the DB UNIQUE index (sql/booking_idempotency.sql) is the
+      // hard backstop the in-process `inFlight` Set can't provide across
+      // instances. Requires the unique index to exist; harmless otherwise.
+      const { error: bookingInsertError } = await supa.from('bookings').upsert({
         stripe_session_id: session_id,
         duffel_order_id: orderId || null,
         // [M1-OFFER-ID] Persist the Duffel offer id the order was created
@@ -490,7 +497,7 @@ async function bookFromSession(session_id, session) {
         loyalty_discount: loyaltyUsed,
         customer_paid: customerPaid,
         stripe_payment_id: (session && session.payment_intent) || null,
-      });
+      }, { onConflict: 'stripe_session_id', ignoreDuplicates: true });
       if (bookingInsertError) log('error', 'supa_booking_insert_failed', { error: bookingInsertError.message });
     } catch (e) {
       log('error', 'supa_booking_insert_failed', { error: e.message });
