@@ -39,9 +39,9 @@ the areas the brief prioritizes.
 | F3 | Stripe webhook not durable; no event store / dedup by `stripe_event_id` | **HIGH** | ✅ Fixed (Phase 2) |
 | F4 | Idempotency is process-local (`inFlight` Set); no DB unique guard on `bookings.stripe_session_id` | **HIGH** | ✅ Fixed (Phase 2) |
 | F5 | Duffel webhook: no timestamp-freshness / replay protection / event dedup | **MED-HIGH** | ✅ Fixed (Phase 2) |
-| F6 | Payment ledger records **supplier (Duffel) net** as the customer payment amount | **MED-HIGH** | ⏳ Phase 3 |
-| F7 | Money handled as floating-point (`parseFloat`, `*`, round-to-cents) | **MEDIUM** | ⏳ Phase 3 |
-| F8 | Promo `used_count` increment is read-then-write (race → over-redemption) | **MEDIUM** | ⏳ Phase 3 |
+| F6 | Payment ledger records **supplier (Duffel) net** as the customer payment amount | **MED-HIGH** | ✅ Fixed (Phase 3) |
+| F7 | Money handled as floating-point (`parseFloat`, `*`, round-to-cents) | **MEDIUM** | ◑ Partial (Phase 3): helper + charge boundary; deep engine conversion deferred |
+| F8 | Promo `used_count` increment is read-then-write (race → over-redemption) | **MEDIUM** | ✅ Fixed (Phase 3) |
 | F9 | Guest booking access by `order_id`/`session_id` alone (no secret token) | **MEDIUM** | ⏳ Phase 4 (design) |
 | F10 | `npm audit`: 2 high (transitive dev), 1 low (`body-parser`, runtime) | **LOW-MED** | ✅ Fixed (Phase 2) |
 | F11 | No dedicated `/readiness`; `/health` returns 503 if any dependency down | **LOW** | ✅ Fixed (Phase 2) |
@@ -202,47 +202,85 @@ Redis outage no longer makes an otherwise-serving process look un-ready (brief
 
 ---
 
-## Phase 3 — financial correctness (recommended, isolated PR)
+## Phase 3 — financial correctness (implemented)
 
-### F6 — Payment ledger mislabels supplier cost as customer payment — **MED-HIGH** ⏳
+> **Migrations required:** `sql/payment_ledger.sql` (`payments.supplier_amount`,
+> `payments.margin_amount`) and `sql/promo_atomic_increment.sql`
+> (`increment_promo_usage` RPC). Idempotent / safe to re-run. Code degrades
+> gracefully if not yet applied.
 
-**File:** `src/services/booking.js` (`payments` insert in `bookFromSession`).
+**Result:** Jest **598/598 pass** (48 suites, +22). ESLint at baseline. `npm audit`
+0 vulnerabilities.
 
-```js
-supa.from('payments').insert({ ...,
-  amount: booking.duffel_amount ? Number(booking.duffel_amount) : null, // ← Duffel NET, not customer_paid
-  ... });
-```
+### F6 — Payment ledger records the customer payment — **MED-HIGH** ✅
 
-The `payments` row records the **Duffel net (supplier) amount** as the payment,
-which is exactly what brief §8.1/§8.2 warns against (customer paid €115, supplier
-cost €100 — the ledger must not store €100 as the Stripe customer payment). The
-authoritative `customer_paid` is correctly stored on `bookings`, but the
-`payments` ledger is wrong for reconciliation.
+**Files:** `src/services/booking.js`, `sql/payment_ledger.sql` (new).
 
-**Recommended fix:** record `amount = customer_paid`, and store supplier cost and
-margin as separate fields (or a separate ledger entry), each with `currency` and
-`stripe_payment_id`. Enables true Stripe↔DB↔Duffel reconciliation (brief §8.9,
-§49).
+The `payments` insert in `bookFromSession` previously stored the **Duffel net
+(supplier) amount** in `amount` — a €115 customer charge appeared as €100 in the
+ledger (brief §8.1/§8.2). Now `amount = customer_paid` (what Stripe actually
+charged), with the supplier cost and margin in their own additive columns
+(`supplier_amount`, `margin_amount`), so the ledger reconciles independently
+against Stripe (customer) and Duffel (supplier). The figures are computed once
+and shared with the `bookings` row so they can't disagree.
 
-### F7 — Floating-point money — **MEDIUM** ⏳
+**Test:** `test/booking.ledger.test.js` — end-to-end `bookFromSession` asserts
+`amount=113, supplier_amount=100, margin_amount=13` for a €100-net / €13-margin
+booking.
 
-`parseFloat` + `*` + `Math.round(x*100)/100` throughout pricing. Brief §8.6/§26
-mandate integer minor units. This is a broad, high-risk refactor touching every
-pricing path — do it as its own PR with the §26 test matrix (0, 0.01, 10.99,
-large, discount, refund, currency mismatch, rounding) and a shared `money.js`
-helper (add/mul/round in minor units, explicit rounding mode).
+### F7 — Integer-minor-unit money — **MEDIUM** ◑ (partial)
 
-### F8 — Promo over-redemption race — **MEDIUM** ⏳
+**Files:** `src/utils/money.js` (new), `src/routes/booking.routes.js`,
+`src/routes/flight-change.routes.js`, `src/services/booking.js`.
 
-**File:** `src/services/booking.js` (`incrementPromoUsage`) — read-then-write,
-acknowledged in a code comment. Concurrent checkouts can exceed `max_uses` (brief
-§27.3/§27.4). **Fix:** a Postgres RPC doing an atomic
-`update promo_codes set used_count = used_count + 1 where id = $1 and
-(max_uses is null or used_count < max_uses)` and treating 0 rows as "limit
-reached".
+Added `money.js` — the single documented money utility the brief (§26) requires:
+`toMinor`/`fromMinor`/`roundMoney`/`sumMoney` in integer minor units, with
+explicit per-currency decimals (0/2/3, incl. zero-decimal JPY) and a half-up
+rounding policy that avoids the classic `1.005*100` float artifact. The **actual
+Stripe charge amounts** (`/create-checkout-session`, `/add-services`,
+`/change-pay`) and the ledger margin now go through it instead of ad-hoc
+`Math.round(x*100)`.
+
+**Honest scope:** this establishes the mandated helper and routes the money that
+actually leaves/enters the customer's account through it, but the **internal
+pricing engine** (`computeAuthoritativePricing`, `normalizeOffer`, tier math)
+still computes in floats before that boundary. Converting the whole engine to
+minor units is a broad, higher-risk change deferred to its own PR — tracked as
+**F7-deep**. Values are unaffected for the 2-decimal currencies in use (the
+helper produces identical results at the charge boundary).
+
+**Test:** `test/money.test.js` — the full §26 matrix (0, 0.01, 10.99, large,
+discount, refund, rounding artifact, currency decimals, case-insensitivity).
+
+### F8 — Atomic promo increment — **MEDIUM** ✅
+
+**Files:** `src/services/booking.js` (`incrementPromoUsage`),
+`sql/promo_atomic_increment.sql` (new).
+
+Replaced the read-then-write increment with the `increment_promo_usage` RPC — a
+single guarded `UPDATE … WHERE id=$1 AND (max_uses IS NULL OR used_count <
+max_uses)` returning whether it incremented. Two concurrent checkouts can no
+longer push `used_count` past `max_uses` (brief §27.3/§27.4); a cap-reached
+result is logged.
+
+**Test:** `test/promoIncrement.test.js` — RPC called with the promo id, `true` on
+success, `false`+log on cap-reached, `false`+log on error, no-op without an id.
 
 ---
+
+## Phase 4 — guest access model (design decision required)
+
+### F9 — Guest booking access via `order_id`/`session_id` alone — **MEDIUM** ⏳
+
+**Files:** `src/services/booking.js` (`checkOrderOwnership`),
+`src/routes/booking.routes.js` (`/booking-confirmation`, `/order/:id`,
+`/add-services`), `cancel.routes.js`, `flight-change.routes.js`.
+
+For a **logged-in** user, authorization is correct (server-verified Supabase JWT
+→ `req.userId`, compared to `bookings.user_id`; client-supplied ids are never
+trusted — good). For a **guest** booking (`user_id = null`), knowledge of the
+Duffel `order_id`/`session_id` alone is currently sufficient to view/act on the
+booking. The brief (§2) states an order id must not be treated as a secret.
 
 ## Phase 4 — guest access model (design decision required)
 

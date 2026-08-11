@@ -18,6 +18,7 @@ const { computeLoyaltyDiscount, applyLoyaltyForBooking } = require('./loyalty');
 const { attachBookingIfReferred } = require('./referrals');
 const { sendBookingConfirmationEmail, buildOrderSummaryForEmail } = require('./email');
 const { getPendingBooking, markPendingBooked, setBookingStatus } = require('./pendingBookings');
+const { roundMoney } = require('../utils/money');
 
 // ─── Helper: attach Duffel passenger ids ──────────────────
 // Duffel's /air/orders requires every passenger to carry the `id` that came
@@ -98,17 +99,24 @@ function computePromoDiscount(promoRow, subtotal) {
   return Math.round(Math.min(Math.max(raw, 0), subtotal) * 100) / 100;
 }
 
+// [F8 · PROMO-RACE] Atomic check-and-increment via the increment_promo_usage
+// RPC (sql/promo_atomic_increment.sql) — a single guarded UPDATE instead of
+// the old read-then-write, so two concurrent checkouts can never push
+// used_count past max_uses. Returns true if the counter was incremented,
+// false if the cap was already reached (or the id wasn't found / no DB).
 async function incrementPromoUsage(promoId) {
-  if (!supa || !promoId) return;
+  if (!supa || !promoId) return false;
   try {
-    // Atomic increment via Postgres RPC would be ideal; a plain update is
-    // fine here since usage races are low-stakes (worst case: max_uses is
-    // off by one in a rare concurrent-checkout edge case).
-    const { data } = await supa.from('promo_codes').select('used_count').eq('id', promoId).maybeSingle();
-    const next = ((data && data.used_count) || 0) + 1;
-    await supa.from('promo_codes').update({ used_count: next }).eq('id', promoId);
+    const { data, error } = await supa.rpc('increment_promo_usage', { p_promo_id: promoId });
+    if (error) {
+      log('warn', 'promo_increment_rpc_failed', { promoId, error: error.message });
+      return false;
+    }
+    if (data === false) log('warn', 'promo_usage_cap_reached', { promoId });
+    return data !== false;
   } catch (e) {
     log('warn', 'promo_increment_failed', { promoId, error: e.message });
+    return false;
   }
 }
 
@@ -408,35 +416,42 @@ async function bookFromSession(session_id, session) {
   setBookingStatus(session_id, 'booked', { order_id: orderId, booking_reference: bookingRef });
   log('info', 'booking_confirmed', { order_id: orderId, ref: bookingRef });
 
-  // 6) Persist a payment record (best-effort)
+  // 6) Persist financial records (best-effort). Compute the authoritative
+  // figures ONCE and reuse them for both the payments ledger and the
+  // bookings row so they can never disagree.
+  // [ADMIN-DASHBOARD-FIX] Every figure prefers the freshly-recomputed
+  // `pricing` object from computeAuthoritativePricing() above (which
+  // re-derives from the live offer at booking time) and only falls back to
+  // the pre-payment checkout payload — so a fare/service drift between
+  // checkout-session creation and actual payment can't leave these figures
+  // disagreeing with each other.
   if (supa) {
-    supa.from('payments').insert({
-      stripe_session_id: session_id,
-      stripe_payment_id: (session && session.payment_intent) || null,
-      amount: booking.duffel_amount ? Number(booking.duffel_amount) : null,
-      currency: booking.currency || 'EUR',
-      status: 'paid',
-    }).then(function(){}, function(e){ log('error', 'supa_payment_insert_failed', { error: e.message }); });
-
-    // [ADMIN-MARGIN] Persist the financial breakdown for the admin
-    // dashboard (revenue/profit reporting) — separate from pending_bookings,
-    // which only tracks the technical checkout-session lifecycle.
-    // [ADMIN-DASHBOARD-FIX] discountAmount previously only ever read
-    // booking.discount_amount — the value stored in the checkout-session
-    // payload BEFORE payment. Every other figure here (ticketMargin,
-    // ancillaryMargin, loyaltyUsed) already preferred the freshly
-    // recomputed `pricing` object from computeAuthoritativePricing() just
-    // above, which re-derives the discount from the live offer at booking
-    // time. If the fare or services drifted between checkout-session
-    // creation and actual payment, the admin dashboard's discount figure
-    // could silently disagree with the other recomputed figures right
-    // next to it — same inconsistency bug as the others, just on this
-    // one field. Now matches the same "prefer fresh pricing" pattern.
     const ticketMargin = (pricing && pricing.ticketMargin) != null ? pricing.ticketMargin : (booking.ticket_margin || 0);
     const ancillaryMargin = (pricing && pricing.servicesMargin) != null ? pricing.servicesMargin : (booking.ancillary_margin || 0);
     const discountAmount = (pricing && pricing.discount) != null ? pricing.discount : (booking.discount_amount || 0);
     const loyaltyUsed = (pricing && pricing.loyaltyDiscount) || booking.loyalty_discount || 0;
     const customerPaid = booking.customer_amount != null ? Number(booking.customer_amount) : (pricing ? pricing.customerAmount : null);
+    const supplierAmount = Number(payAmount);   // Duffel net cost (what the supplier was paid)
+    const marginAmount = roundMoney((Number(ticketMargin) || 0) + (Number(ancillaryMargin) || 0), payCurrency);
+
+    // [F6 · PAYMENT-LEDGER] `amount` is what the CUSTOMER actually paid via
+    // Stripe — NOT the Duffel net cost that used to sit here and made the
+    // ledger read the supplier price (€100) for a customer charge (€115).
+    // Supplier cost and margin are stored in their own columns so the
+    // ledger reconciles against Stripe (customer) AND Duffel (supplier)
+    // independently (brief §8.1/§8.2). supplier_amount/margin_amount are
+    // additive nullable columns (sql/payment_ledger.sql) — harmless if the
+    // migration hasn't run yet.
+    supa.from('payments').insert({
+      stripe_session_id: session_id,
+      stripe_payment_id: (session && session.payment_intent) || null,
+      amount: customerPaid,
+      supplier_amount: supplierAmount,
+      margin_amount: marginAmount,
+      currency: payCurrency,
+      status: 'paid',
+    }).then(function(){}, function(e){ log('error', 'supa_payment_insert_failed', { error: e.message }); });
+
     // [RACE-CONDITION-FIX] This was previously fire-and-forget
     // (.then(noop, logError), no await) — bookFromSession() returned to
     // the caller (and from there, the HTTP response went back to the

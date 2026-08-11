@@ -15,6 +15,7 @@ const rateLimit = require('../middleware/rateLimit');
 const { attachUserIfPresent } = require('../middleware/auth');
 const { validate, PASSENGER_SCHEMA } = require('../utils/validate');
 const { buildCheckoutRedirects } = require('../utils/redirectUrls');
+const { toMinor } = require('../utils/money');
 const duffel = require('../services/duffel');
 const { getTicketProfitTiers, getAncillaryProfitTiers, computeTieredMargin, recordBookingFailureEvent } = require('../services/adminConfig');
 const { normalizeOffer } = require('../services/normalizeOffer');
@@ -343,8 +344,10 @@ app.post('/create-checkout-session', rateLimit('pay', 15, 60000), attachUserIfPr
       return res.status(400).json({ ok: false, code: 'PROMO_INVALID', error: 'Aktionscode ungültig oder abgelaufen', promo_status: pricing.promoStatus });
     }
 
-    // Stripe wants the amount in the smallest currency unit (cents)
-    const amountCents = Math.round(pricing.customerAmount * 100);
+    // Stripe wants the amount in the smallest currency unit (cents).
+    // [F7 · MONEY] Via the integer-minor-unit helper (single documented
+    // rounding policy) instead of an ad-hoc *100 round.
+    const amountCents = toMinor(pricing.customerAmount, pricing.currency);
 
     // [SECURITY · OPEN-REDIRECT] Never trust the browser's raw success_url/
     // cancel_url — an arbitrary external/javascript:/data: value here is a
@@ -725,7 +728,7 @@ app.post('/add-services', attachUserIfPresent, rateLimit('pay', 10, 60000), asyn
         quantity: 1,
         price_data: {
           currency: currency.toLowerCase(),
-          unit_amount: Math.round(customerAmount * 100),
+          unit_amount: toMinor(customerAmount, currency), // [F7 · MONEY]
           product_data: { name: route_label ? ('Zusatzleistungen · ' + route_label) : 'Zusatzleistungen' },
         },
       }],

@@ -19,6 +19,7 @@ const { checkOrderOwnership } = require('../services/booking');
 const { rememberBooking, getPendingBooking } = require('../services/pendingBookings');
 const { recordSyncFailureEvent } = require('../services/adminConfig');
 const { buildCheckoutRedirects } = require('../utils/redirectUrls');
+const { toMinor } = require('../utils/money');
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -332,7 +333,7 @@ app.post('/change-pay', attachUserIfPresent, rateLimit('pay', 10, 60000), async 
         quantity: 1,
         price_data: {
           currency: payload.currency.toLowerCase(),
-          unit_amount: Math.round(payload.change_total_amount * 100),
+          unit_amount: toMinor(payload.change_total_amount, payload.currency), // [F7 · MONEY]
           product_data: { name: 'Flugdatum-Änderung · Buchung ' + order_id },
         },
       }],
