@@ -61,10 +61,13 @@ function flush() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-function signDuffelBody(body, secret) {
-  const timestamp = Math.floor(Date.now() / 1000).toString();
+function signDuffelBodyAt(body, secret, tsSec) {
+  const timestamp = String(tsSec);
   const signature = crypto.createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex');
   return `t=${timestamp},v1=${signature}`;
+}
+function signDuffelBody(body, secret) {
+  return signDuffelBodyAt(body, secret, Math.floor(Date.now() / 1000));
 }
 
 beforeEach(() => {
@@ -174,6 +177,37 @@ describe('POST /webhooks/stripe', () => {
     expect(mockRecordBookingFailureEvent).toHaveBeenCalledWith(expect.objectContaining({ source: 'webhook', refunded: true }));
     expect(Sentry.captureException).toHaveBeenCalled();
   });
+
+  // [F3 · DEDUP] An event id already recorded as 'processed' must be skipped.
+  test('skips an event already recorded as processed (Stripe re-delivery)', async () => {
+    supa.__setResponse('stripe_webhook_events', { maybeSingle: { data: { status: 'processed', retry_count: 0 }, error: null } });
+    const session = { id: 'cs_dup', payment_status: 'paid' };
+    mockConstructEvent.mockReturnValue({ id: 'evt_dup', type: 'checkout.session.completed', data: { object: session } });
+    const app = buildApp();
+    const res = await request(app).post('/webhooks/stripe')
+      .set('stripe-signature', 'valid-sig')
+      .set('Content-Type', 'application/json')
+      .send(JSON.stringify({ any: 'thing' }));
+    expect(res.status).toBe(200);
+    await flush();
+    expect(mockBookFromSession).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith('info', 'stripe_webhook_duplicate_skipped', expect.objectContaining({ event_id: 'evt_dup' }));
+  });
+
+  // [F3] A first-seen event id still books (durable store must not block new work).
+  test('processes a first-seen event id normally', async () => {
+    // default mock: no existing row, insert succeeds -> not a duplicate
+    const session = { id: 'cs_new', payment_status: 'paid' };
+    mockConstructEvent.mockReturnValue({ id: 'evt_new', type: 'checkout.session.completed', data: { object: session } });
+    mockBookFromSession.mockResolvedValue({ order_id: 'ord_new', already: false });
+    const app = buildApp();
+    await request(app).post('/webhooks/stripe')
+      .set('stripe-signature', 'valid-sig')
+      .set('Content-Type', 'application/json')
+      .send(JSON.stringify({ any: 'thing' }));
+    await flush();
+    expect(mockBookFromSession).toHaveBeenCalledWith('cs_new', session);
+  });
 });
 
 describe('POST /webhooks/duffel', () => {
@@ -235,5 +269,36 @@ describe('POST /webhooks/duffel', () => {
       .set('Content-Type', 'application/json')
       .send(body);
     expect(res.status).toBe(200);
+  });
+
+  // [F5 · REPLAY-PROTECTION] A correctly-signed but stale payload is rejected.
+  test('rejects a validly-signed but stale timestamp (replay window)', async () => {
+    const body = JSON.stringify({ type: 'order_cancellation.confirmed', data: { object: { order_id: 'ord_old' } } });
+    const staleTs = Math.floor(Date.now() / 1000) - 600; // 10 min old, signed correctly
+    const sig = signDuffelBodyAt(body, 'duffel_test_secret', staleTs);
+    const app = buildApp();
+    const res = await request(app).post('/webhooks/duffel')
+      .set('x-duffel-signature', sig)
+      .set('Content-Type', 'application/json')
+      .send(body);
+    expect(res.status).toBe(400);
+    expect(res.text).toMatch(/stale/i);
+    expect(supa.from).not.toHaveBeenCalledWith('bookings');
+  });
+
+  // [F5 · DEDUP] An event id already processed is skipped (no re-application).
+  test('skips a Duffel event already recorded as processed', async () => {
+    supa.__setResponse('duffel_webhook_events', { maybeSingle: { data: { status: 'processed', retry_count: 0 }, error: null } });
+    const body = JSON.stringify({ id: 'devt_dup', type: 'order_cancellation.confirmed', data: { object: { order_id: 'ord_x' } } });
+    const sig = signDuffelBody(body, 'duffel_test_secret');
+    const app = buildApp();
+    const res = await request(app).post('/webhooks/duffel')
+      .set('x-duffel-signature', sig)
+      .set('Content-Type', 'application/json')
+      .send(body);
+    expect(res.status).toBe(200);
+    await flush();
+    expect(supa.from).not.toHaveBeenCalledWith('bookings');
+    expect(log).toHaveBeenCalledWith('info', 'duffel_webhook_duplicate_skipped', expect.objectContaining({ event_id: 'devt_dup' }));
   });
 });

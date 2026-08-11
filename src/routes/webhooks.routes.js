@@ -14,6 +14,16 @@ const stripe = require('../clients/stripe');
 const supa = require('../clients/supabase');
 const { bookFromSession, inFlight } = require('../services/booking');
 const { recordBookingFailureEvent } = require('../services/adminConfig');
+const {
+  beginStripeEvent, completeStripeEvent, failStripeEvent,
+  beginDuffelEvent, completeDuffelEvent, failDuffelEvent,
+} = require('../services/webhookEvents');
+
+// [F5 · REPLAY-PROTECTION] Reject a signed webhook whose timestamp is more
+// than this many seconds away from now (past OR future, to allow modest
+// clock drift). A valid signature stays replayable forever without this —
+// freshness + per-event de-duplication together close the replay window.
+const MAX_WEBHOOK_AGE_SEC = 300;
 
 module.exports = (app) => {
 
@@ -36,11 +46,23 @@ app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async (r
   // Acknowledge immediately so Stripe doesn't retry while we work
   res.json({ received: true });
 
+  // [F3 · DURABILITY + DEDUP] Persist the event and skip it entirely if it
+  // was already fully processed (a Stripe re-delivery of the same event id).
+  // Falls back to best-effort (no store) when Supabase isn't configured.
+  const evStore = await beginStripeEvent(event);
+  if (evStore.alreadyProcessed) {
+    log('info', 'stripe_webhook_duplicate_skipped', { event_id: event.id, type: event.type });
+    return;
+  }
+
   try {
     if (event.type === 'checkout.session.completed') {
       const session = event.data.object;
       if (session.payment_status === 'paid') {
-        if (inFlight.has(session.id)) return; // /confirm-payment is already handling it
+        // /confirm-payment is already handling it — leave the event row as
+        // 'received' so a later re-delivery can still complete the booking
+        // if that path fails (bookFromSession is idempotent).
+        if (inFlight.has(session.id)) return;
         inFlight.add(session.id);
         try {
           const out = await bookFromSession(session.id, session);
@@ -48,12 +70,23 @@ app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async (r
         } finally {
           inFlight.delete(session.id);
         }
+        await completeStripeEvent(event.id);
+      } else {
+        // Not paid — nothing to book, but the event itself is handled.
+        await completeStripeEvent(event.id);
       }
     } else if (event.type === 'payment_intent.payment_failed') {
       const pi = event.data.object;
       log('warn', 'webhook_payment_failed', { payment_intent: pi.id });
+      await completeStripeEvent(event.id);
+    } else {
+      // Any other event type: acknowledged, nothing to do.
+      await completeStripeEvent(event.id);
     }
   } catch (err) {
+    // [F3] Mark durable so a reconciliation/worker job can retry only what
+    // actually failed — instead of the failure being Sentry-only and lost.
+    await failStripeEvent(event.id, err.message);
     // [PRICE-DRIFT-PROTECTION] Already refunded in full inside
     // bookFromSession() before throwing — a handled, safe outcome, not
     // the "customer charged with no ticket" emergency the Sentry alert
@@ -115,6 +148,14 @@ app.post('/webhooks/duffel', express.raw({ type: 'application/json' }), async (r
       log('warn', 'duffel_webhook_signature_invalid', {});
       return res.status(400).send('Invalid signature');
     }
+    // [F5 · REPLAY-PROTECTION] A valid signature alone is replayable
+    // forever — reject a payload whose signed timestamp is too old/new.
+    const tsSec = parseInt(timestamp, 10);
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (!Number.isFinite(tsSec) || Math.abs(nowSec - tsSec) > MAX_WEBHOOK_AGE_SEC) {
+      log('warn', 'duffel_webhook_stale_timestamp', { timestamp });
+      return res.status(400).send('Stale timestamp');
+    }
   } catch (e) {
     log('warn', 'duffel_webhook_verify_error', { error: e.message });
     return res.status(400).send('Signature verification failed');
@@ -132,6 +173,15 @@ app.post('/webhooks/duffel', express.raw({ type: 'application/json' }), async (r
   // risk a timeout that triggers an unnecessary retry storm.
   res.json({ received: true });
 
+  // [F5 · DEDUP] Skip an event we've already fully processed (a Duffel
+  // re-delivery, or a replayed-within-the-window payload). Best-effort when
+  // Supabase isn't configured or the event carries no id.
+  const evStore = await beginDuffelEvent(event);
+  if (evStore.alreadyProcessed) {
+    log('info', 'duffel_webhook_duplicate_skipped', { event_id: event.id, type: event.type });
+    return;
+  }
+
   try {
     if (event.type === 'order_cancellation.confirmed') {
       const cancellation = event.data?.object || {};
@@ -148,7 +198,9 @@ app.post('/webhooks/duffel', express.raw({ type: 'application/json' }), async (r
         }
       }
     }
+    await completeDuffelEvent(event.id);
   } catch (err) {
+    await failDuffelEvent(event.id, err.message);
     log('error', 'duffel_webhook_processing_failed', { error: err.message, event_type: event.type });
     if (env.SENTRY_DSN) {
       Sentry.captureException(err, { tags: { critical: 'duffel_webhook_failed' }, extra: { event_type: event.type } });

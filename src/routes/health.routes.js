@@ -76,6 +76,23 @@ module.exports = (app) => {
     });
   });
 
+  // [F11 · READINESS] Distinct from the deep /health above: readiness gates
+  // ONLY on the critical dependency for serving requests — the database.
+  // It deliberately does NOT fail on a Duffel/Stripe/Redis outage, so a
+  // third-party hiccup can't make the whole process look un-ready and get
+  // pulled from rotation (brief §32). Liveness is '/' (process is up).
+  app.get('/readiness', rateLimit('health', 60, 60000), async (req, res) => {
+    let dbOk = true;
+    if (supa) {
+      dbOk = false;
+      try {
+        const { error } = await supa.from('admin_config').select('key').limit(1);
+        dbOk = !error;
+      } catch (e) { dbOk = false; }
+    }
+    res.status(dbOk ? 200 : 503).json({ ok: dbOk, ready: dbOk, timestamp: new Date().toISOString() });
+  });
+
   app.get('/maintenance-status', async (req, res) => {
     try {
       const cfg = await getMaintenanceConfig();

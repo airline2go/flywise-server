@@ -25,7 +25,7 @@ function applyGlobalMiddleware(app) {
   // يوقف أي طلب تاني فوراً. /admin/*، /maintenance-status،
   // /health، /، /status مستثناة دايماً.
   app.use(async (req, res, next) => {
-    if (req.path.startsWith('/admin/') || req.path === '/maintenance-status' || req.path === '/health' || req.path === '/' || req.path === '/status') {
+    if (req.path.startsWith('/admin/') || req.path === '/maintenance-status' || req.path === '/health' || req.path === '/readiness' || req.path === '/' || req.path === '/status') {
       return next();
     }
     try {
