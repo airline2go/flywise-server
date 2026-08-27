@@ -358,7 +358,10 @@ app.post('/create-checkout-session', rateLimit('pay', 15, 60000), attachUserIfPr
 
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
-      payment_method_types: ['card'],
+      // [PAYMENT-METHODS] Let Stripe surface every method enabled in the
+      // Dashboard (card, Klarna, PayPal, Apple/Google Pay, …) that's eligible
+      // for the amount/currency/customer — instead of hard-coding card only.
+      automatic_payment_methods: { enabled: true },
       line_items: [{
         quantity: 1,
         price_data: {
@@ -723,7 +726,10 @@ app.post('/add-services', attachUserIfPresent, rateLimit('pay', 10, 60000), asyn
     // 4) Create Stripe session for the customer-facing amount (net + margin)
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
-      payment_method_types: ['card'],
+      // [PAYMENT-METHODS] Let Stripe surface every method enabled in the
+      // Dashboard (card, Klarna, PayPal, Apple/Google Pay, …) that's eligible
+      // for the amount/currency/customer — instead of hard-coding card only.
+      automatic_payment_methods: { enabled: true },
       line_items: [{
         quantity: 1,
         price_data: {
