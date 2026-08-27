@@ -220,6 +220,31 @@ function buildOrderSummaryForEmail(order, money) {
     });
   }
 
+  // [FARE-CONDITIONS] Duffel exposes change/refund rules at the order level
+  // and, more reliably, per slice. Read the order level first, fall back to
+  // the first slice. `allowed` may be true/false/null (null = unknown → the
+  // PDF simply omits that line).
+  const cond = order.conditions || (order.slices && order.slices[0] && order.slices[0].conditions) || {};
+  const chg = cond.change_before_departure || {};
+  const rfd = cond.refund_before_departure || {};
+  const conditions = {
+    changeable: (chg.allowed === true || chg.allowed === false) ? chg.allowed : null,
+    changePenalty: chg.penalty_amount != null ? Number(chg.penalty_amount) : null,
+    refundable: (rfd.allowed === true || rfd.allowed === false) ? rfd.allowed : null,
+    refundPenalty: rfd.penalty_amount != null ? Number(rfd.penalty_amount) : null,
+    penaltyCurrency: chg.penalty_currency || rfd.penalty_currency || order.total_currency || 'EUR',
+  };
+  // Included baggage from the first segment's first passenger (same source the
+  // app's fare card reads): carry_on / checked with quantity > 0.
+  const firstSegBags = (order.slices && order.slices[0] && order.slices[0].segments
+    && order.slices[0].segments[0] && order.slices[0].segments[0].passengers
+    && order.slices[0].segments[0].passengers[0]
+    && order.slices[0].segments[0].passengers[0].baggages) || [];
+  const fareBaggage = {
+    carryOn: firstSegBags.some((b) => b.type === 'carry_on' && (b.quantity || 0) > 0),
+    checked: firstSegBags.some((b) => b.type === 'checked' && (b.quantity || 0) > 0),
+  };
+
   return {
     legs, allSeats, purchasedBags, ticketByPax, passengers,
     ticketPrice: Math.round(ticketPrice * 100) / 100,
@@ -230,6 +255,7 @@ function buildOrderSummaryForEmail(order, money) {
     promoCode: money.promoCode || null,
     customerPaid: money.customerPaid,
     currency: order.total_currency || 'EUR',
+    conditions, fareBaggage,
   };
 }
 
@@ -451,7 +477,9 @@ async function sendBookingConfirmationEmail(to, data) {
       const priceRows = [{ key: 'ticket', value: fmtMoney(summary.ticketPrice, summary.currency) }];
       if (summary.bagsPrice > 0) priceRows.push({ key: 'bags', value: '+ ' + fmtMoney(summary.bagsPrice, summary.currency) });
       if (summary.seatsPrice > 0) priceRows.push({ key: 'seats', value: '+ ' + fmtMoney(summary.seatsPrice, summary.currency) });
-      if (summary.loyaltyDiscount > 0) priceRows.push({ key: 'loyalty', value: '− ' + fmtMoney(summary.loyaltyDiscount, summary.currency) });
+      // ASCII hyphen (not U+2212): pdfkit's built-in Helvetica has no glyph
+      // for the Unicode minus sign and renders it as a stray quote mark.
+      if (summary.loyaltyDiscount > 0) priceRows.push({ key: 'loyalty', value: '- ' + fmtMoney(summary.loyaltyDiscount, summary.currency) });
       const grandTotalForPdf = Math.round((summary.ticketPrice + summary.bagsPrice + summary.seatsPrice - summary.discountAmount) * 100) / 100;
       priceRows.push({ key: 'total', value: fmtMoney(grandTotalForPdf, summary.currency), bold: true });
 
@@ -460,6 +488,11 @@ async function sendBookingConfirmationEmail(to, data) {
         bookingRef: data.bookingRef, legs: legsForPdf,
         passengers: passengersForPdf, ticketByPax: summary.ticketByPax,
         priceRows,
+        // [FARE-CONDITIONS] Fare rules + included baggage, plus the standing
+        // note that Airpiv service fees are non-refundable per our policy.
+        conditions: summary.conditions,
+        fareBaggage: summary.fareBaggage,
+        serviceFeeNote: true,
       });
       attachments = [{ name: `Airpiv-${data.bookingRef || 'Ticket'}.pdf`, content: pdfBuffer.toString('base64') }];
     } catch (e) {
