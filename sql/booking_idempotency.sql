@@ -18,9 +18,20 @@
 -- ============================================================
 
 -- One booking per Stripe checkout session.
+--
+-- [ONCONFLICT-INFERENCE-FIX] This index MUST be non-partial. bookFromSession()
+-- persists the row via supabase-js `.upsert(..., { onConflict:
+-- 'stripe_session_id' })`, which emits `INSERT ... ON CONFLICT
+-- (stripe_session_id) DO NOTHING` with NO predicate. Postgres cannot infer a
+-- PARTIAL unique index for such a statement (it raises 42P10, "no unique or
+-- exclusion constraint matching the ON CONFLICT specification"), so a
+-- `... WHERE stripe_session_id IS NOT NULL` variant makes EVERY booking upsert
+-- fail — the row is never written, and the confirmation screen then falls back
+-- to Duffel's net prices with no margin/loyalty. A plain unique index is
+-- inferable and, because Postgres keeps NULLs DISTINCT by default, still allows
+-- multiple NULL rows — equivalent here since every real booking has a session id.
 create unique index if not exists bookings_stripe_session_id_key
-  on bookings (stripe_session_id)
-  where stripe_session_id is not null;
+  on bookings (stripe_session_id);
 
 -- One booking per Stripe PaymentIntent (defence in depth alongside the
 -- session key above).
