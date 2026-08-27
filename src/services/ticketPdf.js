@@ -441,7 +441,7 @@ function buildTicketPdf(data) {
       doc.moveTo(marginX, doc.y).lineTo(doc.page.width - marginX, doc.y).strokeColor(BORDER).stroke();
       doc.moveDown(0.6);
       ctx.font(false); doc.fillColor(TX3).fontSize(ctx.fs(8.5))
-        .text('Airpiv · support@airpiv.com · +49 30 568 37 100', marginX, doc.y, { width: contentWidth, align: 'center' });
+        .text('Airpiv · support@airpiv.com', marginX, doc.y, { width: contentWidth, align: 'center' });
       doc.moveDown(0.3);
       doc.text(ctx.t.disclaimer, marginX, doc.y, { width: contentWidth, align: 'center' });
 
