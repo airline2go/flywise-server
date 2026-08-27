@@ -127,7 +127,6 @@ describe('information completeness — value is never hidden for variety', () =>
     const { buildContext } = require('../src/services/seo/compose');
     const ctx = buildContext(r);
     const applicableIds = BLOCKS.filter((b) => b.applicable(ctx)).map((b) => b.id);
-    const renderedHeadings = g.content.sections.map((s) => s.heading);
     // Rich route: expect most applicable blocks present (at most one omitted for
     // intro de-duplication). No random suppression.
     expect(g.content.sections.length).toBeGreaterThanOrEqual(applicableIds.length - 1);

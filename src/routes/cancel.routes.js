@@ -43,7 +43,7 @@ app.post('/cancel', attachUserIfPresent, rateLimit('cancel', 10, 60000), async (
     // someone happened to notice and fix it manually.
     if (supa) {
       supa.from('bookings').update({ status: 'cancelled' }).eq('duffel_order_id', order_id)
-        .then(({ data, error }) => {
+        .then(({ error }) => {
           if (error) { log('error', 'admin_cancel_sync_failed', { order_id, error: error.message }); return; }
           // [CANCEL-NOTIFY-FIX] This is a CUSTOMER cancelling their own
           // booking (via this public /cancel endpoint), not the admin

@@ -17,7 +17,7 @@ const { duffelAttempt } = require('../services/duffel');
 const {
   DEFAULT_TICKET_TIERS, DEFAULT_ANCILLARY_TIERS, DEFAULT_INVOICE_CONFIG,
   getAdminConfig, setAdminConfig, clearConfigCacheKeys,
-  recordCancellationEvent, markCancellationsRead,
+  markCancellationsRead,
   markBookingFailuresRead,
   markSyncFailuresRead,
   computeTieredMargin, getTicketProfitTiers, getAncillaryProfitTiers,
@@ -802,7 +802,7 @@ app.post('/admin/route-pages/backfill-locations', rateLimit('admin', 120, 60000)
     if (error) throw new Error(error.message);
 
     const iataCache = new Map(); // avoid looking up the same airport twice in one run
-    async function lookupAirport(code) {
+    const lookupAirport = async (code) => {
       if (iataCache.has(code)) return iataCache.get(code);
       try {
         const result = await duffel('GET', '/places/suggestions?query=' + encodeURIComponent(code));
@@ -1089,7 +1089,7 @@ app.post('/admin/route-pages/health-check-batch', rateLimit('admin', 120, 60000)
     searchDate.setDate(searchDate.getDate() + 21);
     const departure_date = searchDate.toISOString().slice(0, 10);
 
-    async function checkOne(route) {
+    const checkOne = async (route) => {
       try {
         // [HEALTH-CHECK-ISOLATION] duffelAttempt مباشرة، مش duffel() —
         // عشان فشل مسار فاضي (طبيعي جداً هنا) مايتسجّلش على الـ
@@ -1862,7 +1862,7 @@ app.get('/admin/api-logs/stats', rateLimit('admin', 120, 60000), requireFullAdmi
     const fromIso = from.toISOString();
     const toIso = to.toISOString();
 
-    function countQuery(extra) {
+    const countQuery = (extra) => {
       let q = supa.from('api_logs').select('id', { count: 'exact', head: true }).gte('created_at', fromIso).lte('created_at', toIso);
       if (extra) q = extra(q);
       return q;
@@ -1909,7 +1909,7 @@ app.get('/admin/api-logs/stats', rateLimit('admin', 120, 60000), requireFullAdmi
 // published route pages, cities, and countries.
 // ═══════════════════════════════════════════════════════════════
 
-const { processRoutes, generateStatistics, processSingleRoute, fetchRoutePagesForUpdate, PRIMARY_LANGUAGE } = require('../services/seoBatchProcessor');
+const { processRoutes, generateStatistics, processSingleRoute, PRIMARY_LANGUAGE } = require('../services/seoBatchProcessor');
 
 // Live snapshot of the most recent (or in-flight) batch run — polled by the
 // admin UI via GET /admin/seo/batch-status. Only one batch runs at a time.

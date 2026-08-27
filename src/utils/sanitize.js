@@ -17,6 +17,7 @@ const MAX_STRING_LENGTH = 100000;
 function sanitizeValue(v, depth) {
   if (depth > 6) return v;
   if (typeof v === 'string') {
+    // eslint-disable-next-line no-control-regex -- إزالة محارف التحكّم متعمّدة
     return v.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').slice(0, MAX_STRING_LENGTH);
   }
   if (Array.isArray(v)) {
