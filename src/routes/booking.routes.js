@@ -265,7 +265,7 @@ app.post('/create-checkout-session', rateLimit('pay', 15, 60000), attachUserIfPr
 
     const {
       offer_id, passengers, services = [],
-      duffel_amount, customer_amount, currency = 'EUR', promo_code, device_id,
+      duffel_amount, customer_amount, promo_code, device_id,
       route_label, success_url, cancel_url, lang,
     } = req.body;
     // [TICKET-PDF-I18N] The customer's UI language, used later to render the

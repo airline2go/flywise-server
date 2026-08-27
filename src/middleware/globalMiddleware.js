@@ -110,7 +110,7 @@ function applyGlobalMiddleware(app) {
   // 6) [#13] تعقيم جسم الطلب — بعد ما express.json() يحلل الـ body
   app.use((req, res, next) => {
     if (req.body && typeof req.body === 'object') {
-      try { req.body = sanitizeValue(req.body, 0); } catch (e) {}
+      try { req.body = sanitizeValue(req.body, 0); } catch (e) { /* تنظيف أفضل-جهد — أبداً مايوقفش الطلب */ }
     }
     next();
   });

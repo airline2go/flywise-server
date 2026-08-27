@@ -26,7 +26,7 @@ jest.mock('../src/clients/supabase', () => {
   }
   return {
     from: jest.fn((table) => makeBuilder(table)),
-    rpc: jest.fn((name, params) => {
+    rpc: jest.fn((name) => {
       const cfg = responses['__rpc_' + name] || {};
       return Promise.resolve(cfg.result || { data: null, error: null });
     }),
@@ -579,7 +579,7 @@ describe('GET /admin/api-logs/stats', () => {
       return {
         select: (cols, opts) => {
           if (opts && opts.head) {
-            function chain(filters) {
+            const chain = (filters) => {
               return {
                 gte: () => chain(filters),
                 lte: () => chain(filters),

@@ -31,7 +31,7 @@ const log = require('./src/utils/log');
 const supa = require('./src/clients/supabase');
 
 // ─── [2] حماية الكراش ──────────────────────────────────────
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', (reason) => {
   const err = reason instanceof Error ? reason : new Error(String(reason));
   log('error', 'unhandled_rejection', { message: err.message, stack: err.stack });
   if (env.SENTRY_DSN) Sentry.captureException(err, { tags: { critical: 'unhandled_rejection' } });
@@ -41,7 +41,7 @@ process.on('uncaughtException', (err) => {
   if (env.SENTRY_DSN) Sentry.captureException(err, { tags: { critical: 'uncaught_exception' } });
   try {
     if (typeof gracefulShutdown === 'function') return gracefulShutdown('uncaughtException');
-  } catch (e) {}
+  } catch (e) { /* الإغلاق الآمن قد لا يكون جاهزاً بعد — نكمل للخروج */ }
   process.exit(1);
 });
 
