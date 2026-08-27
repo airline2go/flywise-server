@@ -18,6 +18,8 @@ const TX = '#101d2c';
 const TX2 = '#46586c';
 const TX3 = '#8fa4b4';
 const BORDER = '#e1e7ec';
+const GREEN = '#0a9384';
+const RED = '#c0392b';
 
 const FONT_DIR = path.join(__dirname, '..', '..', 'assets', 'fonts');
 
@@ -32,6 +34,19 @@ const T = {
   it: { bookingCode: 'CODICE DI PRENOTAZIONE', flightDetails: 'Dettagli del volo', travelers: 'Passeggeri', ticketNumbers: 'Numeri di biglietto', priceSummary: 'Riepilogo prezzi', outbound: 'Andata', return: 'Ritorno', flight: 'Volo', nonstop: 'Diretto', stop: 'scalo', stops: 'scali', multipleAirlines: 'Più compagnie', depart: 'Partenza:', arrive: 'Arrivo:', duration: 'Durata del volo:', layover: 'Scalo a', adult: 'Adulto', child: 'Bambino', infant: 'Neonato', name: 'Nome', dob: 'Data di nascita', gender: 'Sesso', flightInfo: 'Informazioni sul volo', seat: 'Posto', bagChecked: 'Bagaglio da stiva', bagCarry: 'Bagaglio a mano', male: 'Uomo', female: 'Donna', pTicket: 'Biglietto aereo', pBags: 'Bagagli', pSeats: 'Posti', pLoyalty: 'Credito fedeltà applicato', pTotal: 'Totale', disclaimer: "Questo riepilogo non sostituisce il biglietto ufficiale della compagnia aerea." },
   nl: { bookingCode: 'BOEKINGSCODE', flightDetails: 'Vluchtdetails', travelers: 'Passagiers', ticketNumbers: 'Ticketnummers', priceSummary: 'Prijsoverzicht', outbound: 'Heenvlucht', return: 'Terugvlucht', flight: 'Vlucht', nonstop: 'Non-stop', stop: 'tussenstop', stops: 'tussenstops', multipleAirlines: 'Meerdere maatschappijen', depart: 'Vertrek:', arrive: 'Aankomst:', duration: 'Vluchtduur:', layover: 'Overstap in', adult: 'Volwassene', child: 'Kind', infant: 'Baby', name: 'Naam', dob: 'Geboortedatum', gender: 'Geslacht', flightInfo: 'Vluchtinformatie', seat: 'Stoel', bagChecked: 'Ruimbagage', bagCarry: 'Handbagage', male: 'Man', female: 'Vrouw', pTicket: 'Vliegticket', pBags: 'Bagage', pSeats: 'Stoelen', pLoyalty: 'Loyaliteitstegoed gebruikt', pTotal: 'Totaal', disclaimer: 'Dit overzicht vervangt niet het officiële ticket van de luchtvaartmaatschappij.' },
   ar: { bookingCode: 'رمز الحجز', flightDetails: 'تفاصيل الرحلة', travelers: 'المسافرون', ticketNumbers: 'أرقام التذاكر', priceSummary: 'ملخص الأسعار', outbound: 'رحلة الذهاب', return: 'رحلة العودة', flight: 'رحلة', nonstop: 'مباشر', stop: 'توقف', stops: 'توقفات', multipleAirlines: 'عدة شركات طيران', depart: 'المغادرة من:', arrive: 'الوصول إلى:', duration: 'مدة الرحلة:', layover: 'توقف في', adult: 'بالغ', child: 'طفل', infant: 'رضيع', name: 'الاسم', dob: 'تاريخ الميلاد', gender: 'الجنس', flightInfo: 'معلومات الرحلة', seat: 'المقعد', bagChecked: 'حقيبة مسجّلة', bagCarry: 'حقيبة يد', male: 'ذكر', female: 'أنثى', pTicket: 'تذكرة الطيران', pBags: 'الأمتعة', pSeats: 'المقاعد', pLoyalty: 'رصيد الولاء المستخدم', pTotal: 'الإجمالي', disclaimer: 'هذا الملخص لا يُغني عن التذكرة الرسمية لشركة الطيران.' },
+};
+
+// [FARE-CONDITIONS] Localized labels for the fare-conditions section and the
+// non-refundable service-fee note. Kept as its own dictionary so the large T
+// table above stays untouched.
+const FARE = {
+  de: { title: 'Tarifbedingungen', changeable: 'Umbuchbar', notChangeable: 'Nicht umbuchbar', refundable: 'Erstattbar', notRefundable: 'Nicht erstattbar', fee: 'Gebühr', carryOn: 'Handgepäck inklusive', checked: 'Aufgabegepäck inklusive', serviceFeeNote: 'Airpiv-Servicegebühren sind gemäß unseren AGB nicht erstattbar.' },
+  en: { title: 'Fare conditions', changeable: 'Changeable', notChangeable: 'Non-changeable', refundable: 'Refundable', notRefundable: 'Non-refundable', fee: 'fee', carryOn: 'Carry-on included', checked: 'Checked bag included', serviceFeeNote: 'Airpiv service fees are non-refundable under our Terms & Conditions.' },
+  fr: { title: 'Conditions tarifaires', changeable: 'Modifiable', notChangeable: 'Non modifiable', refundable: 'Remboursable', notRefundable: 'Non remboursable', fee: 'frais', carryOn: 'Bagage à main inclus', checked: 'Bagage en soute inclus', serviceFeeNote: 'Les frais de service Airpiv ne sont pas remboursables conformément à nos CGV.' },
+  es: { title: 'Condiciones de la tarifa', changeable: 'Modificable', notChangeable: 'No modificable', refundable: 'Reembolsable', notRefundable: 'No reembolsable', fee: 'tasa', carryOn: 'Equipaje de mano incluido', checked: 'Equipaje facturado incluido', serviceFeeNote: 'Las tarifas de servicio de Airpiv no son reembolsables según nuestros Términos y Condiciones.' },
+  it: { title: 'Condizioni tariffarie', changeable: 'Modificabile', notChangeable: 'Non modificabile', refundable: 'Rimborsabile', notRefundable: 'Non rimborsabile', fee: 'penale', carryOn: 'Bagaglio a mano incluso', checked: 'Bagaglio da stiva incluso', serviceFeeNote: 'Le commissioni di servizio Airpiv non sono rimborsabili secondo i nostri Termini e Condizioni.' },
+  nl: { title: 'Tariefvoorwaarden', changeable: 'Wijzigbaar', notChangeable: 'Niet wijzigbaar', refundable: 'Terugbetaalbaar', notRefundable: 'Niet terugbetaalbaar', fee: 'kosten', carryOn: 'Handbagage inbegrepen', checked: 'Ruimbagage inbegrepen', serviceFeeNote: 'Airpiv-servicekosten zijn niet terugbetaalbaar volgens onze voorwaarden.' },
+  ar: { title: 'شروط التذكرة', changeable: 'قابلة للتغيير', notChangeable: 'غير قابلة للتغيير', refundable: 'قابلة للاسترداد', notRefundable: 'غير قابلة للاسترداد', fee: 'رسوم', carryOn: 'حقيبة يد مشمولة', checked: 'حقيبة مسجّلة مشمولة', serviceFeeNote: 'رسوم خدمة Airpiv غير قابلة للاسترداد وفقاً لسياسة الموقع.' },
 };
 const LOCALES = { de: 'de-DE', en: 'en-GB', fr: 'fr-FR', es: 'es-ES', it: 'it-IT', nl: 'nl-NL', ar: 'ar' };
 const SUPPORTED = Object.keys(T);
@@ -125,8 +140,16 @@ function twoColRow(doc, ctx, x, width, left, right, opts) {
   const wL = width * 0.62;
   const wR = width * 0.38;
   const y = doc.y;
-  ctx.font(!!o.leftBold); doc.fontSize(ctx.fs(o.leftSize || 10)).fillColor(o.leftColor || TX2);
-  ctx.font(!!o.rightBold); // set below per element
+  // [ROW-OVERLAP-FIX] Measure each column's rendered height with its own
+  // font/size BEFORE drawing, so we can leave doc.y at the true BOTTOM of
+  // the row. Previously this reset doc.y back to the row's top (`doc.y = y`)
+  // and relied on the caller's small moveDown(0.5) to advance — which is
+  // less than one line of text, so every subsequent row was drawn on top of
+  // the previous one (the price summary showed all lines collapsed).
+  ctx.font(!!o.leftBold); doc.fontSize(ctx.fs(o.leftSize || 10));
+  const hL = doc.heightOfString(String(left == null ? '' : left), { width: wL });
+  ctx.font(!!o.rightBold); doc.fontSize(ctx.fs(o.rightSize || 10));
+  const hR = doc.heightOfString(String(right == null ? '' : right), { width: wR });
   if (!ctx.rtl) {
     ctx.font(!!o.leftBold); doc.fontSize(ctx.fs(o.leftSize || 10)).fillColor(o.leftColor || TX2).text(left, x, y, { width: wL, align: 'left' });
     ctx.font(!!o.rightBold); doc.fontSize(ctx.fs(o.rightSize || 10)).fillColor(o.rightColor || TX).text(right, x + wL, y, { width: wR, align: 'right' });
@@ -134,7 +157,29 @@ function twoColRow(doc, ctx, x, width, left, right, opts) {
     ctx.font(!!o.leftBold); doc.fontSize(ctx.fs(o.leftSize || 10)).fillColor(o.leftColor || TX2).text(left, x + wR, y, { width: wL, align: 'right' });
     ctx.font(!!o.rightBold); doc.fontSize(ctx.fs(o.rightSize || 10)).fillColor(o.rightColor || TX).text(right, x, y, { width: wR, align: 'left' });
   }
-  doc.y = y;
+  doc.y = y + Math.max(hL, hR);
+}
+
+// A single fare-condition line: a colored status dot (green = included/allowed,
+// red = not allowed) on the reading-start edge, then the label. Mirrored for RTL.
+function conditionLine(doc, ctx, x, width, ok, label) {
+  ensureSpace(doc, 18);
+  const size = 10;
+  ctx.font(false); doc.fontSize(ctx.fs(size));
+  const y = doc.y;
+  const textW = width - 14;
+  const h = doc.heightOfString(String(label == null ? '' : label), { width: textW });
+  const dotR = 2.6;
+  const cy = y + ctx.fs(size) * 0.5;
+  if (!ctx.rtl) {
+    doc.circle(x + dotR + 1, cy, dotR).fill(ok ? GREEN : RED);
+    doc.fillColor(TX2).fontSize(ctx.fs(size)).text(label, x + 14, y, { width: textW, align: 'left' });
+  } else {
+    doc.circle(x + width - dotR - 1, cy, dotR).fill(ok ? GREEN : RED);
+    doc.fillColor(TX2).fontSize(ctx.fs(size)).text(label, x, y, { width: textW, align: 'right' });
+  }
+  doc.y = y + Math.max(h, ctx.fs(size) + 2);
+  doc.moveDown(0.15);
 }
 
 // One bordered card per LEG; the border is stroked after the inner content so
@@ -359,6 +404,36 @@ function buildTicketPdf(data) {
             doc.moveDown(0.3);
           }
         });
+      }
+
+      // ── Fare conditions ──
+      const fc = data.conditions || null;
+      const fb = data.fareBaggage || {};
+      const ft = FARE[ctx.lang] || FARE.de;
+      const hasCond = !!fc && (fc.changeable != null || fc.refundable != null || fb.carryOn || fb.checked);
+      if (hasCond) {
+        const feeMoney = (n, cur) => `${(Number(n) || 0).toFixed(2)} ${cur || 'EUR'}`;
+        doc.moveDown(0.3);
+        sectionTitle(doc, ctx, ft.title, marginX, contentWidth);
+        if (fc.changeable != null) {
+          let lbl = fc.changeable ? ft.changeable : ft.notChangeable;
+          if (fc.changeable && Number(fc.changePenalty) > 0) lbl += ` (${ft.fee} ${feeMoney(fc.changePenalty, fc.penaltyCurrency)})`;
+          conditionLine(doc, ctx, marginX, contentWidth, !!fc.changeable, lbl);
+        }
+        if (fc.refundable != null) {
+          let lbl = fc.refundable ? ft.refundable : ft.notRefundable;
+          if (fc.refundable && Number(fc.refundPenalty) > 0) lbl += ` (${ft.fee} ${feeMoney(fc.refundPenalty, fc.penaltyCurrency)})`;
+          conditionLine(doc, ctx, marginX, contentWidth, !!fc.refundable, lbl);
+        }
+        if (fb.carryOn) conditionLine(doc, ctx, marginX, contentWidth, true, ft.carryOn);
+        if (fb.checked) conditionLine(doc, ctx, marginX, contentWidth, true, ft.checked);
+      }
+
+      // ── Service-fee note (Airpiv fees are non-refundable per policy) ──
+      if (data.serviceFeeNote) {
+        doc.moveDown(0.4);
+        ctx.font(false); doc.fillColor(TX3).fontSize(ctx.fs(8.5))
+          .text(ft.serviceFeeNote, marginX, doc.y, { width: contentWidth, align: ctx.alignStart });
       }
 
       // ── Footer ──
