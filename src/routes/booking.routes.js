@@ -316,10 +316,22 @@ app.post('/create-checkout-session', rateLimit('pay', 15, 60000), attachUserIfPr
     // would format to the same value), nothing is shown and checkout
     // proceeds normally, regardless of how much the underlying net cost
     // moved internally.
+    // [PRICE-DRIFT-TOLERANCE] Only interrupt checkout when the customer would
+    // pay MEANINGFULLY MORE than the price they were shown. Duffel fares drift
+    // by a few cents constantly (and our margin/loyalty recompute can nudge the
+    // customer figure either way), so the old `abs(diff) >= 0.01` fired the
+    // "Der Preis hat sich geändert" dialog on essentially every booking — even
+    // when the price DROPPED, which is a pure win for the customer. Now:
+    //   • price dropped / unchanged → proceed silently at the fresh price
+    //   • tiny increase (<= PRICE_DRIFT_TOL) → honour the exact price they saw
+    //     (charge oldCustomerAmount, absorbing the few cents from our margin)
+    //     as long as it still covers Duffel's fresh net cost
+    //   • larger increase → show the price-changed dialog and let them decide
+    const PRICE_DRIFT_TOL = 2.00; // € we'll absorb rather than interrupt checkout
     if (duffel_amount != null && customer_amount != null) {
       const oldCustomerAmount = Math.round(Number(customer_amount) * 100) / 100;
       const customerDiff = Math.round((pricing.customerAmount - oldCustomerAmount) * 100) / 100;
-      if (Math.abs(customerDiff) >= 0.01) {
+      if (customerDiff > PRICE_DRIFT_TOL) {
         const oldAmount = Math.round(Number(duffel_amount) * 100) / 100;
         const diff = Math.round((pricing.duffelAmount - oldAmount) * 100) / 100;
         log('info', 'price_changed_before_checkout', { offer_id, old: oldAmount, fresh: pricing.duffelAmount, diff, old_customer: oldCustomerAmount, new_customer: pricing.customerAmount, customer_diff: customerDiff });
@@ -334,6 +346,13 @@ app.post('/create-checkout-session', rateLimit('pay', 15, 60000), attachUserIfPr
           currency: pricing.currency,
           diff,
         });
+      }
+      // Within tolerance: don't surprise the customer with a new number.
+      // If they saw a price that still covers our fresh cost, charge exactly
+      // that; a decrease already leaves pricing.customerAmount lower, so keep it.
+      if (customerDiff > 0 && oldCustomerAmount >= pricing.duffelAmount) {
+        log('info', 'price_drift_absorbed', { offer_id, old_customer: oldCustomerAmount, computed_customer: pricing.customerAmount, customer_diff: customerDiff });
+        pricing.customerAmount = oldCustomerAmount;
       }
     }
 
