@@ -8,6 +8,26 @@
 
 const { computeTieredMargin } = require('./adminConfig');
 
+// ─── Standard economy baggage allowances, per marketing carrier ───────────
+// Duffel/NDC frequently omit the included-baggage WEIGHT (it returns only the
+// allowance count + type). These are each airline's *published standard
+// economy* weights, used ONLY as a labelled fallback when Duffel gives no
+// weight — surfaced to the customer as "≈ … per airline policy", never as a
+// guarantee. cabin:null means the carrier publishes no cabin weight limit.
+const AIRLINE_BAG_STD = {
+  LH: { cabin: 8, checked: 23 }, LX: { cabin: 8, checked: 23 },
+  OS: { cabin: 8, checked: 23 }, SN: { cabin: 8, checked: 23 },
+  '4Y': { cabin: 8, checked: 23 }, DE: { cabin: 8, checked: 23 },
+  IB: { cabin: 10, checked: 23 }, TP: { cabin: 8, checked: 23 },
+  AF: { cabin: 12, checked: 23 }, KL: { cabin: 12, checked: 23 },
+  BA: { cabin: null, checked: 23 }, TK: { cabin: 8, checked: 23 },
+  FR: { cabin: 10, checked: 20 }, U2: { cabin: null, checked: 23 },
+  W6: { cabin: 10, checked: 23 }, VY: { cabin: 10, checked: 23 },
+};
+function stdBag(iata) {
+  return AIRLINE_BAG_STD[(iata || '').toUpperCase()] || null;
+}
+
 // ─── Normalize Offer ──────────────────────────────────────
 // [PRICING-FIX] normalizeOffer applies the admin's ticket profit margin to
 // the price shown in search results — previously this returned Duffel's
@@ -45,6 +65,9 @@ function normalizeOffer(offer, ticketTiers) {
         fn: s.marketing_carrier_flight_number,
         al: [s.marketing_carrier?.iata_code || 'XX', s.marketing_carrier?.name || 'Unknown'],
       })),
+      // Per-leg standard baggage weights (this slice's own airline), so a
+      // mixed-carrier round trip shows each direction's policy separately.
+      bagStd: stdBag(segs[0]?.marketing_carrier?.iata_code),
     };
   }
 
@@ -134,6 +157,10 @@ function normalizeOffer(offer, ticketTiers) {
     checkedBagQty: checkedBag ? checkedBag.quantity : null,
     cabinBagWeightKg: bagWeight(cabinBag),
     checkedBagWeightKg: bagWeight(checkedBag),
+    // Labelled fallback weights (outbound carrier's standard economy policy),
+    // shown only when Duffel returns no real weight — see AIRLINE_BAG_STD.
+    cabinBagWeightKgStd: stdBag(al0?.marketing_carrier?.iata_code)?.cabin ?? null,
+    checkedBagWeightKgStd: stdBag(al0?.marketing_carrier?.iata_code)?.checked ?? null,
     co2: (offer.total_emissions_kg != null) ? Math.round(Number(offer.total_emissions_kg)) : Math.round(parseFloat(offer.total_amount || 0) * 1.1),
     outbound: normSlice(outbound),
     inbound: normSlice(inbound),
