@@ -11,6 +11,7 @@
 
 const supa = require('../clients/supabase');
 const log = require('../utils/log');
+const { checkRouteConsistency } = require('./consistencyValidation');
 
 const COMPUTE_INTERVAL_MS = 60 * 60 * 1000; // hourly — same cadence as routeScore.js
 
@@ -47,18 +48,25 @@ async function refreshRouteIntelligenceOnce() {
     const counts = await computeAirlineCounts();
     if (!counts) return;
 
-    const { data: routePages, error: rpError } = await supa.from('route_pages').select('id, origin_iata, destination_iata');
+    const { data: routePages, error: rpError } = await supa.from('route_pages').select('id, origin_iata, destination_iata, airline_count, stop_distribution');
     if (rpError) { log('warn', 'route_intelligence_refresh_route_pages_read_failed', { error: rpError.message }); return; }
 
     let updated = 0;
+    let inconsistent = 0;
     for (const rp of routePages || []) {
       const key = `${rp.origin_iata}-${rp.destination_iata}`;
       const airlineCount = counts.has(key) ? counts.get(key).size : 0;
       const { error: updateErr } = await supa.from('route_pages').update({ airline_count: airlineCount }).eq('id', rp.id);
       if (updateErr) log('warn', 'route_intelligence_refresh_update_failed', { route: key, error: updateErr.message });
       else updated++;
+      // [CONSISTENCY-GUARD] After writing the authoritative count, assert the
+      // invariants against the value we just persisted — this catches any data
+      // drift (e.g. a bad stop_distribution) as a warning in the ops log,
+      // instead of it first surfacing on the live page.
+      const issues = checkRouteConsistency({ airline_count: airlineCount, stop_distribution: rp.stop_distribution }, { uniqueRouteAirlines: airlineCount });
+      if (issues.length) { inconsistent++; log('warn', 'route_consistency_violation', { route: key, issues }); }
     }
-    log('info', 'route_intelligence_refreshed', { updated, routesWithAirlines: counts.size });
+    log('info', 'route_intelligence_refreshed', { updated, routesWithAirlines: counts.size, inconsistent });
   } catch (e) {
     log('warn', 'route_intelligence_refresh_cycle_failed', { error: e.message });
   }

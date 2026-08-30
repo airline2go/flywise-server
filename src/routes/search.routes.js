@@ -15,6 +15,10 @@ const { normalizeOffer } = require('../services/normalizeOffer');
 const { ensureAirlineExists, ensureRouteAirlineObserved } = require('../services/routePages');
 const { isExcludedCarrier } = require('../services/carrierFilter');
 const supa = require('../clients/supabase');
+// [PRICE-SNAPSHOT] Central price freshness/TTL + canonical snapshot builder.
+// The single place that defines "live", the freshness window, and the fixed
+// quote assumptions — see src/config/price.js.
+const { PRICE_FRESHNESS_MS, buildPriceSnapshot } = require('../config/price');
 
 // [MEMORY-LEAK-FIX] كاش 5 دقائق لبحث المطارات — بينضف نفسه دوري
 // كل 5 دقائق عشان مايتراكمش مصطلحات بحث قديمة للأبد.
@@ -85,7 +89,7 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
 
   const offers = result.data?.offers || [];
   if (!offers.length) {
-    const empty = { ok: true, price: null, currency: null, departure_date: null, insights: null };
+    const empty = { ok: true, price: null, currency: null, departure_date: null, insights: null, offersCount: 0, snapshot: buildPriceSnapshot({ source: 'none' }) };
     return empty;
   }
 
@@ -210,10 +214,18 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
     }).then(() => {}).catch(() => {});
   }
 
-  await setAdminConfig(cacheKey, { price: cheapest.price, currency, departure_date, insights, offers: routeOffers, fetchedAt: new Date().toISOString() });
+  const fetchedAt = new Date().toISOString();
+  // [PRICE-SNAPSHOT] offersCount (route-specific itineraries compared) is now
+  // persisted alongside the price so both the cache path and the snapshot can
+  // surface an honest, per-route "N offers compared" figure — replacing the
+  // site-wide daily counter as the trust number the route page should show.
+  await setAdminConfig(cacheKey, { price: cheapest.price, currency, departure_date, insights, offers: routeOffers, offersCount: offers.length, fetchedAt });
   await incrementDailyPriceCheckCounter();
   const checksToday = await getDailyPriceCheckCount();
-  return { ok: true, price: cheapest.price, currency, departure_date, insights, offers: routeOffers, cached: false, checksToday, checkedAt: new Date().toISOString() };
+  const snapshot = buildPriceSnapshot({ price: cheapest.price, currency, checkedAt: fetchedAt, source: 'live', offersCount: offers.length });
+  // Legacy top-level fields kept for backward compatibility; `snapshot` is the
+  // canonical object every consumer should migrate to.
+  return { ok: true, price: cheapest.price, currency, departure_date, insights, offers: routeOffers, cached: false, checksToday, checkedAt: fetchedAt, offersCount: offers.length, snapshot };
 }
 
 // [3-OFFER-CACHE] bestValue is a documented, simple heuristic — a
@@ -478,13 +490,19 @@ app.get('/route-price', rateLimit('route-price', 60, 60000), async (req, res) =>
     // never waits, then refresh it in the background for next time.
     // Only a route that has NEVER been priced before falls through to a
     // true blocking live call — a one-time cost per route, ever.
-    if (cached && cacheAgeMs < 12 * 60 * 60 * 1000) {
+    // [CENTRAL-TTL] Freshness is governed by the single PRICE_FRESHNESS_MS knob
+    // (config/price.js), not a hard-coded 12h here. A cache younger than the
+    // window is served as fresh; an older one is served stale-while-revalidate
+    // and its snapshot reports isLive=false so the page never calls it live.
+    if (cached && cacheAgeMs < PRICE_FRESHNESS_MS) {
       const checksToday = await getDailyPriceCheckCount();
-      return res.json({ ok: true, price: cached.price, currency: cached.currency, departure_date: cached.departure_date, insights: cached.insights || null, offers: cached.offers || null, cached: true, checksToday, checkedAt: cached.fetchedAt });
+      const snapshot = buildPriceSnapshot({ price: cached.price, currency: cached.currency, checkedAt: cached.fetchedAt, source: 'cache', offersCount: cached.offersCount });
+      return res.json({ ok: true, price: cached.price, currency: cached.currency, departure_date: cached.departure_date, insights: cached.insights || null, offers: cached.offers || null, cached: true, checksToday, checkedAt: cached.fetchedAt, offersCount: cached.offersCount ?? null, snapshot });
     }
     if (cached) {
       const checksToday = await getDailyPriceCheckCount();
-      res.json({ ok: true, price: cached.price, currency: cached.currency, departure_date: cached.departure_date, insights: cached.insights || null, offers: cached.offers || null, cached: true, stale: true, checksToday, checkedAt: cached.fetchedAt });
+      const snapshot = buildPriceSnapshot({ price: cached.price, currency: cached.currency, checkedAt: cached.fetchedAt, source: 'stale-cache', offersCount: cached.offersCount });
+      res.json({ ok: true, price: cached.price, currency: cached.currency, departure_date: cached.departure_date, insights: cached.insights || null, offers: cached.offers || null, cached: true, stale: true, checksToday, checkedAt: cached.fetchedAt, offersCount: cached.offersCount ?? null, snapshot });
       fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey).catch((e) => log('warn', 'route_price_revalidate_failed', { error: e.message }));
       return;
     }
