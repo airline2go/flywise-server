@@ -168,7 +168,9 @@ describe('GET /route-price', () => {
   });
 
   test('returns a stale cached price immediately and revalidates in the background', async () => {
-    const staleDate = new Date(Date.now() - 13 * 60 * 60 * 1000).toISOString();
+    // Older than the central freshness TTL (config/price.js — 24h by default),
+    // so it takes the stale-while-revalidate path.
+    const staleDate = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
     mockGetAdminConfig.mockResolvedValue({ price: 90, currency: 'EUR', departure_date: '2026-08-01', insights: null, fetchedAt: staleDate });
     mockDuffelFn.mockResolvedValue({ data: { id: 'orq_5', offers: [{ id: 'off_5', total_amount: '95.00', total_currency: 'EUR', slices: [{ duration: 'PT2H', segments: [{ marketing_carrier: { name: 'Lufthansa' } }] }] }] } });
     const res = await request(app).get('/route-price?from=FRA&to=BCN');
