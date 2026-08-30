@@ -19,6 +19,7 @@ Run in Supabase SQL Editor **in this order**:
 | 04 | `04_adjustments_audit.sql` | `accounting_adjustments`, `audit_logs` |
 | 05 | `05_reconciliation.sql` | `reconciliation_matches`, `reconciliation_exceptions` |
 | 06 | `06_integrity_triggers.sql` | double-entry / immutability / period-close / append-only enforcement + `finance_post_journal_entry()` |
+| 07 | `07_integrations.sql` | **(Phase 2)** Stripe/Duffel mirrors, `refunds`, `chargebacks`, `credit_notes`, `bank_transactions` — provider-id/idempotency-key UNIQUE |
 
 `_phase1_selftest.sql` is **not** a migration — run it only against a disposable
 copy to verify the integrity guarantees (see below).
