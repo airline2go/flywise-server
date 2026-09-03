@@ -194,7 +194,10 @@ async function computeAuthoritativePricing(offerId, requestedServices, promoCode
     const qty = svc.quantity || 1;
     const netUnit = parseFloat(av.total_amount);
     netServicesTotal += netUnit * qty;
-    servicesMargin += computeTieredMargin(netUnit, ancillaryTiers) * qty;
+    // [FREE-SEAT] Never mark up a complimentary service (net 0, e.g. a seat
+    // included free in a higher fare brand) — a tier's fixed component would
+    // otherwise turn a free seat into a paid one at preview and checkout.
+    servicesMargin += (netUnit > 0 ? computeTieredMargin(netUnit, ancillaryTiers) : 0) * qty;
   }
   netServicesTotal = Math.round(netServicesTotal * 100) / 100;
   servicesMargin = Math.round(servicesMargin * 100) / 100;

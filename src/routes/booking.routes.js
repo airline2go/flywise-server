@@ -189,7 +189,10 @@ function normalizeSeatMap(sm, ancillaryTiers, offerPassengerOrder) {
             const anyRealPassengerId = svcs.some((svc) => svc.passenger_ids && svc.passenger_ids[0]);
             svcs.forEach((svc, svcIdx) => {
               const netPriceSvc = parseFloat(svc.total_amount || 0);
-              const marginSvc = computeTieredMargin(netPriceSvc, ancillaryTiers);
+              // [FREE-SEAT] A complimentary seat (net 0 — e.g. included in a
+              // higher fare brand) must stay free: never add a tier's fixed
+              // markup onto a 0 net, or a free seat would surface as paid.
+              const marginSvc = netPriceSvc > 0 ? computeTieredMargin(netPriceSvc, ancillaryTiers) : 0;
               let pid = (svc.passenger_ids && svc.passenger_ids[0]) || null;
               if (!pid && !anyRealPassengerId) {
                 pid = offerPassengerOrder[svcIdx] || null;
@@ -206,7 +209,7 @@ function normalizeSeatMap(sm, ancillaryTiers, offerPassengerOrder) {
             });
             const svc = svcs[0] || null;
             const netPrice = svc ? parseFloat(svc.total_amount || 0) : null;
-            const margin = netPrice != null ? computeTieredMargin(netPrice, ancillaryTiers) : 0;
+            const margin = (netPrice != null && netPrice > 0) ? computeTieredMargin(netPrice, ancillaryTiers) : 0;
             return {
               type: 'seat',
               designator: el.designator || null,
