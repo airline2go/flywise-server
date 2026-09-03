@@ -12,7 +12,7 @@ const { requireAdmin } = require('../middleware/auth');
 const duffel = require('../services/duffel');
 const { getAdminConfig, setAdminConfig, getTicketProfitTiers, computeTieredMargin } = require('../services/adminConfig');
 const { normalizeOffer } = require('../services/normalizeOffer');
-const { getFareRulesByAirlines } = require('../services/fareRulesStore');
+const { getFareRulesByAirlines, logBaggageResolution } = require('../services/fareRulesStore');
 const { ensureAirlineExists, ensureRouteAirlineObserved } = require('../services/routePages');
 const { isExcludedCarrier } = require('../services/carrierFilter');
 const supa = require('../clients/supabase');
@@ -470,6 +470,15 @@ app.post('/search', rateLimit('search', 30, 60000), async (req, res) => {
       fareRulesByAirline = await getFareRulesByAirlines(carrierCodes);
     } catch (_) { fareRulesByAirline = {}; }
     const offers = rawOffers.map((o) => normalizeOffer(o, ticketTiers, fareRulesByAirline));
+    // [FARE-INTEL §27] Observability: record every offer whose baggage was
+    // actually resolved from a verified rule (not Duffel, not a guess), so we
+    // can later answer "why did Airpiv say 23 kg for this ticket?". Best-effort,
+    // fire-and-forget — never delays or breaks the search response.
+    try {
+      for (const off of offers) {
+        if (off && off.baggage) logBaggageResolution(off.id, off.baggage.meta && off.baggage.meta.ctx || {}, off.baggage);
+      }
+    } catch (_) { /* observability must never break search */ }
 
     const responseData = { ok: true, offer_request_id: result.data?.id, offers, total: offers.length };
     _searchCache.set(searchCacheKey, { t: Date.now(), data: responseData });
