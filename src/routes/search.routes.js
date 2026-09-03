@@ -12,6 +12,7 @@ const { requireAdmin } = require('../middleware/auth');
 const duffel = require('../services/duffel');
 const { getAdminConfig, setAdminConfig, getTicketProfitTiers, computeTieredMargin } = require('../services/adminConfig');
 const { normalizeOffer } = require('../services/normalizeOffer');
+const { getFareRulesByAirlines } = require('../services/fareRulesStore');
 const { ensureAirlineExists, ensureRouteAirlineObserved } = require('../services/routePages');
 const { isExcludedCarrier } = require('../services/carrierFilter');
 const supa = require('../clients/supabase');
@@ -456,7 +457,19 @@ app.post('/search', rateLimit('search', 30, 60000), async (req, res) => {
     // a single search can return dozens of offers, and they all share the
     // same admin-configured margin tiers at this moment in time.
     const ticketTiers = await getTicketProfitTiers();
-    const offers = (result.data?.offers || []).map((o) => normalizeOffer(o, ticketTiers));
+    // [FARE-INTEL] Prefetch verified fare rules for every carrier in this
+    // response in ONE round trip, then hand the map to each normalizeOffer call
+    // (same once-per-search pattern as ticketTiers) so baggage is resolved
+    // against verified, sourced rules instead of guessed defaults.
+    const rawOffers = result.data?.offers || [];
+    const carrierCodes = [...new Set(rawOffers
+      .map((o) => o?.slices?.[0]?.segments?.[0]?.marketing_carrier?.iata_code)
+      .filter(Boolean))];
+    let fareRulesByAirline = {};
+    try {
+      fareRulesByAirline = await getFareRulesByAirlines(carrierCodes);
+    } catch (_) { fareRulesByAirline = {}; }
+    const offers = rawOffers.map((o) => normalizeOffer(o, ticketTiers, fareRulesByAirline));
 
     const responseData = { ok: true, offer_request_id: result.data?.id, offers, total: offers.length };
     _searchCache.set(searchCacheKey, { t: Date.now(), data: responseData });

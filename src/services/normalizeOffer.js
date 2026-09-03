@@ -7,13 +7,24 @@
 // ═══════════════════════════════════════════════════════════════
 
 const { computeTieredMargin } = require('./adminConfig');
+const { resolveBaggage } = require('./baggageEngine');
+const { SOURCE_TYPE, CONFIDENCE, BAGGAGE_TYPE } = require('../config/fareIntelligence');
 
-// ─── Standard economy baggage allowances, per marketing carrier ───────────
-// Duffel/NDC frequently omit the included-baggage WEIGHT (it returns only the
-// allowance count + type). These are each airline's *published standard
-// economy* weights, used ONLY as a labelled fallback when Duffel gives no
-// weight — surfaced to the customer as "≈ … per airline policy", never as a
-// guarantee. cabin:null means the carrier publishes no cabin weight limit.
+// ─── General published economy baggage allowances, per marketing carrier ──
+// [FARE-INTEL] Duffel/NDC frequently omit the included-baggage WEIGHT (only
+// the allowance count + type). These are each airline's *general published
+// economy* weights. They are NOT treated as offer facts: they are fed into the
+// Rule Engine as synthetic GENERAL_AIRLINE_POLICY rules at LOW confidence, so
+// the engine only ever uses them to enrich a missing weight or as a last
+// resort, and always tags them LOW — which the frontend renders as
+// "may vary by fare", never as a guarantee. Real, admin-curated
+// airline_fare_rules (matched on fare family) always win over these by
+// precision. cabin:null means the carrier publishes no cabin weight limit.
+//
+// This is the ONLY place a static weight table survives, and it exists purely
+// as a labelled LOW-confidence fallback — spec §15's forbidden pattern is
+// `baggage = 23` presented as a FACT; here it can never reach a confirmed
+// state. As airline_fare_rules is populated, these become redundant.
 const AIRLINE_BAG_STD = {
   LH: { cabin: 8, checked: 23 }, LX: { cabin: 8, checked: 23 },
   OS: { cabin: 8, checked: 23 }, SN: { cabin: 8, checked: 23 },
@@ -28,6 +39,34 @@ function stdBag(iata) {
   return AIRLINE_BAG_STD[(iata || '').toUpperCase()] || null;
 }
 
+// Turn the static per-airline table into synthetic LOW-confidence, fare-family-
+// LESS general-policy rules the Rule Engine can consume. Because they carry no
+// fare_family, the matcher can only ever match them at level 1 (LOW), so they
+// never masquerade as a confirmed, fare-specific fact.
+function syntheticGeneralRules(iata) {
+  const std = stdBag(iata);
+  if (!std) return [];
+  const code = (iata || '').toUpperCase();
+  const rules = [];
+  if (std.cabin != null) {
+    rules.push({
+      id: `std:${code}:cabin`, airline_iata: code, cabin_class: 'economy',
+      fare_family: null, booking_class: null, baggage_type: BAGGAGE_TYPE.CABIN,
+      included: true, pieces: 1, weight_kg: std.cabin,
+      source_type: SOURCE_TYPE.VERIFIED_PROVIDER, confidence: CONFIDENCE.LOW, active: true,
+    });
+  }
+  if (std.checked != null) {
+    rules.push({
+      id: `std:${code}:checked`, airline_iata: code, cabin_class: 'economy',
+      fare_family: null, booking_class: null, baggage_type: BAGGAGE_TYPE.CHECKED,
+      included: true, pieces: 1, weight_kg: std.checked,
+      source_type: SOURCE_TYPE.VERIFIED_PROVIDER, confidence: CONFIDENCE.LOW, active: true,
+    });
+  }
+  return rules;
+}
+
 // ─── Normalize Offer ──────────────────────────────────────
 // [PRICING-FIX] normalizeOffer applies the admin's ticket profit margin to
 // the price shown in search results — previously this returned Duffel's
@@ -39,7 +78,7 @@ function stdBag(iata) {
 // computeAuthoritativePricing() at payment time, so the number a customer
 // sees while searching and the number they're actually charged always
 // agree from the very first look.
-function normalizeOffer(offer, ticketTiers) {
+function normalizeOffer(offer, ticketTiers, fareRulesByAirline) {
   if (!offer) return null;
   const slices = offer.slices || [];
   const outbound = slices[0];
@@ -120,6 +159,29 @@ function normalizeOffer(offer, ticketTiers) {
     return null;
   }
 
+  // ── [FARE-INTEL] Canonical, source+confidence-scored baggage ──────────
+  // Layer the verified Rule Engine UNDER Duffel's offer-specific data. Rules
+  // for this airline come from the caller's prefetched map (fareRulesByAirline,
+  // fetched once per search — same pattern as ticketTiers); the static general
+  // policy table is appended only as synthetic LOW-confidence fallback rules.
+  // Duffel always wins; anything we can't establish comes back UNKNOWN, never a
+  // guessed number.
+  const bagAirline = al0?.marketing_carrier?.iata_code || null;
+  const dbRules = (fareRulesByAirline && bagAirline)
+    ? (fareRulesByAirline[(bagAirline || '').toUpperCase()] || [])
+    : [];
+  const fareCtx = {
+    airline: bagAirline,
+    fareFamily: fareBrand,
+    bookingClass: firstSegPax?.fare_basis_code || firstSegPax?.booking_class || null,
+    cabin: cabinClass || (typeof cabin === 'string' ? cabin : cabin?.name) || null,
+  };
+  const baggage = resolveBaggage({
+    duffelBags: bags,
+    ctx: fareCtx,
+    rules: [...dbRules, ...syntheticGeneralRules(bagAirline)],
+  });
+
   // [PRICING-FIX] netPrice is Duffel's real, unmodified total for ALL
   // passengers combined — Duffel never breaks total_amount down per
   // passenger, so this is the only number available. The fixed-amount
@@ -161,6 +223,12 @@ function normalizeOffer(offer, ticketTiers) {
     // shown only when Duffel returns no real weight — see AIRLINE_BAG_STD.
     cabinBagWeightKgStd: stdBag(al0?.marketing_carrier?.iata_code)?.cabin ?? null,
     checkedBagWeightKgStd: stdBag(al0?.marketing_carrier?.iata_code)?.checked ?? null,
+    // [FARE-INTEL] Canonical per-type baggage with source + confidence. This is
+    // the object the frontend should render from — personalItem / cabin /
+    // checked / additional, each independent, each tagged so the UI shows a
+    // confirmed value as a fact and everything else as "may vary by fare".
+    // The legacy *Std/*WeightKg fields above are kept for backward compat.
+    baggage,
     co2: (offer.total_emissions_kg != null) ? Math.round(Number(offer.total_emissions_kg)) : Math.round(parseFloat(offer.total_amount || 0) * 1.1),
     outbound: normSlice(outbound),
     inbound: normSlice(inbound),
