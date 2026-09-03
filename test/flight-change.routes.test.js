@@ -96,7 +96,11 @@ function mockOrder(overrides) {
   }, overrides);
 }
 
-const FUTURE_DATE = '2026-09-01';
+// Computed ~60 days out at run time (was a hardcoded '2026-09-01', which
+// silently became a PAST date and broke the "valid future date" cases — the
+// route correctly rejects past dates with "Ungültiges oder vergangenes Datum").
+// Deriving it keeps the change-quote happy-path tests valid on any run date.
+const FUTURE_DATE = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
 beforeEach(() => {
   supa.__reset();
