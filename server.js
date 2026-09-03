@@ -107,6 +107,7 @@ require('./src/routes/admin-staff.routes')(app);
 require('./src/routes/admin-customers.routes')(app);
 require('./src/routes/admin-geo.routes')(app);
 require('./src/routes/admin-airlines.routes')(app);
+require('./src/routes/admin-fare-rules.routes')(app);
 require('./src/routes/admin-seo.routes')(app);
 require('./src/routes/admin-gsc.routes')(app);
 

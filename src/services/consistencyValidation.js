@@ -53,4 +53,59 @@ function checkRouteConsistency(route = {}, ctx = {}) {
   return issues;
 }
 
-module.exports = { checkRouteConsistency };
+// [FARE-INTEL §26] Invariants a resolved baggage entry must satisfy before the
+// frontend is allowed to render it as a confirmed fact. Pure checker over ONE
+// baggage entry (personal_item / cabin / checked / additional) as produced by
+// baggageEngine.resolveBaggage(). Returns an array of { code, detail }; empty
+// means consistent. Catches the review's asks: a value shown as "included"
+// must have a real source and a non-UNKNOWN confidence; pieces >= 0;
+// weight_kg > 0 when present; a UNKNOWN entry must not carry a confirmed weight.
+const { isValidSource, isValidConfidence, isConfirmed, SOURCE, CONFIDENCE } = require('../config/fareIntelligence');
+
+function checkBaggageEntry(entry = {}, label = 'baggage') {
+  const issues = [];
+  if (!entry || typeof entry !== 'object') return issues;
+
+  if (entry.source && !isValidSource(entry.source)) {
+    issues.push({ code: 'baggage-bad-source', detail: `${label}: unknown source ${entry.source}` });
+  }
+  if (entry.confidence && !isValidConfidence(entry.confidence)) {
+    issues.push({ code: 'baggage-bad-confidence', detail: `${label}: unknown confidence ${entry.confidence}` });
+  }
+
+  // §26.6/§26.7: anything presented as confirmed-included must have a real
+  // source and a non-UNKNOWN confidence.
+  if (entry.confirmed === true) {
+    if (!entry.source || entry.source === SOURCE.UNKNOWN) {
+      issues.push({ code: 'baggage-confirmed-without-source', detail: `${label}: confirmed but source is missing/UNKNOWN` });
+    }
+    if (entry.confidence === CONFIDENCE.UNKNOWN || entry.confidence === CONFIDENCE.LOW) {
+      issues.push({ code: 'baggage-confirmed-low-confidence', detail: `${label}: confirmed but confidence=${entry.confidence}` });
+    }
+  }
+
+  // §26.9: pieces never negative.
+  if (entry.pieces != null && !(Number(entry.pieces) >= 0)) {
+    issues.push({ code: 'baggage-negative-pieces', detail: `${label}: pieces=${entry.pieces}` });
+  }
+  // §26.10: a present weight must be > 0.
+  if (entry.weight_kg != null && !(Number(entry.weight_kg) > 0)) {
+    issues.push({ code: 'baggage-nonpositive-weight', detail: `${label}: weight_kg=${entry.weight_kg}` });
+  }
+  // A weight can only be "weight_confirmed" if its own provenance is confirmed.
+  if (entry.weight_confirmed === true && !isConfirmed(entry.weight_confidence)) {
+    issues.push({ code: 'baggage-weight-overclaim', detail: `${label}: weight_confirmed but weight_confidence=${entry.weight_confidence}` });
+  }
+  return issues;
+}
+
+// Check the whole resolved baggage object (all four types) at once.
+function checkOfferBaggage(baggage = {}) {
+  const issues = [];
+  for (const key of ['personal_item', 'cabin', 'checked', 'additional']) {
+    if (baggage[key]) issues.push(...checkBaggageEntry(baggage[key], key));
+  }
+  return issues;
+}
+
+module.exports = { checkRouteConsistency, checkBaggageEntry, checkOfferBaggage };
