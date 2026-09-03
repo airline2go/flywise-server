@@ -8,6 +8,7 @@
 
 const { computeTieredMargin } = require('./adminConfig');
 const { resolveBaggage } = require('./baggageEngine');
+const { resolveFareConditions } = require('./fareConditionsEngine');
 const { SOURCE_TYPE, CONFIDENCE, BAGGAGE_TYPE } = require('../config/fareIntelligence');
 
 // ─── General published economy baggage allowances, per marketing carrier ──
@@ -176,10 +177,20 @@ function normalizeOffer(offer, ticketTiers, fareRulesByAirline) {
     bookingClass: firstSegPax?.fare_basis_code || firstSegPax?.booking_class || null,
     cabin: cabinClass || (typeof cabin === 'string' ? cabin : cabin?.name) || null,
   };
+  const allBagRules = [...dbRules, ...syntheticGeneralRules(bagAirline)];
   const baggage = resolveBaggage({
     duffelBags: bags,
     ctx: fareCtx,
-    rules: [...dbRules, ...syntheticGeneralRules(bagAirline)],
+    rules: allBagRules,
+  });
+
+  // [FARE-INTEL §24/§25] Change / refund / seat / meal / priority — Duffel
+  // offer-specific conditions win; verified fare rules fill gaps; unproven =
+  // UNKNOWN. Never surfaced as "Free changes"/"Refundable" unless confirmed.
+  const fareConditions = resolveFareConditions({
+    duffelConditions: offer.conditions || null,
+    ctx: fareCtx,
+    rules: dbRules,
   });
 
   // [PRICING-FIX] netPrice is Duffel's real, unmodified total for ALL
@@ -229,6 +240,9 @@ function normalizeOffer(offer, ticketTiers, fareRulesByAirline) {
     // confirmed value as a fact and everything else as "may vary by fare".
     // The legacy *Std/*WeightKg fields above are kept for backward compat.
     baggage,
+    // [FARE-INTEL] Canonical fare conditions (change/refund/seat/meal/priority),
+    // each source- and confidence-tagged like baggage.
+    fareConditions,
     co2: (offer.total_emissions_kg != null) ? Math.round(Number(offer.total_emissions_kg)) : Math.round(parseFloat(offer.total_amount || 0) * 1.1),
     outbound: normSlice(outbound),
     inbound: normSlice(inbound),
