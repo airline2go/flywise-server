@@ -198,17 +198,33 @@ app.get('/route-pages', rateLimit('content', 2500, 60000), async (req, res) => {
     // pulled ONLY to compute the `indexable` flag (routeIndexable) and are then
     // stripped from the response, so the payload shape stays as before plus the
     // one boolean the sitemap generator filters on.
+    // [ROUTE-PAGES-PAGINATION] PostgREST caps an un-ranged select at 1000 rows,
+    // which silently truncated this list once the catalogue grew past 1000 —
+    // so related-routes / popular-routes / internal-linking / entity stats on
+    // the frontend only ever saw the first 1000 routes. Page explicitly with
+    // .range() and report hasMore, exactly like the /sitemap-data feeds, so the
+    // frontend can walk page=0,1,2,… to the COMPLETE set. Backward compatible:
+    // no `page` param → page 0 → the same first 1000 rows, plus a hasMore flag.
+    // A stable secondary sort (slug is unique) makes the page boundaries
+    // deterministic under the non-unique origin_city primary sort.
+    const ROUTE_PAGES_PAGE_SIZE = 1000;
+    const page = Math.max(0, parseInt(req.query.page, 10) || 0);
+    const from = page * ROUTE_PAGES_PAGE_SIZE;
+    const to = from + ROUTE_PAGES_PAGE_SIZE - 1;
     const { data, error } = await supa.from('route_pages')
       .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_country,destination_country,distance_km,haul_type,airline_count,route_score,updated_at,insights_updated_at,created_at,avg_duration_min,stop_distribution,intro_text,custom_faq')
       .eq('status', 'published')
-      .order('origin_city', { ascending: true });
+      .order('origin_city', { ascending: true })
+      .order('slug', { ascending: true })
+      .range(from, to);
     if (error) throw new Error(error.message);
-    const routes = (data || []).map((r) => {
+    const rows = data || [];
+    const routes = rows.map((r) => {
       const indexable = routeIndexable(r);
       const { avg_duration_min, stop_distribution, intro_text, custom_faq, ...rest } = r;
       return { ...rest, indexable };
     });
-    res.json({ ok: true, routes });
+    res.json({ ok: true, page, hasMore: rows.length === ROUTE_PAGES_PAGE_SIZE, routes });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
