@@ -372,3 +372,48 @@ describe('GET /airlines/:code', () => {
     expect(res.body.airline.hubAirport).toBe('FRA');
   });
 });
+
+describe('GET /route-pages (pagination)', () => {
+  const routeRow = (slug) => ({
+    slug, origin_iata: 'BER', destination_iata: 'MUC',
+    origin_city: 'Berlin', destination_city: 'München',
+    origin_country: 'DE', destination_country: 'DE', distance_km: 500,
+  });
+
+  test('returns the route list with page + hasMore=false when under a full page', async () => {
+    supa.__setResponse('route_pages', { result: { data: [routeRow('a-b'), routeRow('c-d')], error: null } });
+    const app = buildApp();
+    const res = await request(app).get('/route-pages');
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.page).toBe(0);
+    expect(res.body.hasMore).toBe(false);
+    expect(res.body.routes).toHaveLength(2);
+    expect(res.body.routes[0].slug).toBe('a-b');
+  });
+
+  test('reports hasMore=true when a full 1000-row page comes back', async () => {
+    const data = Array.from({ length: 1000 }, (_, i) => routeRow(`r-${i}`));
+    supa.__setResponse('route_pages', { result: { data, error: null } });
+    const app = buildApp();
+    const res = await request(app).get('/route-pages');
+    expect(res.body.hasMore).toBe(true);
+    expect(res.body.routes).toHaveLength(1000);
+  });
+
+  test('echoes the requested page number so the frontend can walk pages', async () => {
+    supa.__setResponse('route_pages', { result: { data: [routeRow('a-b')], error: null } });
+    const app = buildApp();
+    const res = await request(app).get('/route-pages?page=2');
+    expect(res.body.page).toBe(2);
+    expect(res.body.hasMore).toBe(false);
+  });
+
+  test('500s cleanly on an upstream error (never a truncated 200)', async () => {
+    supa.__setResponse('route_pages', { result: { data: null, error: { message: 'connection lost' } } });
+    const app = buildApp();
+    const res = await request(app).get('/route-pages');
+    expect(res.status).toBe(500);
+    expect(res.body.ok).toBe(false);
+  });
+});
