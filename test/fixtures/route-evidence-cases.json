@@ -1,0 +1,20 @@
+{
+  "_comment": "SHARED PARITY FIXTURE — this file is byte-for-byte identical in flywise-server (test/fixtures/) and flywise-app (web/test/fixtures/). Both repos' route-evidence tests iterate it and assert the SAME verdict, guaranteeing backend indexability === frontend renderer indexability === sitemap eligibility. When you change the policy, change this file in BOTH repos.",
+  "cases": [
+    { "name": "distance only", "route": { "distance_km": 430 }, "enforced": false, "legacy": true },
+    { "name": "empty route", "route": {}, "enforced": false, "legacy": false },
+    { "name": "airline_count=0 + distance", "route": { "distance_km": 430, "airline_count": 0 }, "enforced": false, "legacy": true },
+    { "name": "airline_count>0", "route": { "airline_count": 3 }, "enforced": true, "legacy": true },
+    { "name": "valid duration", "route": { "avg_duration_min": 125 }, "enforced": true, "legacy": true },
+    { "name": "zero duration is not evidence", "route": { "avg_duration_min": 0, "distance_km": 500 }, "enforced": false, "legacy": true },
+    { "name": "real stop_distribution", "route": { "stop_distribution": { "0": 4, "1": 2 } }, "enforced": true, "legacy": true },
+    { "name": "empty stop_distribution is not evidence", "route": { "stop_distribution": {}, "distance_km": 500 }, "enforced": false, "legacy": true },
+    { "name": "price_sample_count>0", "route": { "price_sample_count": 12 }, "enforced": true, "legacy": false },
+    { "name": "price_sample_count=0 is not evidence", "route": { "price_sample_count": 0, "distance_km": 500 }, "enforced": false, "legacy": true },
+    { "name": "itinerary_count>0", "route": { "itinerary_count": 5 }, "enforced": true, "legacy": false },
+    { "name": "distance + airline_count=0 + no other evidence", "route": { "distance_km": 900, "airline_count": 0 }, "enforced": false, "legacy": true },
+    { "name": "manual intro_text alone", "route": { "intro_text": "Editorial copy" }, "enforced": true, "legacy": true },
+    { "name": "manual custom_faq alone", "route": { "custom_faq": [{ "q": "a", "a": "b" }] }, "enforced": true, "legacy": true },
+    { "name": "verified route with airlines+duration+price", "route": { "airline_count": 3, "avg_duration_min": 125, "price_sample_count": 12 }, "enforced": true, "legacy": true }
+  ]
+}

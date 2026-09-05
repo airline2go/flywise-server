@@ -5,7 +5,71 @@ const {
   routeIndexable, cityIndexable, airportIndexable, countryIndexable, airlineIndexable,
   buildConnectivity, cityDestinationCount, airportDestinationCount, countryConnectivityScore,
   airlineRouteCounts,
+  hasVerifiedFlightEvidence, hasManualEditorialContent, getRouteIndexabilityDecision,
 } = require('../src/services/indexability');
+const evidenceFixture = require('./fixtures/route-evidence-cases.json');
+
+describe('hasVerifiedFlightEvidence (canonical policy)', () => {
+  test('distance_km alone is NEVER evidence', () => {
+    expect(hasVerifiedFlightEvidence({ distance_km: 9438 })).toBe(false);
+  });
+  test('airline_count=0 is NEVER evidence', () => {
+    expect(hasVerifiedFlightEvidence({ airline_count: 0, distance_km: 500 })).toBe(false);
+  });
+  test('airline_count>0 is evidence', () => {
+    expect(hasVerifiedFlightEvidence({ airline_count: 1 })).toBe(true);
+  });
+  test('valid duration is evidence; zero duration is not', () => {
+    expect(hasVerifiedFlightEvidence({ avg_duration_min: 125 })).toBe(true);
+    expect(hasVerifiedFlightEvidence({ avg_duration_min: 0 })).toBe(false);
+  });
+  test('real stop_distribution is evidence; empty is not', () => {
+    expect(hasVerifiedFlightEvidence({ stop_distribution: { '0': 3 } })).toBe(true);
+    expect(hasVerifiedFlightEvidence({ stop_distribution: {} })).toBe(false);
+  });
+  test('price_sample_count>0 and itinerary_count>0 are evidence', () => {
+    expect(hasVerifiedFlightEvidence({ price_sample_count: 12 })).toBe(true);
+    expect(hasVerifiedFlightEvidence({ itinerary_count: 5 })).toBe(true);
+    expect(hasVerifiedFlightEvidence({ price_sample_count: 0, itinerary_count: 0 })).toBe(false);
+  });
+});
+
+describe('getRouteIndexabilityDecision — enforced vs legacy (shared fixture)', () => {
+  for (const c of evidenceFixture.cases) {
+    test(`enforced: ${c.name} → ${c.enforced}`, () => {
+      expect(getRouteIndexabilityDecision(c.route, { enforce: true }).indexable).toBe(c.enforced);
+    });
+    test(`legacy: ${c.name} → ${c.legacy}`, () => {
+      expect(getRouteIndexabilityDecision(c.route, { enforce: false }).indexable).toBe(c.legacy);
+    });
+  }
+  test('default (flag off) preserves legacy behaviour — no accidental flip', () => {
+    delete process.env.SEO_EVIDENCE_POLICY_ENFORCED;
+    expect(routeIndexable({ distance_km: 500 })).toBe(true); // distance-only stays indexable
+  });
+  test('reason strings explain the verdict', () => {
+    expect(getRouteIndexabilityDecision({ distance_km: 500 }, { enforce: true }).reason).toBe('NO VERIFIED FLIGHT EVIDENCE');
+    expect(getRouteIndexabilityDecision({ airline_count: 2 }, { enforce: true }).reason).toBe('VERIFIED FLIGHT EVIDENCE');
+    expect(getRouteIndexabilityDecision({ intro_text: 'x' }, { enforce: true }).reason).toBe('MANUAL EDITORIAL CONTENT');
+  });
+});
+
+describe('P0-2 connectivity honours evidence policy when enforced', () => {
+  const berlinX = { origin_iata: 'BER', destination_iata: 'XXX', origin_city_slug: 'berlin', destination_city_slug: 'nowhere', origin_country: 'DE', destination_country: 'ZZ', airline_count: 0 };
+  const verified = { origin_iata: 'BER', destination_iata: 'MUC', origin_city_slug: 'berlin', destination_city_slug: 'muenchen', origin_country: 'DE', destination_country: 'DE', airline_count: 3 };
+  test('zero-flight route does NOT raise connectivity when enforced', () => {
+    const c = buildConnectivity([berlinX], { enforce: true });
+    expect(cityDestinationCount(c, 'berlin')).toBe(0);
+  });
+  test('verified route DOES raise connectivity when enforced', () => {
+    const c = buildConnectivity([verified], { enforce: true });
+    expect(cityDestinationCount(c, 'berlin')).toBe(1);
+  });
+  test('legacy (flag off) still counts zero-flight route', () => {
+    const c = buildConnectivity([berlinX], { enforce: false });
+    expect(cityDestinationCount(c, 'berlin')).toBe(1);
+  });
+});
 
 describe('routeIndexable', () => {
   test('thin route (no data, no admin content) is NOT indexable', () => {

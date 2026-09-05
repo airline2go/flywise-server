@@ -212,7 +212,7 @@ app.get('/route-pages', rateLimit('content', 2500, 60000), async (req, res) => {
     const from = page * ROUTE_PAGES_PAGE_SIZE;
     const to = from + ROUTE_PAGES_PAGE_SIZE - 1;
     const { data, error } = await supa.from('route_pages')
-      .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_country,destination_country,distance_km,haul_type,airline_count,route_score,updated_at,insights_updated_at,created_at,avg_duration_min,stop_distribution,intro_text,custom_faq')
+      .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_country,destination_country,distance_km,haul_type,airline_count,route_score,updated_at,insights_updated_at,created_at,avg_duration_min,stop_distribution,price_sample_count,itinerary_count,intro_text,custom_faq')
       .eq('status', 'published')
       .order('origin_city', { ascending: true })
       .order('slug', { ascending: true })
@@ -221,7 +221,7 @@ app.get('/route-pages', rateLimit('content', 2500, 60000), async (req, res) => {
     const rows = data || [];
     const routes = rows.map((r) => {
       const indexable = routeIndexable(r);
-      const { avg_duration_min, stop_distribution, intro_text, custom_faq, ...rest } = r;
+      const { avg_duration_min, stop_distribution, price_sample_count, itinerary_count, intro_text, custom_faq, ...rest } = r;
       return { ...rest, indexable };
     });
     res.json({ ok: true, page, hasMore: rows.length === ROUTE_PAGES_PAGE_SIZE, routes });
