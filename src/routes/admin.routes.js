@@ -46,14 +46,7 @@ function translateBlogPostAllLanguages(post) {
 // CITY-PAGES] below) — so a single route publish/edit can affect up to
 // five separate pages. Builds the `entities` payload triggerRebuild()
 // forwards to the Next.js frontend's /api/revalidate route.
-function routeEntities(route) {
-  const entities = [{ type: 'route', slug: route.slug }];
-  if (route.origin_country) entities.push({ type: 'country', slug: route.origin_country });
-  if (route.destination_country) entities.push({ type: 'country', slug: route.destination_country });
-  if (route.origin_city_slug) entities.push({ type: 'city', slug: route.origin_city_slug });
-  if (route.destination_city_slug) entities.push({ type: 'city', slug: route.destination_city_slug });
-  return entities;
-}
+const { routeEntities, dedupeEntities } = require('../utils/routeEntities');
 
 module.exports = (app) => {
 
@@ -1080,7 +1073,7 @@ app.post('/admin/route-pages/health-check-batch', rateLimit('admin', 120, 60000)
     // earlier run found them empty but not yet enough times to declare dead),
     // so a candidate is re-probed on later runs. Dead routes are excluded.
     const { data: batch, error: fetchErr } = await supa.from('route_pages')
-      .select('id, origin_iata, destination_iata, status, health_empty_streak')
+      .select('id, slug, origin_iata, destination_iata, origin_city_slug, destination_city_slug, origin_country, destination_country, status, health_empty_streak')
       .neq('status', 'dead')
       .or('last_health_check_at.is.null,health_empty_streak.gt.0')
       .limit(BATCH_SIZE);
@@ -1153,17 +1146,28 @@ app.post('/admin/route-pages/health-check-batch', rateLimit('admin', 120, 60000)
       if (i + 2 < batch.length) await new Promise((r) => setTimeout(r, 500));
     }
 
+    const byId = new Map(batch.map((r) => [r.id, r]));
     let deadCount = 0;
     let candidateCount = 0;
+    const deadEntities = [];
     const now = new Date().toISOString();
     for (const r of results) {
       const state = nextHealthState(r.prevStreak, r.result, DEAD_STREAK_THRESHOLD);
       if (!state.touch) continue; // 'unknown' (API failure) — retry next run, never dead
       const update = { last_health_check_at: now, health_empty_streak: state.streak, health_last_result: state.lastResult };
-      if (state.markDead) { update.status = 'dead'; deadCount++; }
-      else if (state.candidate) { candidateCount++; }
+      if (state.markDead) {
+        update.status = 'dead';
+        deadCount++;
+        // [P1-2] published → dead is an indexability/status change: the route
+        // page must drop out of the index and its city/airport/country
+        // connectivity recomputes. Collect entities for one batched revalidation.
+        const full = byId.get(r.id);
+        if (full) deadEntities.push(routeEntities(full));
+      } else if (state.candidate) { candidateCount++; }
       await supa.from('route_pages').update(update).eq('id', r.id);
     }
+    // [P1-2] Single de-duplicated revalidation for every route that died.
+    if (deadEntities.length) triggerRebuild(dedupeEntities(deadEntities));
 
     // Remaining = never-checked routes PLUS candidates still mid-streak.
     const { count: remaining } = await supa.from('route_pages').select('id', { count: 'exact', head: true }).neq('status', 'dead').or('last_health_check_at.is.null,health_empty_streak.gt.0');
@@ -1195,7 +1199,7 @@ app.post('/admin/route-pages/backfill-airlines-batch', rateLimit('admin', 120, 6
     // published + zero-airline routes (Category C is already 'dead', so this is
     // exactly the Category-D remainder).
     const { data: batch, error: fetchErr } = await supa.from('route_pages')
-      .select('id, origin_iata, destination_iata')
+      .select('id, slug, origin_iata, destination_iata, origin_city_slug, destination_city_slug, origin_country, destination_country')
       .eq('status', 'published')
       .eq('airline_count', 0)
       .order('updated_at', { ascending: true })
@@ -1204,6 +1208,7 @@ app.post('/admin/route-pages/backfill-airlines-batch', rateLimit('admin', 120, 6
     if (!batch || !batch.length) {
       return res.json({ ok: true, checked: 0, backfilled: 0, remaining: 0, message: 'مفيش مسارات بدون خطوط محتاجة تعبئة' });
     }
+    const byId = new Map(batch.map((r) => [r.id, r]));
 
     const searchDate = new Date();
     searchDate.setDate(searchDate.getDate() + 21);
@@ -1254,6 +1259,7 @@ app.post('/admin/route-pages/backfill-airlines-batch', rateLimit('admin', 120, 6
     }
 
     let backfilled = 0;
+    const changedEntities = [];
     const now = new Date().toISOString();
     for (const r of results) {
       if (r.found === null) continue; // transient error — do not advance it
@@ -1268,9 +1274,17 @@ app.post('/admin/route-pages/backfill-airlines-batch', rateLimit('admin', 120, 6
           .eq('route_destination_iata', r.destination_iata);
         update.airline_count = count || r.found;
         backfilled++;
+        // [P1-2] airline_count changed → the route (and, under the evidence
+        // policy, its indexability + entity connectivity) is now stale in the
+        // ISR cache. Collect its entities for a single batched revalidation.
+        const full = byId.get(r.id);
+        if (full) changedEntities.push(routeEntities(full));
       }
       await supa.from('route_pages').update(update).eq('id', r.id);
     }
+    // [P1-2] One de-duplicated revalidation call for the whole batch, never one
+    // per route (avoids thousands of calls at scale).
+    if (changedEntities.length) triggerRebuild(dedupeEntities(changedEntities));
 
     const { count: remaining } = await supa.from('route_pages')
       .select('id', { count: 'exact', head: true })

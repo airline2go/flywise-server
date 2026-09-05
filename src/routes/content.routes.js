@@ -16,6 +16,20 @@ const {
 } = require('../services/indexability');
 const { getIndexabilityData } = require('../services/indexabilityData');
 
+// [P2-1] Parse & VALIDATE a ?page= query param. A page must be a non-negative
+// integer within a sane upper bound — an absent param defaults to 0 (backward
+// compatible), but garbage ("abc", "-1", "1.5", "1e9") or an absurdly large
+// page is rejected so a caller can't drive arbitrary deep offsets. Returns
+// { page } on success or { error } with a message for a 400.
+const MAX_PAGE = 100000; // page * 1000 rows — far beyond any real catalogue size
+function parsePageParam(raw) {
+  if (raw == null || raw === '') return { page: 0 };
+  if (!/^\d+$/.test(String(raw))) return { error: 'page must be a non-negative integer' };
+  const page = Number(raw);
+  if (!Number.isSafeInteger(page) || page > MAX_PAGE) return { error: `page out of range (0..${MAX_PAGE})` };
+  return { page };
+}
+
 // [RATE-LIMIT-FIX] None of these routes had any rate limiting at all —
 // public, unauthenticated, and an unmetered surface for scraping/DB-
 // hammering. The limit here (2500/min per IP) is deliberately generous
@@ -233,7 +247,9 @@ app.get('/route-pages', rateLimit('content', 2500, 60000), async (req, res) => {
     // A stable secondary sort (slug is unique) makes the page boundaries
     // deterministic under the non-unique origin_city primary sort.
     const ROUTE_PAGES_PAGE_SIZE = 1000;
-    const page = Math.max(0, parseInt(req.query.page, 10) || 0);
+    const parsed = parsePageParam(req.query.page);
+    if (parsed.error) return res.status(400).json({ ok: false, error: parsed.error });
+    const page = parsed.page;
     const from = page * ROUTE_PAGES_PAGE_SIZE;
     const to = from + ROUTE_PAGES_PAGE_SIZE - 1;
     const { data, error } = await supa.from('route_pages')
@@ -270,7 +286,9 @@ app.get('/route-pages-audit', rateLimit('content', 600, 60000), async (req, res)
     const provided = req.get('x-audit-token');
     if (!provided || provided !== expected) return res.status(403).json({ ok: false, error: 'forbidden' });
     const PAGE_SIZE = 1000;
-    const page = Math.max(0, parseInt(req.query.page, 10) || 0);
+    const parsedAudit = parsePageParam(req.query.page);
+    if (parsedAudit.error) return res.status(400).json({ ok: false, error: parsedAudit.error });
+    const page = parsedAudit.page;
     const from = page * PAGE_SIZE;
     const { data, error } = await supa.from('route_pages')
       .select('slug,status,origin_iata,destination_iata,origin_city,destination_city,distance_km,haul_type,airline_count,avg_duration_min,min_duration_min,stop_distribution,all_direct,price_min,price_avg,price_max,price_sample_count,itinerary_count,price_updated_at,insights_updated_at,intro_text,custom_faq')
