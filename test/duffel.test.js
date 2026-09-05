@@ -134,3 +134,43 @@ describe('duffel() — P0.8 external deadline signal', () => {
     expect(global.fetch).toHaveBeenCalledTimes(2); // transient timeout is retried once
   });
 });
+
+// [P0.9 · ERROR TAXONOMY] Every duffel() failure carries a stable err.code.
+describe('duffel() — P0.9 error classification', () => {
+  const cases = [
+    [422, 'UPSTREAM_422'],
+    [429, 'UPSTREAM_429'],
+    [404, 'UPSTREAM_4XX'],
+    [400, 'UPSTREAM_4XX'],
+    [500, 'UPSTREAM_5XX'],
+    [503, 'UPSTREAM_5XX'],
+  ];
+  test.each(cases)('HTTP %i is classified as %s', async (status, code) => {
+    const duffel = freshDuffel();
+    global.fetch.mockResolvedValue(fetchResponse(status, { errors: [{ message: 'x' }] }));
+    await expect(duffel('GET', '/air/offers/x')).rejects.toMatchObject({ status, code });
+  });
+
+  test('our own per-request timeout is UPSTREAM_TIMEOUT (status 504)', async () => {
+    const duffel = freshDuffel();
+    const err = new Error('aborted'); err.name = 'AbortError';
+    global.fetch.mockRejectedValue(err);
+    await expect(duffel('GET', '/air/offers/x')).rejects.toMatchObject({ status: 504, code: 'UPSTREAM_TIMEOUT' });
+  });
+
+  test('a transport failure (no HTTP response) is UPSTREAM_NETWORK', async () => {
+    const duffel = freshDuffel();
+    global.fetch.mockRejectedValue(new Error('ECONNRESET'));
+    await expect(duffel('GET', '/air/offers/x')).rejects.toMatchObject({ code: 'UPSTREAM_NETWORK' });
+  });
+
+  test('classifyUpstreamStatus + exported taxonomy are consistent', () => {
+    const duffel = freshDuffel();
+    expect(duffel.classifyUpstreamStatus(422)).toBe('UPSTREAM_422');
+    expect(duffel.classifyUpstreamStatus(429)).toBe('UPSTREAM_429');
+    expect(duffel.classifyUpstreamStatus(418)).toBe('UPSTREAM_4XX');
+    expect(duffel.classifyUpstreamStatus(502)).toBe('UPSTREAM_5XX');
+    expect(duffel.UPSTREAM_ERROR_CODES.UPSTREAM_DEADLINE).toBe('UPSTREAM_DEADLINE');
+    expect(duffel.UPSTREAM_ERROR_CODES.UPSTREAM_CIRCUIT_OPEN).toBe('UPSTREAM_CIRCUIT_OPEN');
+  });
+});

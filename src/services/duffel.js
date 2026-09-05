@@ -15,6 +15,35 @@ const { recordApiLog } = require('./apiLogs');
 
 const DUFFEL_TIMEOUT_MS = 20000;
 
+// [P0.9 · ERROR TAXONOMY] One place that maps an upstream HTTP status to a
+// stable, human-readable class. Purely a label for logging/monitoring and
+// for callers that want to branch on the failure kind — it does NOT change
+// any retry decision (that still keys off err.status: transient = no status
+// or >= 500) nor any pricing/booking logic. The full set of duffel() error
+// codes is: UPSTREAM_422, UPSTREAM_429, UPSTREAM_4XX, UPSTREAM_5XX,
+// UPSTREAM_TIMEOUT (our per-request AbortController fired), UPSTREAM_NETWORK
+// (transport failure, no HTTP response), UPSTREAM_DEADLINE (caller's overall
+// deadline fired — terminal), and UPSTREAM_CIRCUIT_OPEN (breaker open).
+const UPSTREAM_ERROR_CODES = Object.freeze({
+  UPSTREAM_422: 'UPSTREAM_422',
+  UPSTREAM_429: 'UPSTREAM_429',
+  UPSTREAM_4XX: 'UPSTREAM_4XX',
+  UPSTREAM_5XX: 'UPSTREAM_5XX',
+  UPSTREAM_TIMEOUT: 'UPSTREAM_TIMEOUT',
+  UPSTREAM_NETWORK: 'UPSTREAM_NETWORK',
+  UPSTREAM_DEADLINE: 'UPSTREAM_DEADLINE',
+  UPSTREAM_CIRCUIT_OPEN: 'UPSTREAM_CIRCUIT_OPEN',
+});
+
+function classifyUpstreamStatus(status) {
+  const s = Number(status) || 0;
+  if (s === 422) return 'UPSTREAM_422';
+  if (s === 429) return 'UPSTREAM_429';
+  if (s >= 500) return 'UPSTREAM_5XX';
+  if (s >= 400) return 'UPSTREAM_4XX';
+  return 'UPSTREAM_5XX'; // unknown/0 — treat conservatively as server-side
+}
+
 async function duffelAttempt(method, path, body, extraHeaders, timeoutMs, externalSignal) {
   if (!env.DUFFEL_TOKEN) throw new Error('DUFFEL_TOKEN غير موجود في Environment Variables');
 
@@ -48,17 +77,22 @@ async function duffelAttempt(method, path, body, extraHeaders, timeoutMs, extern
     res = await fetch(`${env.DUFFEL_BASE}${path}`, opts);
   } catch (e) {
     if (e.name === 'AbortError') {
-      // Distinguish the caller's overall deadline from our own per-request
-      // timeout: the deadline is terminal (never retried), the timeout is
-      // a transient error that may be retried once.
+      // [P0.9] Distinguish the caller's overall deadline from our own
+      // per-request timeout: the deadline is terminal (never retried); the
+      // timeout is a transient error that may be retried once.
       const deadlineHit = !!(externalSignal && externalSignal.aborted);
       const err = new Error(deadlineHit
         ? 'Zeitlimit für die Preisberechnung überschritten'
         : 'Duffel antwortet nicht — bitte erneut versuchen');
       err.status = 504;
-      if (deadlineHit) err.code = 'UPSTREAM_DEADLINE';
+      err.code = deadlineHit ? 'UPSTREAM_DEADLINE' : 'UPSTREAM_TIMEOUT';
       throw err;
     }
+    // [P0.9] Any other fetch throw is a transport-level failure (DNS, TCP
+    // reset, TLS, connection refused) — no HTTP status was ever received.
+    // Tag it as UPSTREAM_NETWORK (leaving any pre-set code untouched) so the
+    // caller/logs can tell it apart from an HTTP error response.
+    if (e && !e.code) e.code = 'UPSTREAM_NETWORK';
     throw e;
   } finally {
     clearTimeout(timer);
@@ -70,6 +104,7 @@ async function duffelAttempt(method, path, body, extraHeaders, timeoutMs, extern
     const msg = json?.errors?.[0]?.message || 'Duffel API Error';
     const err = new Error(msg);
     err.status = res.status;
+    err.code = classifyUpstreamStatus(res.status);
     err.details = json?.errors;
     throw err;
   }
@@ -136,6 +171,7 @@ async function duffel(method, path, body = null, extraHeaders = null, options = 
   if (!duffelCircuitAllow()) {
     const err = new Error('Duffel ist vorübergehend nicht erreichbar — bitte in Kürze erneut versuchen');
     err.status = 503;
+    err.code = 'UPSTREAM_CIRCUIT_OPEN';
     recordApiLog({ method, path, statusCode: 503, success: false, durationMs: Date.now() - startedAt, logContext });
     throw err;
   }
@@ -171,7 +207,14 @@ async function duffel(method, path, body = null, extraHeaders = null, options = 
       const transient = !e.status || e.status >= 500;
       if (!transient || attempt === maxAttempts) {
         duffelCircuitRecordFailure();
+        // [P0.9] Classify the terminal failure for monitoring. Tag a code if
+        // one wasn't set at the throw site (defensive), then emit one
+        // structured line with the class, status, attempts, and duration —
+        // so Duffel failures can be broken down by kind (422/429/4xx/5xx/
+        // timeout/network) without changing any control flow.
+        if (e && !e.code) e.code = e.status ? classifyUpstreamStatus(e.status) : 'UPSTREAM_NETWORK';
         recordApiLog({ method, path, statusCode: e.status || null, success: false, durationMs: Date.now() - startedAt, logContext });
+        log('warn', 'duffel_upstream_error', { method, path, code: e.code, status: e.status || null, attempts: attempt, duration_ms: Date.now() - startedAt });
         throw e;
       }
       await new Promise((r) => setTimeout(r, 300 * attempt));
@@ -193,3 +236,7 @@ module.exports.getDuffelCircuitStatus = getDuffelCircuitStatus;
 // كـ"Duffel واقع" ويوقف الخدمة عن العملاء الحقيقيين اللي بيدوروا في
 // نفس اللحظة.
 module.exports.duffelAttempt = duffelAttempt;
+// [P0.9] Error taxonomy — exported so callers/tests can reference the exact
+// set of upstream failure classes instead of string-matching messages.
+module.exports.UPSTREAM_ERROR_CODES = UPSTREAM_ERROR_CODES;
+module.exports.classifyUpstreamStatus = classifyUpstreamStatus;
