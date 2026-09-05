@@ -471,8 +471,19 @@ app.post('/price-preview', rateLimit('pay', 30, 60000), attachUserIfPresent, asy
       // server didn't actually have, and /create-checkout-session's own
       // (correct) recomputation kept disagreeing with it — surfacing as
       // the same "Der Preis hat sich geändert" dialog on every booking.
-      pricing = await computeAuthoritativePricing(offer_id, services, promo_code, device_id, req.userId, !!apply_loyalty, 'price-preview');
+      // [P0.8 · DEADLINE] Only this interactive path passes an overall
+      // deadline; when Duffel is too slow the customer gets a fast, controlled
+      // error instead of a ~40s hang. Booking/checkout paths pass none.
+      pricing = await computeAuthoritativePricing(offer_id, services, promo_code, device_id, req.userId, !!apply_loyalty, 'price-preview', { deadlineMs: env.PRICE_PREVIEW_DEADLINE_MS });
     } catch (e) {
+      // [P0.8 · P0.9] A deadline/upstream timeout is a distinct, classified
+      // outcome — surface it as 504 UPSTREAM_TIMEOUT (not the generic 409
+      // "offer unavailable"), with a safe client message and no internal
+      // details. Everything else keeps the existing OFFER_UNAVAILABLE 409.
+      if (e && e.code === 'UPSTREAM_TIMEOUT') {
+        log('warn', 'price_preview_upstream_timeout', { offer_id });
+        return res.status(504).json({ ok: false, code: 'UPSTREAM_TIMEOUT', error: 'Die Preisberechnung dauert gerade zu lange. Bitte erneut versuchen.' });
+      }
       log('warn', 'price_preview_failed', { offer_id, error: e.message });
       return res.status(409).json({ ok: false, code: 'OFFER_UNAVAILABLE', error: 'Dieses Angebot ist nicht mehr verfügbar. Bitte erneut suchen.' });
     }

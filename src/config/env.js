@@ -13,6 +13,18 @@ module.exports = {
   DUFFEL_BASE: 'https://api.duffel.com',
   DUFFEL_VERSION: 'v2',
 
+  // [P0.8 · DEADLINE] Overall wall-clock cap (ms) for the upstream Duffel
+  // work inside a /price-preview pricing computation — the interactive path
+  // the customer waits on live. When exceeded, the in-flight offer/seat-map
+  // fetches are aborted, any remaining retry is stopped, and the endpoint
+  // returns a controlled UPSTREAM_TIMEOUT (504) instead of hanging up to the
+  // ~40s double-timeout measured in the P0.2 baseline. Chosen from that
+  // baseline: Duffel offers p75≈9.4s / seat_maps p75≈9.9s, so 15s lets the
+  // large majority of genuinely-successful calls finish while cutting the
+  // 20s/40s timeout tail. Booking/checkout paths do NOT pass a deadline, so
+  // their behaviour is unchanged. Tunable from Render without a code change.
+  PRICE_PREVIEW_DEADLINE_MS: Number(process.env.PRICE_PREVIEW_DEADLINE_MS) || 15000,
+
   STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY,
   STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET,
   DUFFEL_WEBHOOK_SECRET: process.env.DUFFEL_WEBHOOK_SECRET,

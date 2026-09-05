@@ -182,6 +182,26 @@ describe('computeAuthoritativePricing', () => {
     expect(calls.some((p) => p.includes('/air/seat_maps'))).toBe(false);
   });
 
+  // [P0.8 · DEADLINE] When an overall deadline is passed and Duffel aborts
+  // for it (UPSTREAM_DEADLINE), the function must surface a classified
+  // UPSTREAM_TIMEOUT (504) — never a partial/priced result.
+  test('deadline: an UPSTREAM_DEADLINE from Duffel becomes a classified UPSTREAM_TIMEOUT (504)', async () => {
+    mockDuffelFn.mockImplementation((method, path) => {
+      if (path.includes('/air/offers')) { const e = new Error('deadline'); e.code = 'UPSTREAM_DEADLINE'; e.status = 504; return Promise.reject(e); }
+      return Promise.resolve({ data: [] });
+    });
+    await expect(
+      computeAuthoritativePricing('off_1', [], null, null, null, false, 'price-preview', { deadlineMs: 15000 })
+    ).rejects.toMatchObject({ code: 'UPSTREAM_TIMEOUT', status: 504 });
+  });
+
+  test('no deadline passed: a normal offer result prices as before (deadline is opt-in)', async () => {
+    mockOfferAndSeatMaps({ totalAmount: '100' });
+    const result = await computeAuthoritativePricing('off_1', [], null, null, null, false);
+    expect(result.duffelAmount).toBe(100);
+    expect(result.customerAmount).toBe(113);
+  });
+
   test('DOES call /air/seat_maps when a non-baggage (seat) service is requested', async () => {
     const calls = [];
     mockDuffelFn.mockImplementation((method, path) => {

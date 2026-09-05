@@ -15,7 +15,7 @@ const { recordApiLog } = require('./apiLogs');
 
 const DUFFEL_TIMEOUT_MS = 20000;
 
-async function duffelAttempt(method, path, body, extraHeaders, timeoutMs) {
+async function duffelAttempt(method, path, body, extraHeaders, timeoutMs, externalSignal) {
   if (!env.DUFFEL_TOKEN) throw new Error('DUFFEL_TOKEN غير موجود في Environment Variables');
 
   const opts = {
@@ -31,6 +31,16 @@ async function duffelAttempt(method, path, body, extraHeaders, timeoutMs) {
 
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs || DUFFEL_TIMEOUT_MS);
+  // [P0.8 · DEADLINE] An optional external signal (a caller's overall
+  // deadline — see computeAuthoritativePricing) must ALSO abort this
+  // in-flight request the instant it fires, not wait for the per-attempt
+  // timeout. Forward it onto the same controller so the fetch is actually
+  // cancelled (no Duffel request left running in the background).
+  let onExternalAbort = null;
+  if (externalSignal) {
+    if (externalSignal.aborted) ctrl.abort();
+    else { onExternalAbort = () => ctrl.abort(); externalSignal.addEventListener('abort', onExternalAbort, { once: true }); }
+  }
   opts.signal = ctrl.signal;
 
   let res;
@@ -38,13 +48,21 @@ async function duffelAttempt(method, path, body, extraHeaders, timeoutMs) {
     res = await fetch(`${env.DUFFEL_BASE}${path}`, opts);
   } catch (e) {
     if (e.name === 'AbortError') {
-      const err = new Error('Duffel antwortet nicht — bitte erneut versuchen');
+      // Distinguish the caller's overall deadline from our own per-request
+      // timeout: the deadline is terminal (never retried), the timeout is
+      // a transient error that may be retried once.
+      const deadlineHit = !!(externalSignal && externalSignal.aborted);
+      const err = new Error(deadlineHit
+        ? 'Zeitlimit für die Preisberechnung überschritten'
+        : 'Duffel antwortet nicht — bitte erneut versuchen');
       err.status = 504;
+      if (deadlineHit) err.code = 'UPSTREAM_DEADLINE';
       throw err;
     }
     throw e;
   } finally {
     clearTimeout(timer);
+    if (externalSignal && onExternalAbort) externalSignal.removeEventListener('abort', onExternalAbort);
   }
   const json = await res.json();
 
@@ -122,16 +140,34 @@ async function duffel(method, path, body = null, extraHeaders = null, options = 
     throw err;
   }
   const timeoutMs = (options && options.timeoutMs) || DUFFEL_TIMEOUT_MS;
+  // [P0.8 · DEADLINE] Optional caller-supplied overall deadline signal. When
+  // it has fired, this whole logical call ends immediately with a terminal
+  // UPSTREAM_DEADLINE error — no new attempt is started and no retry is
+  // scheduled. A deadline is the caller's deliberate cap, not Duffel being
+  // down, so it does NOT count toward the circuit breaker.
+  const externalSignal = (options && options.signal) || null;
+  const deadlineError = () => { const err = new Error('Zeitlimit für die Preisberechnung überschritten'); err.status = 504; err.code = 'UPSTREAM_DEADLINE'; return err; };
   const maxAttempts = 2;
   let lastErr;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (externalSignal && externalSignal.aborted) {
+      const err = deadlineError();
+      recordApiLog({ method, path, statusCode: 504, success: false, durationMs: Date.now() - startedAt, logContext });
+      throw err;
+    }
     try {
-      const result = await duffelAttempt(method, path, body, extraHeaders, timeoutMs);
+      const result = await duffelAttempt(method, path, body, extraHeaders, timeoutMs, externalSignal);
       duffelCircuitRecordSuccess();
       recordApiLog({ method, path, statusCode: 200, success: true, durationMs: Date.now() - startedAt, logContext });
       return result;
     } catch (e) {
       lastErr = e;
+      // [P0.8] A deadline abort is terminal — never retried, never counted
+      // as a circuit failure. Surface it straight to the caller.
+      if (e.code === 'UPSTREAM_DEADLINE') {
+        recordApiLog({ method, path, statusCode: 504, success: false, durationMs: Date.now() - startedAt, logContext });
+        throw e;
+      }
       const transient = !e.status || e.status >= 500;
       if (!transient || attempt === maxAttempts) {
         duffelCircuitRecordFailure();
