@@ -74,6 +74,28 @@ app.get('/blog-posts', rateLimit('content', 2500, 60000), async (req, res) => {
   }
 });
 
+// [P0-6] Build the set of hreflang alternates for a post from its ACTUAL
+// published siblings — the German source (always) plus every language that has
+// a translation row in blog_post_translations, plus the legacy inline English
+// (slug_en) when present and not already covered. Returns [{language, slug}].
+// A language is NEVER advertised unless a real slug exists for it, so the
+// frontend can emit reciprocal hreflang that never points at a 404.
+async function buildBlogAlternates(postId, germanSlug, slugEn) {
+  const alternates = [];
+  if (germanSlug) alternates.push({ language: 'de', slug: germanSlug });
+  const { data: trs } = await supa.from('blog_post_translations')
+    .select('language,slug').eq('post_id', postId);
+  for (const t of trs || []) {
+    if (t.language && t.slug && !alternates.some((a) => a.language === t.language)) {
+      alternates.push({ language: t.language, slug: t.slug });
+    }
+  }
+  if (slugEn && !alternates.some((a) => a.language === 'en')) {
+    alternates.push({ language: 'en', slug: slugEn });
+  }
+  return alternates;
+}
+
 // ─── GET /blog-posts/:slug ──────────────────────────────────────
 // Single published post by slug, for the public post-detail page.
 // Increments views_count best-effort (fire-and-forget — a failed view
@@ -92,14 +114,16 @@ app.get('/blog-posts/:slug', rateLimit('content', 2500, 60000), async (req, res)
       if (trErr) throw new Error(trErr.message);
       if (!tr) return res.status(404).json({ ok: false, error: 'Beitrag nicht gefunden' });
       const { data: parent, error: pErr } = await supa.from('blog_posts')
-        .select('id,cover_image_url,author,published_at,status,views_count').eq('id', tr.post_id).maybeSingle();
+        .select('id,slug,slug_en,cover_image_url,author,published_at,status,views_count').eq('id', tr.post_id).maybeSingle();
       if (pErr) throw new Error(pErr.message);
       if (!parent || parent.status !== 'published') return res.status(404).json({ ok: false, error: 'Beitrag nicht gefunden' });
       supa.from('blog_posts').update({ views_count: (parent.views_count || 0) + 1 }).eq('id', parent.id)
         .then(({ error: e }) => { if (e) log('warn', 'blog_view_count_failed', { error: e.message }); });
+      const alternates = await buildBlogAlternates(parent.id, parent.slug, parent.slug_en);
       return res.json({ ok: true, post: {
         slug: tr.slug, title: tr.title, meta_description: tr.meta_description, excerpt: tr.excerpt,
         content: tr.content, cover_image_url: parent.cover_image_url, author: parent.author, published_at: parent.published_at,
+        language: lang, alternates,
       } });
     }
 
@@ -108,7 +132,8 @@ app.get('/blog-posts/:slug', rateLimit('content', 2500, 60000), async (req, res)
     if (!data) return res.status(404).json({ ok: false, error: 'Beitrag nicht gefunden' });
     supa.from('blog_posts').update({ views_count: (data.views_count || 0) + 1 }).eq('id', data.id)
       .then(({ error: e }) => { if (e) log('warn', 'blog_view_count_failed', { error: e.message }); });
-    res.json({ ok: true, post: data });
+    const alternates = await buildBlogAlternates(data.id, data.slug, data.slug_en);
+    res.json({ ok: true, post: { ...data, language: 'de', alternates } });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
