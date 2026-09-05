@@ -23,7 +23,8 @@ const {
   computeTieredMargin, getTicketProfitTiers, getAncillaryProfitTiers,
 } = require('../services/adminConfig');
 const { getLoyaltyConfig } = require('../services/loyalty');
-const { haversineDistanceKm, classifyHaul, ensureCountryExists, ensureCityExists } = require('../services/routePages');
+const { haversineDistanceKm, classifyHaul, ensureCountryExists, ensureCityExists, ensureAirlineExists, ensureRouteAirlineObserved } = require('../services/routePages');
+const { isExcludedCarrier } = require('../services/carrierFilter');
 const triggerRebuild = require('../utils/triggerRebuild');
 const { translateAndStoreAllLanguages } = require('../services/blogTranslation');
 const { DEFAULT_ROUTE_SCORE_CONFIG } = require('../services/routeScore');
@@ -1139,6 +1140,113 @@ app.post('/admin/route-pages/health-check-batch', rateLimit('admin', 120, 60000)
 
     log('info', 'route_health_check_batch', { checked: results.length, dead: deadCount });
     res.json({ ok: true, checked: results.length, dead: deadCount, remaining: remaining || 0, remainingTotal: remainingTotal || 0 });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// [BACKFILL-AIRLINES] F3 (recovery plan phase 5 · RCA docs/RCA-ROUTE-DATA-2026-09.md):
+// populate route_airlines for zero-airline PUBLISHED routes (Category D — real
+// airports with no observed carriers yet) by probing Duffel and recording the
+// marketing carriers, EXACTLY like the live search flow (search.routes.js) does
+// as a side effect. ADDITIVE ONLY — it never dead-flags a route: a single date
+// returning no offers is NOT proof a real route is dead (plan rule #3), which is
+// why this does not reuse health-check-batch. Bounded (10/run) + rate-limited (2
+// concurrent, 0.5s gaps) exactly like health-check-batch, so it never recreates
+// the crawler-style Duffel load implicated in the 2026-08-18 incident. The admin
+// UI calls this repeatedly; a route that gains carriers drops out of the target
+// (airline_count > 0), one that stays empty is re-probed on a later pass.
+app.post('/admin/route-pages/backfill-airlines-batch', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const BATCH_SIZE = 10;
+    // Oldest-touched first so repeated runs cycle through the whole set; only
+    // published + zero-airline routes (Category C is already 'dead', so this is
+    // exactly the Category-D remainder).
+    const { data: batch, error: fetchErr } = await supa.from('route_pages')
+      .select('id, origin_iata, destination_iata')
+      .eq('status', 'published')
+      .eq('airline_count', 0)
+      .order('updated_at', { ascending: true })
+      .limit(BATCH_SIZE);
+    if (fetchErr) throw new Error(fetchErr.message);
+    if (!batch || !batch.length) {
+      return res.json({ ok: true, checked: 0, backfilled: 0, remaining: 0, message: 'مفيش مسارات بدون خطوط محتاجة تعبئة' });
+    }
+
+    const searchDate = new Date();
+    searchDate.setDate(searchDate.getDate() + 21);
+    const departure_date = searchDate.toISOString().slice(0, 10);
+
+    const backfillOne = async (route) => {
+      try {
+        // duffelAttempt (not duffel()) so a naturally-empty route doesn't trip
+        // the shared circuit breaker against real customers — same as health-check.
+        const result = await duffelAttempt('POST', '/air/offer_requests?return_offers=true&supplier_timeout=8000', {
+          data: {
+            slices: [{ origin: route.origin_iata, destination: route.destination_iata, departure_date }],
+            passengers: [{ type: 'adult' }],
+            cabin_class: 'economy',
+          },
+        });
+        const offers = result.data?.offers || [];
+        // Same carrier extraction + exclusion filter as search.routes.js.
+        const observed = new Map();
+        for (const o of offers) {
+          const segs = (o.slices && o.slices[0] && o.slices[0].segments) || [];
+          for (const s of segs) {
+            const iata = s.marketing_carrier && s.marketing_carrier.iata_code;
+            const name = s.marketing_carrier && s.marketing_carrier.name;
+            if (isExcludedCarrier(iata, name)) continue;
+            if (iata) observed.set(iata, name);
+          }
+        }
+        for (const [iata, name] of observed) {
+          const airlineId = await ensureAirlineExists(iata, name);
+          if (airlineId) await ensureRouteAirlineObserved(route.origin_iata, route.destination_iata, airlineId);
+        }
+        return { id: route.id, origin_iata: route.origin_iata, destination_iata: route.destination_iata, found: observed.size };
+      } catch (e) {
+        // Transient Duffel/network error — leave the route untouched, retry later.
+        log('warn', 'backfill_airlines_error', { route_id: route.id, error: e.message });
+        return { id: route.id, found: null };
+      }
+    };
+
+    // 2 concurrent with a 0.5s gap between sub-batches (mirror health-check).
+    const results = [];
+    for (let i = 0; i < batch.length; i += 2) {
+      const sub = batch.slice(i, i + 2);
+      const subResults = await Promise.all(sub.map(backfillOne));
+      results.push(...subResults);
+      if (i + 2 < batch.length) await new Promise((r) => setTimeout(r, 500));
+    }
+
+    let backfilled = 0;
+    const now = new Date().toISOString();
+    for (const r of results) {
+      if (r.found === null) continue; // transient error — do not advance it
+      const update = { updated_at: now };
+      if (r.found > 0) {
+        // Authoritative count = distinct route_airlines rows for this pair
+        // (routeIntelligenceRefresh also maintains it; set it now so the route
+        // leaves the zero-airline target immediately).
+        const { count } = await supa.from('route_airlines')
+          .select('id', { count: 'exact', head: true })
+          .eq('route_origin_iata', r.origin_iata)
+          .eq('route_destination_iata', r.destination_iata);
+        update.airline_count = count || r.found;
+        backfilled++;
+      }
+      await supa.from('route_pages').update(update).eq('id', r.id);
+    }
+
+    const { count: remaining } = await supa.from('route_pages')
+      .select('id', { count: 'exact', head: true })
+      .eq('status', 'published').eq('airline_count', 0);
+
+    log('info', 'route_backfill_airlines_batch', { checked: results.length, backfilled });
+    res.json({ ok: true, checked: results.length, backfilled, remaining: remaining || 0 });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
