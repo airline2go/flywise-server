@@ -127,7 +127,25 @@ async function incrementPromoUsage(promoId) {
 // the server's own promo_codes table. Used by BOTH /create-checkout-session
 // (before payment) and bookFromSession (right before booking), so the two
 // can never disagree.
-async function computeAuthoritativePricing(offerId, requestedServices, promoCode, deviceId, userId, applyLoyalty, perfLabel) {
+async function computeAuthoritativePricing(offerId, requestedServices, promoCode, deviceId, userId, applyLoyalty, perfLabel, opts) {
+  // [P0.8 · DEADLINE] Optional overall wall-clock cap for the upstream Duffel
+  // work (the only unbounded part of this function; the DB stages below are
+  // cached/single indexed lookups of ~tens of ms). Passed ONLY by the
+  // interactive /price-preview path — checkout/booking pass nothing, so their
+  // behaviour is completely unchanged. When the deadline fires, a shared
+  // AbortController cancels the in-flight offer/seat-map fetches AND stops any
+  // pending retry (see src/services/duffel.js), and this function throws a
+  // classified UPSTREAM_TIMEOUT (mapped to HTTP 504 by the route) instead of
+  // hanging up to the ~40s double-timeout. It NEVER returns a partial or stale
+  // price on timeout — it throws. Pricing math and booking logic are untouched.
+  const _deadlineMs = opts && Number(opts.deadlineMs) > 0 ? Number(opts.deadlineMs) : 0;
+  let _deadlineCtrl = null, _deadlineTimer = null;
+  if (_deadlineMs) {
+    _deadlineCtrl = new AbortController();
+    _deadlineTimer = setTimeout(() => _deadlineCtrl.abort(), _deadlineMs);
+    if (_deadlineTimer.unref) _deadlineTimer.unref();
+  }
+  const _duffelOpts = _deadlineCtrl ? { signal: _deadlineCtrl.signal } : null;
   // [PERF-INSTRUMENT · P0.1] Pure timing instrumentation — measures how long
   // each stage of this function takes and emits ONE structured log line at
   // the end. It changes NOTHING about the pricing result, the order of
@@ -184,19 +202,37 @@ async function computeAuthoritativePricing(offerId, requestedServices, promoCode
   // NOTE (P0.2 GATE): this optimization must not ship until production
   // pricing_timing evidence confirms seat_maps is the dominant cost.
   let _perfSeatMapsSkipped = false;
-  const offerCheck = await (async () => { const _s = Date.now(); try { return await duffel('GET', `/air/offers/${offerId}?return_available_services=true`); } finally { _perfOffersMs = Date.now() - _s; } })();
-  const baggageServices = (offerCheck.data && offerCheck.data.available_services) || [];
-  const _baggageIdSet = new Set(baggageServices.map((s) => s && s.id));
-  // A requested service id that isn't a known baggage service can only be a
-  // seat (the sole other service type this flow handles) — so nothing needs
-  // the seat map unless at least one such id is present.
-  const _needsSeatMaps = (requestedServices || []).some((s) => s && s.id && !_baggageIdSet.has(s.id));
-  let seatMapsResult = { data: [] };
-  if (_needsSeatMaps) {
-    seatMapsResult = await (async () => { const _s = Date.now(); try { return await duffel('GET', `/air/seat_maps?offer_id=${encodeURIComponent(offerId)}`).catch(() => ({ data: [] })); } finally { _perfSeatMapsMs = Date.now() - _s; } })();
-  } else {
-    _perfSeatMapsSkipped = true;
+  let offerCheck, seatMapsResult = { data: [] };
+  try {
+    offerCheck = await (async () => { const _s = Date.now(); try { return await duffel('GET', `/air/offers/${offerId}?return_available_services=true`, null, null, _duffelOpts); } finally { _perfOffersMs = Date.now() - _s; } })();
+    const baggageServices0 = (offerCheck.data && offerCheck.data.available_services) || [];
+    const _baggageIdSet0 = new Set(baggageServices0.map((s) => s && s.id));
+    // A requested service id that isn't a known baggage service can only be a
+    // seat (the sole other service type this flow handles) — so nothing needs
+    // the seat map unless at least one such id is present.
+    const _needsSeatMaps = (requestedServices || []).some((s) => s && s.id && !_baggageIdSet0.has(s.id));
+    if (_needsSeatMaps) {
+      // [P0.8] The .catch() still swallows a benign "no seat map" (Duffel 422)
+      // into an empty map, but a deadline abort must NOT be swallowed — it has
+      // to propagate so the caller fails in a controlled way instead of
+      // silently pricing without the seat the customer selected.
+      seatMapsResult = await (async () => { const _s = Date.now(); try { return await duffel('GET', `/air/seat_maps?offer_id=${encodeURIComponent(offerId)}`, null, null, _duffelOpts).catch((e) => { if (e && e.code === 'UPSTREAM_DEADLINE') throw e; return { data: [] }; }); } finally { _perfSeatMapsMs = Date.now() - _s; } })();
+    } else {
+      _perfSeatMapsSkipped = true;
+    }
+  } catch (e) {
+    if (_deadlineTimer) clearTimeout(_deadlineTimer);
+    if (e && e.code === 'UPSTREAM_DEADLINE') {
+      log('warn', 'pricing_deadline_exceeded', { offer_id: offerId, label: perfLabel || null, deadline_ms: _deadlineMs, offers_ms: _perfOffersMs, seat_maps_ms: _perfSeatMapsMs });
+      const err = new Error('Die Preisberechnung hat zu lange gedauert. Bitte erneut versuchen.');
+      err.code = 'UPSTREAM_TIMEOUT';
+      err.status = 504;
+      throw err;
+    }
+    throw e;
   }
+  if (_deadlineTimer) clearTimeout(_deadlineTimer);
+  const baggageServices = (offerCheck.data && offerCheck.data.available_services) || [];
   const seatServices = [];
   for (const sm of (seatMapsResult.data || [])) {
     for (const cabin of (sm.cabins || [])) {
