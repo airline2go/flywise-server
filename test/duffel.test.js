@@ -97,3 +97,40 @@ describe('duffel() — circuit breaker open', () => {
     expect(mockRecordApiLog).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 503, success: false }));
   });
 });
+
+// [P0.8 · DEADLINE] External deadline signal support.
+describe('duffel() — P0.8 external deadline signal', () => {
+  test('a pre-aborted signal ends the call terminally (UPSTREAM_DEADLINE), never touches the network, never retries', async () => {
+    const duffel = freshDuffel();
+    const ac = new AbortController();
+    ac.abort();
+    await expect(duffel('GET', '/air/seat_maps?offer_id=x', null, null, { signal: ac.signal }))
+      .rejects.toMatchObject({ code: 'UPSTREAM_DEADLINE', status: 504 });
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(mockRecordApiLog).toHaveBeenCalledTimes(1);
+    expect(mockRecordApiLog).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 504, success: false }));
+  });
+
+  test('a signal that aborts mid-flight yields a terminal UPSTREAM_DEADLINE and is NOT retried', async () => {
+    const duffel = freshDuffel();
+    const ac = new AbortController();
+    // Simulate the deadline firing while the request is in flight: abort, then
+    // reject with the AbortError fetch would raise.
+    global.fetch.mockImplementation(() => {
+      ac.abort();
+      const err = new Error('The operation was aborted'); err.name = 'AbortError';
+      return Promise.reject(err);
+    });
+    await expect(duffel('GET', '/air/offers/x', null, null, { signal: ac.signal }))
+      .rejects.toMatchObject({ code: 'UPSTREAM_DEADLINE' });
+    expect(global.fetch).toHaveBeenCalledTimes(1); // terminal — no second attempt
+  });
+
+  test('without a deadline signal, an AbortError is our own timeout (504, retried once) — unchanged behaviour', async () => {
+    const duffel = freshDuffel();
+    const err = new Error('The operation was aborted'); err.name = 'AbortError';
+    global.fetch.mockRejectedValue(err);
+    await expect(duffel('GET', '/air/offers/x')).rejects.toMatchObject({ status: 504 });
+    expect(global.fetch).toHaveBeenCalledTimes(2); // transient timeout is retried once
+  });
+});
