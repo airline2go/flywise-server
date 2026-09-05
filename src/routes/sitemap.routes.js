@@ -65,7 +65,7 @@ module.exports = (app) => {
       const page = pageParam(req);
       const [from, to] = range(page);
       const { data, error } = await supa.from('route_pages')
-        .select('slug,updated_at,insights_updated_at,created_at,distance_km,avg_duration_min,airline_count,stop_distribution,intro_text,custom_faq,origin_iata,destination_iata')
+        .select('slug,updated_at,insights_updated_at,created_at,distance_km,avg_duration_min,airline_count,stop_distribution,price_sample_count,itinerary_count,intro_text,custom_faq,origin_iata,destination_iata')
         .eq('status', 'published')
         .order('slug', { ascending: true })
         .range(from, to);

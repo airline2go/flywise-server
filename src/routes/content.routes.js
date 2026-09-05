@@ -212,7 +212,7 @@ app.get('/route-pages', rateLimit('content', 2500, 60000), async (req, res) => {
     const from = page * ROUTE_PAGES_PAGE_SIZE;
     const to = from + ROUTE_PAGES_PAGE_SIZE - 1;
     const { data, error } = await supa.from('route_pages')
-      .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_country,destination_country,distance_km,haul_type,airline_count,route_score,updated_at,insights_updated_at,created_at,avg_duration_min,stop_distribution,intro_text,custom_faq')
+      .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_country,destination_country,distance_km,haul_type,airline_count,route_score,updated_at,insights_updated_at,created_at,avg_duration_min,stop_distribution,price_sample_count,itinerary_count,intro_text,custom_faq')
       .eq('status', 'published')
       .order('origin_city', { ascending: true })
       .order('slug', { ascending: true })
@@ -221,10 +221,29 @@ app.get('/route-pages', rateLimit('content', 2500, 60000), async (req, res) => {
     const rows = data || [];
     const routes = rows.map((r) => {
       const indexable = routeIndexable(r);
-      const { avg_duration_min, stop_distribution, intro_text, custom_faq, ...rest } = r;
+      const { avg_duration_min, stop_distribution, price_sample_count, itinerary_count, intro_text, custom_faq, ...rest } = r;
       return { ...rest, indexable };
     });
     res.json({ ok: true, page, hasMore: rows.length === ROUTE_PAGES_PAGE_SIZE, routes });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── GET /route-redirects ─────────────────────────────────────
+// [P0-4] Persistent loser→winner (and any other) route redirects. The
+// frontend route handler consults these BEFORE route lookup, so a 301 for an
+// already-discovered old URL survives even after its loser route_pages row is
+// deleted. Small table; returned in full and cached by the frontend like the
+// other content feeds. source→target is guaranteed single-hop at write time.
+app.get('/route-redirects', rateLimit('content', 2500, 60000), async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { data, error } = await supa.from('route_redirects')
+      .select('source_slug,target_slug,status_code')
+      .order('source_slug', { ascending: true });
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, redirects: data || [] });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
