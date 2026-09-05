@@ -110,6 +110,7 @@ require('./src/routes/admin-airlines.routes')(app);
 require('./src/routes/admin-fare-rules.routes')(app);
 require('./src/routes/admin-seo.routes')(app);
 require('./src/routes/admin-gsc.routes')(app);
+require('./src/routes/admin-finance.routes')(app);
 
 // [ROUTE-SCORE-4A] Not route registrars — each of these self-starts its
 // own background timer the moment it's required (same pattern as
@@ -120,6 +121,9 @@ require('./src/services/routeScore');
 require('./src/services/routeIntelligenceRefresh');
 require('./src/services/routePriceHistoryRefresh');
 require('./src/services/socialAutoGenerate');
+// [F-PHASE4] Finance sync cron — DISABLED unless FINANCE_CRON_ENABLED=true, so
+// requiring it here never starts syncing production data on its own.
+require('./src/services/finance/financeCron').start();
 
 // ─── [7] معالج الأخطاء الموحّد ───────────────────────────────
 if (env.SENTRY_DSN) {
