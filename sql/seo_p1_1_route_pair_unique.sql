@@ -1,5 +1,8 @@
 -- ═══════════════════════════════════════════════════════════════════════
--- seo_p1_1_route_pair_unique.sql  (P1-1)  ⚠️ NOT YET APPLIED — NEEDS APPROVAL
+-- seo_p1_1_route_pair_unique.sql  (P1-1)  ✅ APPLIED 2026-09-05 (production)
+-- Result: 10 losers deleted (2072→2062 published), dup published pairs 10→0,
+-- index uq_route_pages_published_pair created; all 10 route_redirects intact
+-- (verified ams-vie route row gone but its 301 redirect still present).
 -- ─────────────────────────────────────────────────────────────────────────
 -- Prevents duplicate PUBLISHED (origin_iata, destination_iata) route pages at
 -- the DB level (application-level checks can't stop a race). Two steps, in order:
