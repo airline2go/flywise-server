@@ -417,3 +417,26 @@ describe('GET /route-pages (pagination)', () => {
     expect(res.body.ok).toBe(false);
   });
 });
+
+describe('GET /route-pages pagination validation (P2-1)', () => {
+  test('valid integer page is accepted and echoed', async () => {
+    supa.__setResponse('route_pages', { result: { data: [{ slug: 'a-b', origin_iata: 'A', destination_iata: 'B', distance_km: 500 }], error: null } });
+    const res = await request(buildApp()).get('/route-pages?page=2');
+    expect(res.status).toBe(200);
+    expect(res.body.page).toBe(2);
+  });
+  test('absent page defaults to 0 (backward compatible)', async () => {
+    supa.__setResponse('route_pages', { result: { data: [], error: null } });
+    const res = await request(buildApp()).get('/route-pages');
+    expect(res.status).toBe(200);
+    expect(res.body.page).toBe(0);
+  });
+  test('non-integer / negative / huge page → 400', async () => {
+    supa.__setResponse('route_pages', { result: { data: [], error: null } });
+    for (const bad of ['abc', '-1', '1.5', '1e9', '999999999']) {
+      const res = await request(buildApp()).get(`/route-pages?page=${encodeURIComponent(bad)}`);
+      expect(res.status).toBe(400);
+      expect(res.body.ok).toBe(false);
+    }
+  });
+});
