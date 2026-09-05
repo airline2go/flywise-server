@@ -255,6 +255,35 @@ app.get('/route-pages', rateLimit('content', 2500, 60000), async (req, res) => {
   }
 });
 
+// ─── GET /route-pages-audit ───────────────────────────────────
+// [P0-9] Dedicated data-quality audit feed. Unlike the public /route-pages list
+// (which strips avg_duration_min/stop_distribution/price_*/… to keep the SEO
+// payload small), this returns the FULL field set every route-data-audit check
+// needs, so the auditor can actually see the data it claims to check. Internal:
+// guarded by a shared AUDIT_TOKEN (feature-off → 404 when the token is unset),
+// never part of the public API. Paginated like the other list feeds.
+app.get('/route-pages-audit', rateLimit('content', 600, 60000), async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const expected = process.env.AUDIT_TOKEN;
+    if (!expected) return res.status(404).json({ ok: false, error: 'not found' });
+    const provided = req.get('x-audit-token');
+    if (!provided || provided !== expected) return res.status(403).json({ ok: false, error: 'forbidden' });
+    const PAGE_SIZE = 1000;
+    const page = Math.max(0, parseInt(req.query.page, 10) || 0);
+    const from = page * PAGE_SIZE;
+    const { data, error } = await supa.from('route_pages')
+      .select('slug,status,origin_iata,destination_iata,origin_city,destination_city,distance_km,haul_type,airline_count,avg_duration_min,min_duration_min,stop_distribution,all_direct,price_min,price_avg,price_max,price_sample_count,itinerary_count,price_updated_at,insights_updated_at,intro_text,custom_faq')
+      .order('slug', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) throw new Error(error.message);
+    const rows = data || [];
+    res.json({ ok: true, page, hasMore: rows.length === PAGE_SIZE, routes: rows });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ─── GET /route-redirects ─────────────────────────────────────
 // [P0-4] Persistent loser→winner (and any other) route redirects. The
 // frontend route handler consults these BEFORE route lookup, so a 301 for an
