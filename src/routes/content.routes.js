@@ -230,6 +230,25 @@ app.get('/route-pages', rateLimit('content', 2500, 60000), async (req, res) => {
   }
 });
 
+// ─── GET /route-redirects ─────────────────────────────────────
+// [P0-4] Persistent loser→winner (and any other) route redirects. The
+// frontend route handler consults these BEFORE route lookup, so a 301 for an
+// already-discovered old URL survives even after its loser route_pages row is
+// deleted. Small table; returned in full and cached by the frontend like the
+// other content feeds. source→target is guaranteed single-hop at write time.
+app.get('/route-redirects', rateLimit('content', 2500, 60000), async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { data, error } = await supa.from('route_redirects')
+      .select('source_slug,target_slug,status_code')
+      .order('source_slug', { ascending: true });
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, redirects: data || [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ─── GET /countries ───────────────────────────────────────────
 // [COUNTRY-PAGES] Public list of published countries — only ones with at
 // least one real route actually exist here (see ensureCountryExists),

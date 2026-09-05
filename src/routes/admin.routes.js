@@ -14,6 +14,7 @@ const { requireAdmin, requireFullAdmin } = require('../middleware/auth');
 const { logAdminActivity } = require('../services/adminAuth');
 const duffel = require('../services/duffel');
 const { duffelAttempt } = require('../services/duffel');
+const { classifyRun, nextHealthState } = require('../services/routeHealth');
 const {
   DEFAULT_TICKET_TIERS, DEFAULT_ANCILLARY_TIERS, DEFAULT_INVOICE_CONFIG,
   getAdminConfig, setAdminConfig, clearConfigCacheKeys,
@@ -1075,10 +1076,13 @@ app.post('/admin/route-pages/health-check-batch', rateLimit('admin', 120, 60000)
     // مستبعدة أصلاً (status != dead) فمش هتترجع تتفحص تاني هي كمان.
     // يعني تشغيل الأداة دي كذا مرة على مدار الوقت آمن 100% — هتفحص
     // بس اللي جديد فعلاً (زي مسارات اتضافت بعدين بالإنشاء بالجملة).
+    // [P0-3] Pick new routes (never checked) AND candidates mid-streak (an
+    // earlier run found them empty but not yet enough times to declare dead),
+    // so a candidate is re-probed on later runs. Dead routes are excluded.
     const { data: batch, error: fetchErr } = await supa.from('route_pages')
-      .select('id, origin_iata, destination_iata, status')
+      .select('id, origin_iata, destination_iata, status, health_empty_streak')
       .neq('status', 'dead')
-      .is('last_health_check_at', null)
+      .or('last_health_check_at.is.null,health_empty_streak.gt.0')
       .limit(BATCH_SIZE);
     if (fetchErr) throw new Error(fetchErr.message);
 
@@ -1086,11 +1090,25 @@ app.post('/admin/route-pages/health-check-batch', rateLimit('admin', 120, 60000)
       return res.json({ ok: true, checked: 0, dead: 0, remaining: 0, message: 'كل المسارات اتفحصت بالفعل — مفيش مسارات جديدة محتاجة فحص' });
     }
 
-    const searchDate = new Date();
-    searchDate.setDate(searchDate.getDate() + 21);
-    const departure_date = searchDate.toISOString().slice(0, 10);
+    // [P0-3] Several representative departure dates instead of one. A route
+    // that doesn't operate on an arbitrary today+21 (weekly / seasonal) still
+    // gets a fair chance on another date before it can ever be called dead.
+    // Configurable; defaults spread ~3 weeks → ~4.5 months out.
+    const DATE_OFFSETS = (process.env.HEALTH_CHECK_DATE_OFFSETS || '21,60,135')
+      .split(',').map((n) => parseInt(n.trim(), 10)).filter((n) => Number.isFinite(n) && n > 0);
+    // [P0-3] How many consecutive all-empty runs before a route becomes dead.
+    // A single empty run only makes it a candidate; a real seasonal route that
+    // fills up later resets the streak. Never dead on one observation.
+    const DEAD_STREAK_THRESHOLD = Math.max(2, parseInt(process.env.HEALTH_CHECK_DEAD_STREAK || '2', 10) || 2);
+    const departureDates = DATE_OFFSETS.map((off) => {
+      const d = new Date();
+      d.setDate(d.getDate() + off);
+      return d.toISOString().slice(0, 10);
+    });
 
-    const checkOne = async (route) => {
+    const probeDate = async (route, departure_date) => {
+      // Returns 'alive' | 'empty' | 'unknown'. 'unknown' means the request
+      // itself failed (429/5xx/timeout/network) — NEVER evidence of no flights.
       try {
         // [HEALTH-CHECK-ISOLATION] duffelAttempt مباشرة، مش duffel() —
         // عشان فشل مسار فاضي (طبيعي جداً هنا) مايتسجّلش على الـ
@@ -1103,16 +1121,25 @@ app.post('/admin/route-pages/health-check-batch', rateLimit('admin', 120, 60000)
             cabin_class: 'economy',
           },
         });
-        const hasOffers = !!(result.data?.offers && result.data.offers.length);
-        return { id: route.id, alive: hasOffers };
+        return (result.data?.offers && result.data.offers.length) ? 'alive' : 'empty';
       } catch (e) {
-        // [FAIL-SAFE] خطأ في الاتصال بـ Duffel (مش "مفيش رحلات" فعلياً)
-        // — منسيبش المسار يتعلّم "ميت" بسبب مشكلة شبكة مؤقتة، بنسيبه
-        // زي ما هو ونحاول تاني في الدفعة الجاية.
-        log('warn', 'health_check_error', { route_id: route.id, error: e.message });
-        return { id: route.id, alive: null };
+        log('warn', 'health_check_error', { route_id: route.id, date: departure_date, error: e.message });
+        return 'unknown';
       }
-    }
+    };
+
+    const checkOne = async (route) => {
+      // Probe every representative date; stop early the moment one is alive.
+      const outcomes = [];
+      for (const departure_date of departureDates) {
+        const outcome = await probeDate(route, departure_date);
+        outcomes.push(outcome);
+        if (outcome === 'alive') break;
+      }
+      // classifyRun collapses the per-date outcomes into the run result
+      // (alive / empty / unknown) — one shared, unit-tested rule.
+      return { id: route.id, result: classifyRun(outcomes), prevStreak: route.health_empty_streak || 0 };
+    };
 
     // [RATE-LIMIT-FIX] كانت 3 متزامنين من غير أي فاصل — ده اللي ضرب
     // Duffel بسرعة كبيرة وشغّل الـ circuit breaker. دلوقتي 2 بس في
@@ -1127,19 +1154,23 @@ app.post('/admin/route-pages/health-check-batch', rateLimit('admin', 120, 60000)
     }
 
     let deadCount = 0;
+    let candidateCount = 0;
     const now = new Date().toISOString();
     for (const r of results) {
-      if (r.alive === null) continue; // خطأ مؤقت — نسيبه من غير تحديث، هيتحاول تاني بعدين
-      const update = { last_health_check_at: now };
-      if (!r.alive) { update.status = 'dead'; deadCount++; }
+      const state = nextHealthState(r.prevStreak, r.result, DEAD_STREAK_THRESHOLD);
+      if (!state.touch) continue; // 'unknown' (API failure) — retry next run, never dead
+      const update = { last_health_check_at: now, health_empty_streak: state.streak, health_last_result: state.lastResult };
+      if (state.markDead) { update.status = 'dead'; deadCount++; }
+      else if (state.candidate) { candidateCount++; }
       await supa.from('route_pages').update(update).eq('id', r.id);
     }
 
-    const { count: remaining } = await supa.from('route_pages').select('id', { count: 'exact', head: true }).neq('status', 'dead').is('last_health_check_at', null);
+    // Remaining = never-checked routes PLUS candidates still mid-streak.
+    const { count: remaining } = await supa.from('route_pages').select('id', { count: 'exact', head: true }).neq('status', 'dead').or('last_health_check_at.is.null,health_empty_streak.gt.0');
     const { count: remainingTotal } = await supa.from('route_pages').select('id', { count: 'exact', head: true }).neq('status', 'dead');
 
-    log('info', 'route_health_check_batch', { checked: results.length, dead: deadCount });
-    res.json({ ok: true, checked: results.length, dead: deadCount, remaining: remaining || 0, remainingTotal: remainingTotal || 0 });
+    log('info', 'route_health_check_batch', { checked: results.length, dead: deadCount, candidates: candidateCount });
+    res.json({ ok: true, checked: results.length, dead: deadCount, candidates: candidateCount, remaining: remaining || 0, remainingTotal: remainingTotal || 0 });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
