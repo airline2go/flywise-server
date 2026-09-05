@@ -125,3 +125,24 @@ describe('GET /sitemap-data/blog', () => {
     expect(res.body.items).toEqual([{ id: 'my-post', lastmod: '2026-03-01' }]);
   });
 });
+
+describe('GET /sitemap-data/airports (P0-10 single-source indexability)', () => {
+  test('fallback airport with <2 distinct destinations is noindex; >=2 is indexable', async () => {
+    // BER reaches muenchen + paris (2 distinct) → indexable.
+    // CGN reaches muenchen only (1 distinct) → noindex. No authoritative rows.
+    supa.__setResponse('route_pages', { result: { data: [
+      { origin_iata: 'BER', destination_iata: 'MUC', origin_city_slug: 'berlin', destination_city_slug: 'muenchen', origin_country: 'DE', destination_country: 'DE' },
+      { origin_iata: 'BER', destination_iata: 'CDG', origin_city_slug: 'berlin', destination_city_slug: 'paris', origin_country: 'DE', destination_country: 'FR' },
+      { origin_iata: 'CGN', destination_iata: 'MUC', origin_city_slug: 'koeln', destination_city_slug: 'muenchen', origin_country: 'DE', destination_country: 'DE' },
+    ], error: null } });
+    supa.__setResponse('airports', { result: { data: [], error: null } });
+    supa.__setResponse('route_airlines', { result: { data: [], error: null } });
+    const res = await request(buildApp()).get('/sitemap-data/airports');
+    expect(res.status).toBe(200);
+    const byId = Object.fromEntries(res.body.items.map((i) => [i.id, i.indexable]));
+    expect(byId.BER).toBe(true);
+    expect(byId.MUC).toBe(true);   // reached from berlin + koeln = 2 distinct
+    expect(byId.CGN).toBe(false);  // only muenchen = 1 distinct → noindex
+    expect(byId.CDG).toBe(false);  // only berlin = 1 distinct → noindex
+  });
+});

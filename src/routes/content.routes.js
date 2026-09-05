@@ -74,6 +74,28 @@ app.get('/blog-posts', rateLimit('content', 2500, 60000), async (req, res) => {
   }
 });
 
+// [P0-6] Build the set of hreflang alternates for a post from its ACTUAL
+// published siblings — the German source (always) plus every language that has
+// a translation row in blog_post_translations, plus the legacy inline English
+// (slug_en) when present and not already covered. Returns [{language, slug}].
+// A language is NEVER advertised unless a real slug exists for it, so the
+// frontend can emit reciprocal hreflang that never points at a 404.
+async function buildBlogAlternates(postId, germanSlug, slugEn) {
+  const alternates = [];
+  if (germanSlug) alternates.push({ language: 'de', slug: germanSlug });
+  const { data: trs } = await supa.from('blog_post_translations')
+    .select('language,slug').eq('post_id', postId);
+  for (const t of trs || []) {
+    if (t.language && t.slug && !alternates.some((a) => a.language === t.language)) {
+      alternates.push({ language: t.language, slug: t.slug });
+    }
+  }
+  if (slugEn && !alternates.some((a) => a.language === 'en')) {
+    alternates.push({ language: 'en', slug: slugEn });
+  }
+  return alternates;
+}
+
 // ─── GET /blog-posts/:slug ──────────────────────────────────────
 // Single published post by slug, for the public post-detail page.
 // Increments views_count best-effort (fire-and-forget — a failed view
@@ -92,14 +114,16 @@ app.get('/blog-posts/:slug', rateLimit('content', 2500, 60000), async (req, res)
       if (trErr) throw new Error(trErr.message);
       if (!tr) return res.status(404).json({ ok: false, error: 'Beitrag nicht gefunden' });
       const { data: parent, error: pErr } = await supa.from('blog_posts')
-        .select('id,cover_image_url,author,published_at,status,views_count').eq('id', tr.post_id).maybeSingle();
+        .select('id,slug,slug_en,cover_image_url,author,published_at,status,views_count').eq('id', tr.post_id).maybeSingle();
       if (pErr) throw new Error(pErr.message);
       if (!parent || parent.status !== 'published') return res.status(404).json({ ok: false, error: 'Beitrag nicht gefunden' });
       supa.from('blog_posts').update({ views_count: (parent.views_count || 0) + 1 }).eq('id', parent.id)
         .then(({ error: e }) => { if (e) log('warn', 'blog_view_count_failed', { error: e.message }); });
+      const alternates = await buildBlogAlternates(parent.id, parent.slug, parent.slug_en);
       return res.json({ ok: true, post: {
         slug: tr.slug, title: tr.title, meta_description: tr.meta_description, excerpt: tr.excerpt,
         content: tr.content, cover_image_url: parent.cover_image_url, author: parent.author, published_at: parent.published_at,
+        language: lang, alternates,
       } });
     }
 
@@ -108,7 +132,8 @@ app.get('/blog-posts/:slug', rateLimit('content', 2500, 60000), async (req, res)
     if (!data) return res.status(404).json({ ok: false, error: 'Beitrag nicht gefunden' });
     supa.from('blog_posts').update({ views_count: (data.views_count || 0) + 1 }).eq('id', data.id)
       .then(({ error: e }) => { if (e) log('warn', 'blog_view_count_failed', { error: e.message }); });
-    res.json({ ok: true, post: data });
+    const alternates = await buildBlogAlternates(data.id, data.slug, data.slug_en);
+    res.json({ ok: true, post: { ...data, language: 'de', alternates } });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -225,6 +250,35 @@ app.get('/route-pages', rateLimit('content', 2500, 60000), async (req, res) => {
       return { ...rest, indexable };
     });
     res.json({ ok: true, page, hasMore: rows.length === ROUTE_PAGES_PAGE_SIZE, routes });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── GET /route-pages-audit ───────────────────────────────────
+// [P0-9] Dedicated data-quality audit feed. Unlike the public /route-pages list
+// (which strips avg_duration_min/stop_distribution/price_*/… to keep the SEO
+// payload small), this returns the FULL field set every route-data-audit check
+// needs, so the auditor can actually see the data it claims to check. Internal:
+// guarded by a shared AUDIT_TOKEN (feature-off → 404 when the token is unset),
+// never part of the public API. Paginated like the other list feeds.
+app.get('/route-pages-audit', rateLimit('content', 600, 60000), async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const expected = process.env.AUDIT_TOKEN;
+    if (!expected) return res.status(404).json({ ok: false, error: 'not found' });
+    const provided = req.get('x-audit-token');
+    if (!provided || provided !== expected) return res.status(403).json({ ok: false, error: 'forbidden' });
+    const PAGE_SIZE = 1000;
+    const page = Math.max(0, parseInt(req.query.page, 10) || 0);
+    const from = page * PAGE_SIZE;
+    const { data, error } = await supa.from('route_pages')
+      .select('slug,status,origin_iata,destination_iata,origin_city,destination_city,distance_km,haul_type,airline_count,avg_duration_min,min_duration_min,stop_distribution,all_direct,price_min,price_avg,price_max,price_sample_count,itinerary_count,price_updated_at,insights_updated_at,intro_text,custom_faq')
+      .order('slug', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) throw new Error(error.message);
+    const rows = data || [];
+    res.json({ ok: true, page, hasMore: rows.length === PAGE_SIZE, routes: rows });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }

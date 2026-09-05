@@ -23,8 +23,8 @@
 const supa = require('../clients/supabase');
 const rateLimit = require('../middleware/rateLimit');
 const {
-  routeIndexable, cityIndexable, countryIndexable, airlineIndexable,
-  cityDestinationCount, countryConnectivityScore,
+  routeIndexable, cityIndexable, countryIndexable, airlineIndexable, airportIndexable,
+  cityDestinationCount, countryConnectivityScore, airportDestinationCount,
 } = require('../services/indexability');
 const { getIndexabilityData } = require('../services/indexabilityData');
 
@@ -101,6 +101,44 @@ module.exports = (app) => {
         .filter((c) => cityIndexable(c, cityDestinationCount(connectivity, c.city_slug)))
         .map((c) => ({ id: c.city_slug, lastmod: resolveLastmod(c.created_at) }));
       respond(res, page, rows.length, items);
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // ─── airports ─── [P0-10] SINGLE SOURCE OF TRUTH for airport indexability.
+  // The set of airports that HAVE a page = every IATA code that appears in a
+  // published route (connectivity.airportDest keys) UNION every authoritative
+  // published `airports` row. Each code's indexable flag is the SAME rule the
+  // airport renderer applies (airportIndexable = ≥2 distinct destinations OR
+  // admin traveler content), computed from the shared connectivity — so the
+  // sitemap, the renderer, /airports, and audits can never disagree, including
+  // for "fallback" airports that have no authoritative row. Returned in one page
+  // (airport count is bounded); every code carries its `indexable` flag so the
+  // frontend can exclude noindex airports (not just table-flagged ones).
+  app.get('/sitemap-data/airports', limit, async (req, res) => {
+    try {
+      if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+      const { connectivity } = await getIndexabilityData();
+      // Authoritative rows carry the admin traveler-content fields the rule reads.
+      const { data: rows, error } = await supa.from('airports')
+        .select('iata_code,terminal_info,transit_options,traveler_tips,created_at')
+        .eq('status', 'published');
+      if (error) throw new Error(error.message);
+      const byCode = new Map();
+      for (const a of rows || []) byCode.set(a.iata_code, a);
+      // Union: authoritative codes + every code appearing in a published route.
+      const codes = new Set(byCode.keys());
+      for (const code of connectivity.airportDest.keys()) codes.add(code);
+      const items = [];
+      for (const code of codes) {
+        const row = byCode.get(code) || {};
+        const indexable = airportIndexable(row, airportDestinationCount(connectivity, code));
+        items.push({ id: code, indexable, lastmod: resolveLastmod(row.created_at) });
+      }
+      items.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      // Single page: the airport universe is small relative to routes.
+      res.json({ ok: true, page: 0, hasMore: false, items });
     } catch (err) {
       res.status(500).json({ ok: false, error: err.message });
     }
