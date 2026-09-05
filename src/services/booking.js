@@ -157,17 +157,46 @@ async function computeAuthoritativePricing(offerId, requestedServices, promoCode
   // seat maps here too and merging their priced seat services into the
   // same lookup table available_services uses fixes both the live total
   // AND what's actually validated/charged at checkout.
-  // [PERF-INSTRUMENT · P0.1] Each Duffel call is timed individually (they
-  // still run in the SAME Promise.all, exactly as before) so we can tell
-  // /air/offers apart from /air/seat_maps — the whole point of P0.2. The
-  // .catch() on seat_maps is unchanged; the timing is captured in `finally`
-  // so a caught seat_maps failure still records how long it actually took
-  // (a silently-caught 40s timeout is precisely what we're hunting for).
-  const [offerCheck, seatMapsResult] = await Promise.all([
-    (async () => { const _s = Date.now(); try { return await duffel('GET', `/air/offers/${offerId}?return_available_services=true`); } finally { _perfOffersMs = Date.now() - _s; } })(),
-    (async () => { const _s = Date.now(); try { return await duffel('GET', `/air/seat_maps?offer_id=${encodeURIComponent(offerId)}`).catch(() => ({ data: [] })); } finally { _perfSeatMapsMs = Date.now() - _s; } })(),
-  ]);
+  // [PERF · P0.4] Fetch the offer first (ALWAYS needed: ticket price +
+  // baggage services), then fetch /air/seat_maps ONLY when a requested
+  // service could actually be a seat. Seats appear EXCLUSIVELY via
+  // /air/seat_maps (never in the offer's available_services — see the
+  // [SEAT-PRICING-FIX] note above), so the (heavy) seat map is needed only
+  // to validate/price a chosen seat. /price-preview is called after every
+  // bag/seat toggle, but the vast majority of those calls have no seat
+  // selected — yet the previous code fetched the full seat map on EVERY
+  // call. That heavy call is the prime suspect for the ~40s p95 (it is the
+  // one wrapped in .catch(), so a 40s upstream timeout was silently
+  // absorbed while still costing the full 40s). Skipping it whenever no
+  // seat is requested removes that upstream call from the hot path
+  // entirely, WITHOUT changing any price: a request with no seat has no
+  // seat to validate or charge for, so seatServices would have been empty
+  // anyway. When a seat IS requested, behaviour is identical to before
+  // (seat_maps fetched, seat validated/priced) — the two calls just run
+  // sequentially on that minority path, which is already dominated by the
+  // seat_maps cost.
+  //
+  // [PERF-INSTRUMENT · P0.1] Each Duffel call is still timed individually
+  // (in a finally, so a caught seat_maps failure still records its real
+  // duration); seat_maps_ms stays 0 and seat_maps_skipped=true when the
+  // call is skipped.
+  //
+  // NOTE (P0.2 GATE): this optimization must not ship until production
+  // pricing_timing evidence confirms seat_maps is the dominant cost.
+  let _perfSeatMapsSkipped = false;
+  const offerCheck = await (async () => { const _s = Date.now(); try { return await duffel('GET', `/air/offers/${offerId}?return_available_services=true`); } finally { _perfOffersMs = Date.now() - _s; } })();
   const baggageServices = (offerCheck.data && offerCheck.data.available_services) || [];
+  const _baggageIdSet = new Set(baggageServices.map((s) => s && s.id));
+  // A requested service id that isn't a known baggage service can only be a
+  // seat (the sole other service type this flow handles) — so nothing needs
+  // the seat map unless at least one such id is present.
+  const _needsSeatMaps = (requestedServices || []).some((s) => s && s.id && !_baggageIdSet.has(s.id));
+  let seatMapsResult = { data: [] };
+  if (_needsSeatMaps) {
+    seatMapsResult = await (async () => { const _s = Date.now(); try { return await duffel('GET', `/air/seat_maps?offer_id=${encodeURIComponent(offerId)}`).catch(() => ({ data: [] })); } finally { _perfSeatMapsMs = Date.now() - _s; } })();
+  } else {
+    _perfSeatMapsSkipped = true;
+  }
   const seatServices = [];
   for (const sm of (seatMapsResult.data || [])) {
     for (const cabin of (sm.cabins || [])) {
@@ -279,6 +308,7 @@ async function computeAuthoritativePricing(offerId, requestedServices, promoCode
       duffel_ms: _perfDuffelMs,
       offers_ms: _perfOffersMs,
       seat_maps_ms: _perfSeatMapsMs,
+      seat_maps_skipped: _perfSeatMapsSkipped,
       tiers_ms: _perfTiersMs,
       promo_ms: _perfPromoMs,
       loyalty_ms: _perfLoyaltyMs,

@@ -144,6 +144,63 @@ describe('computeAuthoritativePricing', () => {
     expect(result.ticketMargin).toBe(26);
     expect(result.preDiscountTotal).toBe(226);
   });
+
+  // [PERF · P0.4] /air/seat_maps is only needed to validate/price a chosen
+  // SEAT (seats never appear in the offer's available_services). So it must
+  // be skipped entirely when no requested service could be a seat, and still
+  // fetched when one could — without changing the price either way.
+  test('does NOT call /air/seat_maps when no service is requested', async () => {
+    const calls = [];
+    mockDuffelFn.mockImplementation((method, path) => {
+      calls.push(path);
+      if (path.includes('/air/seat_maps')) return Promise.resolve({ data: [] });
+      if (path.includes('return_available_services=true')) {
+        return Promise.resolve({ data: { total_amount: '100', total_currency: 'EUR', passengers: [{ type: 'adult' }], available_services: [] } });
+      }
+      return Promise.reject(new Error('unexpected duffel call: ' + path));
+    });
+    const result = await computeAuthoritativePricing('off_1', [], null, null, null, false);
+    expect(result.duffelAmount).toBe(100);
+    expect(calls.some((p) => p.includes('/air/seat_maps'))).toBe(false);
+    expect(calls.some((p) => p.includes('/air/offers/off_1'))).toBe(true);
+  });
+
+  test('does NOT call /air/seat_maps when only a known baggage service is requested', async () => {
+    const calls = [];
+    mockDuffelFn.mockImplementation((method, path) => {
+      calls.push(path);
+      if (path.includes('/air/seat_maps')) return Promise.resolve({ data: [] });
+      if (path.includes('return_available_services=true')) {
+        return Promise.resolve({ data: { total_amount: '100', total_currency: 'EUR', passengers: [{ type: 'adult' }],
+          available_services: [{ id: 'bag_1', type: 'baggage', total_amount: '20', total_currency: 'EUR', maximum_quantity: 2 }] } });
+      }
+      return Promise.reject(new Error('unexpected duffel call: ' + path));
+    });
+    const result = await computeAuthoritativePricing('off_1', [{ id: 'bag_1', quantity: 1 }], null, null, null, false);
+    // net 100 ticket + 20 baggage => duffelAmount 120
+    expect(result.duffelAmount).toBe(120);
+    expect(calls.some((p) => p.includes('/air/seat_maps'))).toBe(false);
+  });
+
+  test('DOES call /air/seat_maps when a non-baggage (seat) service is requested', async () => {
+    const calls = [];
+    mockDuffelFn.mockImplementation((method, path) => {
+      calls.push(path);
+      if (path.includes('/air/seat_maps')) {
+        return Promise.resolve({ data: [ { cabins: [ { rows: [ { sections: [ { elements: [
+          { type: 'seat', available_services: [{ id: 'seat_9', total_amount: '15', total_currency: 'EUR' }] },
+        ] } ] } ] } ] } ] });
+      }
+      if (path.includes('return_available_services=true')) {
+        return Promise.resolve({ data: { total_amount: '100', total_currency: 'EUR', passengers: [{ type: 'adult' }], available_services: [] } });
+      }
+      return Promise.reject(new Error('unexpected duffel call: ' + path));
+    });
+    const result = await computeAuthoritativePricing('off_1', [{ id: 'seat_9', quantity: 1 }], null, null, null, false);
+    expect(calls.some((p) => p.includes('/air/seat_maps'))).toBe(true);
+    // seat net 15 priced in => duffelAmount 115
+    expect(result.duffelAmount).toBe(115);
+  });
 });
 
 describe('bookFromSession', () => {
