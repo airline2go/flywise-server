@@ -294,7 +294,7 @@ app.post('/create-checkout-session', rateLimit('pay', 15, 60000), attachUserIfPr
     try {
       // [LOYALTY-TIMING-FIX] true — this IS the actual checkout/payment
       // step, the only point where a loyalty discount should ever apply.
-      pricing = await computeAuthoritativePricing(offer_id, services, promo_code, device_id, req.userId, true);
+      pricing = await computeAuthoritativePricing(offer_id, services, promo_code, device_id, req.userId, true, 'checkout-session');
     } catch (e) {
       log('warn', 'pricing_compute_failed', { offer_id, error: e.message });
       return res.status(409).json({ ok: false, code: 'OFFER_UNAVAILABLE', error: 'Dieses Angebot ist nicht mehr verfügbar. Bitte erneut suchen.' });
@@ -471,7 +471,7 @@ app.post('/price-preview', rateLimit('pay', 30, 60000), attachUserIfPresent, asy
       // server didn't actually have, and /create-checkout-session's own
       // (correct) recomputation kept disagreeing with it — surfacing as
       // the same "Der Preis hat sich geändert" dialog on every booking.
-      pricing = await computeAuthoritativePricing(offer_id, services, promo_code, device_id, req.userId, !!apply_loyalty);
+      pricing = await computeAuthoritativePricing(offer_id, services, promo_code, device_id, req.userId, !!apply_loyalty, 'price-preview');
     } catch (e) {
       log('warn', 'price_preview_failed', { offer_id, error: e.message });
       return res.status(409).json({ ok: false, code: 'OFFER_UNAVAILABLE', error: 'Dieses Angebot ist nicht mehr verfügbar. Bitte erneut suchen.' });
