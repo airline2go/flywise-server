@@ -127,7 +127,19 @@ async function incrementPromoUsage(promoId) {
 // the server's own promo_codes table. Used by BOTH /create-checkout-session
 // (before payment) and bookFromSession (right before booking), so the two
 // can never disagree.
-async function computeAuthoritativePricing(offerId, requestedServices, promoCode, deviceId, userId, applyLoyalty) {
+async function computeAuthoritativePricing(offerId, requestedServices, promoCode, deviceId, userId, applyLoyalty, perfLabel) {
+  // [PERF-INSTRUMENT · P0.1] Pure timing instrumentation — measures how long
+  // each stage of this function takes and emits ONE structured log line at
+  // the end. It changes NOTHING about the pricing result, the order of
+  // operations, or the values returned; every _perf* variable is write-only
+  // for logging. Deliberately logs NO card data, tokens, secrets, PII, or
+  // full payment details — only stage durations in ms plus non-sensitive
+  // shape counts (offer_id is already logged elsewhere in this same flow).
+  // Lets P0.2 prove, with real production numbers, whether the ~40s p95 on
+  // /price-preview is Duffel offers, Duffel seat_maps, DB, or the retry ×
+  // timeout combination — instead of guessing.
+  const _perfStart = Date.now();
+  let _perfOffersMs = 0, _perfSeatMapsMs = 0;
   // [SEAT-PRICING-FIX] Per Duffel's own seat-maps docs: "A seat is a
   // special kind of service in that they're NOT shown when getting an
   // individual offer with return_available_services set to true. They're
@@ -145,9 +157,15 @@ async function computeAuthoritativePricing(offerId, requestedServices, promoCode
   // seat maps here too and merging their priced seat services into the
   // same lookup table available_services uses fixes both the live total
   // AND what's actually validated/charged at checkout.
+  // [PERF-INSTRUMENT · P0.1] Each Duffel call is timed individually (they
+  // still run in the SAME Promise.all, exactly as before) so we can tell
+  // /air/offers apart from /air/seat_maps — the whole point of P0.2. The
+  // .catch() on seat_maps is unchanged; the timing is captured in `finally`
+  // so a caught seat_maps failure still records how long it actually took
+  // (a silently-caught 40s timeout is precisely what we're hunting for).
   const [offerCheck, seatMapsResult] = await Promise.all([
-    duffel('GET', `/air/offers/${offerId}?return_available_services=true`),
-    duffel('GET', `/air/seat_maps?offer_id=${encodeURIComponent(offerId)}`).catch(() => ({ data: [] })),
+    (async () => { const _s = Date.now(); try { return await duffel('GET', `/air/offers/${offerId}?return_available_services=true`); } finally { _perfOffersMs = Date.now() - _s; } })(),
+    (async () => { const _s = Date.now(); try { return await duffel('GET', `/air/seat_maps?offer_id=${encodeURIComponent(offerId)}`).catch(() => ({ data: [] })); } finally { _perfSeatMapsMs = Date.now() - _s; } })(),
   ]);
   const baggageServices = (offerCheck.data && offerCheck.data.available_services) || [];
   const seatServices = [];
@@ -170,8 +188,10 @@ async function computeAuthoritativePricing(offerId, requestedServices, promoCode
   const netTicketPrice = parseFloat(offerCheck.data && offerCheck.data.total_amount || 0);
   const currency = (offerCheck.data && offerCheck.data.total_currency) || 'EUR';
 
+  const _perfTiersStart = Date.now();
   const ticketTiers = await getTicketProfitTiers();
   const ancillaryTiers = await getAncillaryProfitTiers();
+  const _perfTiersMs = Date.now() - _perfTiersStart; // DB margin tiers (cache hit ≈ 0)
   // [PRICING-FIX] Same per-passenger margin logic as normalizeOffer() —
   // the fixed-amount part of a tier (e.g. "+500€") is meant to apply once
   // PER PASSENGER, not once for the whole multi-passenger booking. Duffel
@@ -207,6 +227,7 @@ async function computeAuthoritativePricing(offerId, requestedServices, promoCode
   // What the customer would pay before any promo/loyalty discount.
   const preDiscountTotal = Math.round((netTicketPrice + ticketMargin + netServicesTotal + servicesMargin) * 100) / 100;
 
+  const _perfPromoStart = Date.now();
   let promoRow = null, promoDiscount = 0, promoStatus = null;
   if (promoCode) {
     const lookup = await lookupPromoCode(promoCode);
@@ -218,6 +239,7 @@ async function computeAuthoritativePricing(offerId, requestedServices, promoCode
       promoStatus = (lookup && lookup.reason) || 'invalid';
     }
   }
+  const _perfPromoMs = Date.now() - _perfPromoStart; // DB promo lookup (0 if no code)
 
   // [LOYALTY-TIMING-FIX] The loyalty discount must only ever be COMPUTED
   // (and therefore shown as a price reduction) at the actual checkout
@@ -230,12 +252,42 @@ async function computeAuthoritativePricing(offerId, requestedServices, promoCode
   // account (loyaltyAccount) so its balance/tier can be shown for
   // informational purposes, but loyaltyDiscount itself stays 0 unless the
   // caller explicitly passes applyLoyalty=true.
+  const _perfLoyaltyStart = Date.now();
   let loyaltyDiscount = 0, loyaltyAccount = null;
   if (userId) {
     const result = await computeLoyaltyDiscount('user', userId, preDiscountTotal);
     loyaltyAccount = result.account;
     if (applyLoyalty) loyaltyDiscount = result.discount;
   }
+  const _perfLoyaltyMs = Date.now() - _perfLoyaltyStart; // DB loyalty account (0 if guest)
+
+  // [PERF-INSTRUMENT · P0.1] One structured line per pricing computation.
+  // duffel_ms is the wall-clock of the parallel pair (the slower of the
+  // two, ≈ what the customer waits), while offers_ms/seat_maps_ms break it
+  // apart. `other_ms` is everything not otherwise attributed (pricing math,
+  // validateServices' own work, serialization) — normally single-digit ms.
+  // Emitted at info level: prints to the Render/Sentry console stream, and
+  // is intentionally NOT persisted to error_logs (that path is warn/error
+  // only), so this adds no per-request DB write.
+  try {
+    const _perfTotalMs = Date.now() - _perfStart;
+    const _perfDuffelMs = Math.max(_perfOffersMs, _perfSeatMapsMs);
+    log('info', 'pricing_timing', {
+      label: perfLabel || null,
+      offer_id: offerId,
+      total_ms: _perfTotalMs,
+      duffel_ms: _perfDuffelMs,
+      offers_ms: _perfOffersMs,
+      seat_maps_ms: _perfSeatMapsMs,
+      tiers_ms: _perfTiersMs,
+      promo_ms: _perfPromoMs,
+      loyalty_ms: _perfLoyaltyMs,
+      other_ms: Math.max(0, _perfTotalMs - _perfDuffelMs - _perfTiersMs - _perfPromoMs - _perfLoyaltyMs),
+      services_count: (requestedServices || []).length,
+      authed: !!userId,
+      applied_loyalty: !!applyLoyalty,
+    });
+  } catch (_e) { /* timing log must never affect pricing */ }
 
   const totalDiscount = Math.min(promoDiscount + loyaltyDiscount, preDiscountTotal);
   const customerAmount = Math.round((preDiscountTotal - totalDiscount) * 100) / 100;
@@ -289,7 +341,7 @@ async function bookFromSession(session_id, session) {
     // (and was charged via Stripe) at the payment step must be re-applied
     // identically here so applyLoyaltyForBooking() below deducts the
     // correct amount from their real balance.
-    pricing = await computeAuthoritativePricing(booking.offer_id, booking.services || [], booking.promo_code || null, booking.device_id || null, booking.user_id || null, true);
+    pricing = await computeAuthoritativePricing(booking.offer_id, booking.services || [], booking.promo_code || null, booking.device_id || null, booking.user_id || null, true, 'book-from-session');
     payAmount = String(pricing.duffelAmount);
     payCurrency = pricing.currency;
     safeServices = pricing.safeServices;
