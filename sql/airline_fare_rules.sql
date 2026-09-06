@@ -85,12 +85,17 @@ create index if not exists afr_airline_idx  on airline_fare_rules (airline_iata,
 create index if not exists afr_active_idx   on airline_fare_rules (airline_iata) where active = true;
 create index if not exists afr_effective_idx on airline_fare_rules (effective_from, effective_until);
 
--- Keep updated_at honest.
-create or replace function afr_touch_updated_at() returns trigger as $$
+-- Keep updated_at honest. `set search_path = ''` pins the resolution path so
+-- the function can't be hijacked via a mutable search_path (Supabase linter
+-- 0011); the body references no unqualified objects, so this is purely safe.
+create or replace function afr_touch_updated_at() returns trigger
+  language plpgsql
+  set search_path = ''
+as $$
 begin
   new.updated_at := now();
   return new;
-end; $$ language plpgsql;
+end; $$;
 drop trigger if exists afr_touch on airline_fare_rules;
 create trigger afr_touch before update on airline_fare_rules
   for each row execute function afr_touch_updated_at();
