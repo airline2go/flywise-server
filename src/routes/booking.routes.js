@@ -139,7 +139,23 @@ app.post('/seatmaps', rateLimit('pay', 20, 60000), async (req, res) => {
     // synchronous — awaiting inside a nested nested .map() would silently
     // produce arrays of unresolved Promises instead of seat objects.
     const ancillaryTiers = await getAncillaryProfitTiers();
-    res.json({ ok: true, seatMaps: maps.map(sm => normalizeSeatMap(sm, ancillaryTiers, passengerOrder)), passengerOrder });
+    const normalized = maps.map(sm => normalizeSeatMap(sm, ancillaryTiers, passengerOrder));
+    // [SEAT-PRICE-AUDIT] Log every priced seat's EXACT Duffel net vs the price
+    // shown, per segment, so any "this seat costs X" report is traceable to the
+    // raw Duffel number. Since seats now carry no Airpiv markup, net === price;
+    // this makes that guarantee auditable in production logs. Best-effort.
+    try {
+      normalized.forEach((sm, i) => {
+        const seats = [];
+        (sm?.cabins || []).forEach(cab => (cab.rows || []).forEach(row => (row.sections || []).forEach(sec => (sec.elements || []).forEach(el => {
+          if (el.type === 'seat' && el.available && el.netPrice != null) {
+            seats.push({ d: el.designator, net: el.netPrice, price: el.price, cur: el.currency });
+          }
+        }))));
+        if (seats.length) log('info', 'seat_price_audit', { offer_id, segmentIndex: i, segmentId: sm?.segmentId || null, seatCount: seats.length, seats: seats.slice(0, 60) });
+      });
+    } catch (_) { /* auditing must never break the seat map response */ }
+    res.json({ ok: true, seatMaps: normalized, passengerOrder });
   } catch (err) {
     // Seat maps not supported for this airline/flight -> return empty, not an error
     res.json({ ok: true, seatMaps: [], passengerOrder: [], note: err.message });
@@ -189,10 +205,12 @@ function normalizeSeatMap(sm, ancillaryTiers, offerPassengerOrder) {
             const anyRealPassengerId = svcs.some((svc) => svc.passenger_ids && svc.passenger_ids[0]);
             svcs.forEach((svc, svcIdx) => {
               const netPriceSvc = parseFloat(svc.total_amount || 0);
-              // [FREE-SEAT] A complimentary seat (net 0 — e.g. included in a
-              // higher fare brand) must stay free: never add a tier's fixed
-              // markup onto a 0 net, or a free seat would surface as paid.
-              const marginSvc = netPriceSvc > 0 ? computeTieredMargin(netPriceSvc, ancillaryTiers) : 0;
+              // [SEAT-EXACT-DUFFEL] Seats are shown AND charged at Duffel's
+              // exact net price — Airpiv adds no markup on seat selection. The
+              // customer sees the airline's real seat fee, nothing added. (Free
+              // seats, net 0, remain free as before.) This is intentionally
+              // different from baggage, which still carries the ancillary tier.
+              const marginSvc = 0;
               let pid = (svc.passenger_ids && svc.passenger_ids[0]) || null;
               if (!pid && !anyRealPassengerId) {
                 pid = offerPassengerOrder[svcIdx] || null;
@@ -209,7 +227,7 @@ function normalizeSeatMap(sm, ancillaryTiers, offerPassengerOrder) {
             });
             const svc = svcs[0] || null;
             const netPrice = svc ? parseFloat(svc.total_amount || 0) : null;
-            const margin = (netPrice != null && netPrice > 0) ? computeTieredMargin(netPrice, ancillaryTiers) : 0;
+            const margin = 0; // [SEAT-EXACT-DUFFEL] no Airpiv markup on seats — price = Duffel net
             return {
               type: 'seat',
               designator: el.designator || null,
