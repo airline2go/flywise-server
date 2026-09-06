@@ -220,6 +220,32 @@ describe('computeAuthoritativePricing', () => {
     expect(calls.some((p) => p.includes('/air/seat_maps'))).toBe(true);
     // seat net 15 priced in => duffelAmount 115
     expect(result.duffelAmount).toBe(115);
+    // [SEAT-EXACT-DUFFEL] The seat carries NO Airpiv markup: the customer is
+    // charged the seat's exact Duffel net (15) on top of the ticket (100 + 13
+    // ticket margin) = 128 — never 133. Locks "seat price = Duffel exact".
+    expect(result.customerAmount).toBe(128);
+  });
+
+  test('[SEAT-EXACT-DUFFEL] a seat is charged at exact Duffel net while baggage keeps its margin', async () => {
+    mockDuffelFn.mockImplementation((method, path) => {
+      if (path.includes('/air/seat_maps')) {
+        return Promise.resolve({ data: [ { cabins: [ { rows: [ { sections: [ { elements: [
+          { type: 'seat', available_services: [{ id: 'seat_9', total_amount: '26', total_currency: 'EUR' }] },
+        ] } ] } ] } ] } ] });
+      }
+      if (path.includes('return_available_services=true')) {
+        return Promise.resolve({ data: { total_amount: '100', total_currency: 'EUR', passengers: [{ type: 'adult' }],
+          available_services: [{ id: 'bag_1', type: 'baggage', total_amount: '20', total_currency: 'EUR', maximum_quantity: 2 }] } });
+      }
+      return Promise.reject(new Error('unexpected duffel call: ' + path));
+    });
+    // Seat only: exactly Duffel net (26), no markup → 100 + 13 + 26 = 139.
+    const seatOnly = await computeAuthoritativePricing('off_1', [{ id: 'seat_9', quantity: 1 }], null, null, null, false);
+    expect(seatOnly.duffelAmount).toBe(126);
+    expect(seatOnly.customerAmount).toBe(139); // NOT 144 — the +5 tier never touches a seat
+    // Baggage still carries the ancillary margin (proves the change is seat-scoped).
+    const bagOnly = await computeAuthoritativePricing('off_1', [{ id: 'bag_1', quantity: 1 }], null, null, null, false);
+    expect(bagOnly.customerAmount).toBeGreaterThan(bagOnly.duffelAmount + 13);
   });
 });
 
