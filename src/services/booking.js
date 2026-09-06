@@ -272,12 +272,9 @@ async function computeAuthoritativePricing(offerId, requestedServices, promoCode
   const ticketMargin = Math.round(marginPerPassenger * ticketPassengerCount * 100) / 100;
 
   const byId = new Map(avail.map((s) => [s.id, s]));
-  // [SEAT-EXACT-DUFFEL] Seat services are charged at Duffel's exact net — no
-  // Airpiv markup — so the amount charged matches what the seat map showed the
-  // customer. Baggage services still carry the ancillary tier. seatServices was
-  // collected above straight from /air/seat_maps, so its ids are exactly the
-  // seat services (everything else in `avail` is baggage).
-  const _seatIdSet = new Set(seatServices.map((s) => s.id));
+  // [SEAT-MARGIN-REENABLED] Seat services now carry the same ancillary profit
+  // tier as baggage — the customer-facing seat price = Duffel net + margin, and
+  // that margin is charged at checkout. A net-0 (free) seat/bag stays free.
   let netServicesTotal = 0, servicesMargin = 0;
   for (const svc of safeServices) {
     const av = byId.get(svc.id);
@@ -285,11 +282,8 @@ async function computeAuthoritativePricing(offerId, requestedServices, promoCode
     const qty = svc.quantity || 1;
     const netUnit = parseFloat(av.total_amount);
     netServicesTotal += netUnit * qty;
-    // Seats: exact Duffel net (no margin). Baggage: net 0 stays free, otherwise
-    // the ancillary tier applies.
-    const unitMargin = _seatIdSet.has(svc.id)
-      ? 0
-      : (netUnit > 0 ? computeTieredMargin(netUnit, ancillaryTiers) : 0);
+    // Seats and baggage alike: net 0 stays free, otherwise the ancillary tier applies.
+    const unitMargin = netUnit > 0 ? computeTieredMargin(netUnit, ancillaryTiers) : 0;
     servicesMargin += unitMargin * qty;
   }
   netServicesTotal = Math.round(netServicesTotal * 100) / 100;
