@@ -158,6 +158,23 @@ test('TEST 10: Duffel 0-checked wins over general airline policy', () => {
   expect(b.checked.source).toBe(SOURCE.DUFFEL);
 });
 
+// ── AUDIT: Duffel-confirmed inclusion + LOW-enriched weight ───
+// When Duffel confirms a bag is included but omits the weight, enriching the
+// weight from a LOW general-policy rule must NOT make that weight "confirmed".
+// The frontend relies on weight_confirmed to avoid showing a guessed kg as fact.
+test('AUDIT: enriched weight stays unconfirmed even when inclusion is confirmed', () => {
+  const b = resolveBaggage({
+    duffelBags: [{ type: 'carry_on', quantity: 1 }], // included, no weight
+    ctx: { airline: 'LH', cabin: 'economy' },
+    rules: [rule({ baggage_type: BAGGAGE_TYPE.CABIN, fare_family: null, weight_kg: 8, confidence: 'LOW', source_type: 'VERIFIED_PROVIDER' })],
+  });
+  expect(b.cabin.included).toBe(true);
+  expect(b.cabin.confirmed).toBe(true);        // inclusion is Duffel-confirmed
+  expect(b.cabin.weight_kg).toBe(8);           // enriched for reference
+  expect(b.cabin.weight_confidence).toBe(CONFIDENCE.LOW);
+  expect(b.cabin.weight_confirmed).toBe(false); // but the weight is NOT a fact
+});
+
 // ── matching ladder precision → confidence ────────────────────
 describe('matching ladder', () => {
   const ctx = { airline: 'LH', cabin: 'economy', fareFamily: 'Economy Classic', bookingClass: 'K' };
