@@ -220,13 +220,13 @@ describe('computeAuthoritativePricing', () => {
     expect(calls.some((p) => p.includes('/air/seat_maps'))).toBe(true);
     // seat net 15 priced in => duffelAmount 115
     expect(result.duffelAmount).toBe(115);
-    // [SEAT-EXACT-DUFFEL] The seat carries NO Airpiv markup: the customer is
-    // charged the seat's exact Duffel net (15) on top of the ticket (100 + 13
-    // ticket margin) = 128 — never 133. Locks "seat price = Duffel exact".
-    expect(result.customerAmount).toBe(128);
+    // [SEAT-MARGIN-REENABLED] The seat carries the ancillary tier (0-100: 10% + 1)
+    // => 15*0.10 + 1 = 2.5. Customer = ticket (100 + 13) + seat net 15 + seat
+    // margin 2.5 = 130.5. Locks "seat price = Duffel net + ancillary margin".
+    expect(result.customerAmount).toBe(130.5);
   });
 
-  test('[SEAT-EXACT-DUFFEL] a seat is charged at exact Duffel net while baggage keeps its margin', async () => {
+  test('[SEAT-MARGIN-REENABLED] a seat carries the ancillary margin, same as baggage', async () => {
     mockDuffelFn.mockImplementation((method, path) => {
       if (path.includes('/air/seat_maps')) {
         return Promise.resolve({ data: [ { cabins: [ { rows: [ { sections: [ { elements: [
@@ -239,11 +239,11 @@ describe('computeAuthoritativePricing', () => {
       }
       return Promise.reject(new Error('unexpected duffel call: ' + path));
     });
-    // Seat only: exactly Duffel net (26), no markup → 100 + 13 + 26 = 139.
+    // Seat net 26 + ancillary margin (26*0.10 + 1 = 3.6) → 100 + 13 + 26 + 3.6 = 142.6.
     const seatOnly = await computeAuthoritativePricing('off_1', [{ id: 'seat_9', quantity: 1 }], null, null, null, false);
     expect(seatOnly.duffelAmount).toBe(126);
-    expect(seatOnly.customerAmount).toBe(139); // NOT 144 — the +5 tier never touches a seat
-    // Baggage still carries the ancillary margin (proves the change is seat-scoped).
+    expect(seatOnly.customerAmount).toBe(142.6); // seat now carries the ancillary tier
+    // Baggage carries the same ancillary margin.
     const bagOnly = await computeAuthoritativePricing('off_1', [{ id: 'bag_1', quantity: 1 }], null, null, null, false);
     expect(bagOnly.customerAmount).toBeGreaterThan(bagOnly.duffelAmount + 13);
   });
