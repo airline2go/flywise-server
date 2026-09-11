@@ -385,3 +385,112 @@ describe('bookFromSession', () => {
     expect(mockRefundsCreate).not.toHaveBeenCalled();
   });
 });
+
+// [FREE-CHAIR-FIX] A paid seat the customer selected must always be priced,
+// charged and booked — only a genuinely free (net 0) seat stays free. Seat-map
+// service ids are only meaningful within the seat_maps response that produced
+// them, so the id the browser captured earlier is not guaranteed to appear in
+// the fresh seat_maps fetch done at pricing/booking time. Matching by that id
+// alone silently dropped the seat (shown as a line item but excluded from the
+// total and never charged). These lock re-resolution by stable identity
+// (segment + designator + passenger).
+describe('computeAuthoritativePricing — free-chair seat re-resolution', () => {
+  function mockSeatMapWithFreshId(freshSeatServiceId, { seatNet = '15', passengerIds } = {}) {
+    mockDuffelFn.mockImplementation((method, path) => {
+      if (path.includes('/air/seat_maps')) {
+        return Promise.resolve({ data: [ { segment_id: 'seg_1', cabins: [ { rows: [ { sections: [ { elements: [
+          { type: 'seat', designator: '12C', available_services: [
+            Object.assign({ id: freshSeatServiceId, total_amount: seatNet, total_currency: 'EUR' }, passengerIds ? { passenger_ids: passengerIds } : {}),
+          ] },
+        ] } ] } ] } ] } ] });
+      }
+      if (path.includes('return_available_services=true')) {
+        return Promise.resolve({ data: { total_amount: '100', total_currency: 'EUR', passengers: [{ id: 'pas_a', type: 'adult' }], available_services: [] } });
+      }
+      return Promise.reject(new Error('unexpected duffel call: ' + path));
+    });
+  }
+
+  test('prices a seat whose browser-captured id is stale, by re-resolving via designator', async () => {
+    mockSeatMapWithFreshId('seat_FRESH');
+    // The client sends a now-stale id but the stable seat identity alongside it.
+    const result = await computeAuthoritativePricing(
+      'off_1',
+      [{ id: 'seat_STALE', quantity: 1, designator: '12C', segment_id: 'seg_1', passenger: 0 }],
+      null, null, null, false,
+    );
+    // seat net 15 priced in => duffelAmount 115 (was 100 when the seat was dropped)
+    expect(result.duffelAmount).toBe(115);
+    // ticket (100 + 13) + seat net 15 + ancillary margin (15*0.10 + 1 = 2.5)
+    expect(result.customerAmount).toBe(130.5);
+    // safeServices carries the CURRENT id (so the order books the right seat)
+    // and preserves the seat identity for booking-time re-resolution.
+    expect(result.safeServices).toEqual([
+      { id: 'seat_FRESH', quantity: 1, designator: '12C', segment_id: 'seg_1', passenger: 0 },
+    ]);
+  });
+
+  test('resolves the correct per-passenger service via passenger_ids', async () => {
+    mockDuffelFn.mockImplementation((method, path) => {
+      if (path.includes('/air/seat_maps')) {
+        return Promise.resolve({ data: [ { segment_id: 'seg_1', cabins: [ { rows: [ { sections: [ { elements: [
+          { type: 'seat', designator: '12C', available_services: [
+            { id: 'seat_pax0', total_amount: '15', total_currency: 'EUR', passenger_ids: ['pas_a'] },
+            { id: 'seat_pax1', total_amount: '15', total_currency: 'EUR', passenger_ids: ['pas_b'] },
+          ] },
+        ] } ] } ] } ] } ] });
+      }
+      if (path.includes('return_available_services=true')) {
+        return Promise.resolve({ data: { total_amount: '200', total_currency: 'EUR', passengers: [{ id: 'pas_a', type: 'adult' }, { id: 'pas_b', type: 'adult' }], available_services: [] } });
+      }
+      return Promise.reject(new Error('unexpected duffel call: ' + path));
+    });
+    const result = await computeAuthoritativePricing(
+      'off_1',
+      [{ id: 'stale', quantity: 1, designator: '12C', segment_id: 'seg_1', passenger: 1 }],
+      null, null, null, false,
+    );
+    expect(result.safeServices[0].id).toBe('seat_pax1');
+  });
+
+  test('a genuinely free (net 0) seat stays free', async () => {
+    mockSeatMapWithFreshId('seat_free', { seatNet: '0' });
+    const result = await computeAuthoritativePricing(
+      'off_1',
+      [{ id: 'stale', quantity: 1, designator: '12C', segment_id: 'seg_1', passenger: 0 }],
+      null, null, null, false,
+    );
+    // net 0 seat: no net cost added, no margin added — customer pays ticket only.
+    expect(result.duffelAmount).toBe(100);
+    expect(result.customerAmount).toBe(113);
+  });
+
+  test('an unresolvable seat is not fabricated — it drops as before', async () => {
+    mockSeatMapWithFreshId('seat_FRESH');
+    const result = await computeAuthoritativePricing(
+      'off_1',
+      [{ id: 'stale', quantity: 1, designator: '99Z', segment_id: 'seg_1', passenger: 0 }],
+      null, null, null, false,
+    );
+    expect(result.duffelAmount).toBe(100);
+    expect(result.safeServices).toEqual([]);
+  });
+});
+
+describe('validateServices — seat identity passthrough', () => {
+  test('preserves a seat’s stable identity fields for booking-time re-resolution', async () => {
+    const available = [{ id: 'seat_x', maximum_quantity: 1 }];
+    const result = await validateServices('off_1', [
+      { id: 'seat_x', quantity: 1, designator: '12C', segment_id: 'seg_1', passenger: 0 },
+    ], available);
+    expect(result).toEqual([
+      { id: 'seat_x', quantity: 1, designator: '12C', segment_id: 'seg_1', passenger: 0 },
+    ]);
+  });
+
+  test('a plain baggage service is unchanged (no identity fields added)', async () => {
+    const available = [{ id: 'svc_bag', maximum_quantity: 2 }];
+    const result = await validateServices('off_1', [{ id: 'svc_bag', quantity: 1 }], available);
+    expect(result).toEqual([{ id: 'svc_bag', quantity: 1 }]);
+  });
+});
