@@ -74,10 +74,25 @@ an existing one only needs whichever haven't been run yet):
     marker, same idempotency pattern as `route_refresh_tier.sql`. Needed
     by `src/routes/admin-geo.routes.js` and the rewritten
     `GET /airports/:code` in `src/routes/content.routes.js`.
+11. `reviews_system.sql` — extends the pre-existing (live-only, never
+    defined here) `reviews` table additively into the real reviews
+    system: the canonical `rating` (1–5) kept in sync with the legacy
+    `stars`, `booking_id`/`route_id` foreign keys (server-set, never
+    trusted from the browser), a `status` moderation lifecycle
+    (`pending`/`published`/`rejected`/`deleted`) + server-only `verified`
+    flag, optional per-dimension sub-ratings, display fields
+    (`author_name`/`country`/`language`/`liked_tags`), an
+    `updated_at` trigger, a `unique(user_id, booking_id)` anti-duplicate
+    index, and read-side RLS tightened so the anon key only ever sees
+    `published` rows (or the author's own). One-time publish of the
+    legacy rows is tracked via an `admin_config` marker, same idempotency
+    pattern as `route_refresh_tier.sql`. Needed by
+    `src/services/reviews.js` / `src/routes/reviews.routes.js`.
 
 As of this writing, the first seven have been run against the live
 database. `route_refresh_tier.sql` (#8) and `api_logs.sql` (#9) are new
 and still need to be run once before the route-tiering admin UI and the
 API-monitoring dashboard have any effect. `geo_i18n.sql` (#10) is also
 new and needs to be run once before the Geo CMS / multi-language SEO
-pages have any effect.
+pages have any effect. `reviews_system.sql` (#11) is new and needs to be
+run once before the reviews system has any effect.
