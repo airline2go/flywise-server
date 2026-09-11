@@ -278,7 +278,16 @@ describe('bookFromSession', () => {
 
     const result = await bookFromSession(sessionId, {});
 
-    expect(result).toEqual({ already: true, order_id: 'ord_existing', booking_reference: 'REF_EXISTING' });
+    // [ADS-CONVERSION] idempotent path now also returns the customer-paid
+    // amount + currency (from the persisted payload) so a refresh / double
+    // confirm cannot emit a 0-value conversion.
+    expect(result).toEqual({
+      already: true,
+      order_id: 'ord_existing',
+      booking_reference: 'REF_EXISTING',
+      total_amount: 100,
+      currency: null,
+    });
     expect(mockDuffelFn).not.toHaveBeenCalled();
   });
 
@@ -353,12 +362,17 @@ describe('bookFromSession', () => {
 
     const result = await bookFromSession(sessionId, {});
 
+    // [ADS-CONVERSION] total_amount is now the CUSTOMER-PAID amount (113),
+    // not the Duffel net/supplier amount (100). The Duffel net figures are
+    // still surfaced separately for reference/debugging.
     expect(result).toEqual({
       already: false,
       order_id: 'ord_happy',
       booking_reference: 'REFHAPPY',
-      total_amount: '100',
+      total_amount: 113,
       currency: 'EUR',
+      duffel_net_amount: '100',
+      duffel_net_currency: 'EUR',
     });
     expect(getBookingStatus(sessionId).status).toBe('booked');
     expect(mockRefundsCreate).not.toHaveBeenCalled();

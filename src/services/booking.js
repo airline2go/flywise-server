@@ -382,7 +382,20 @@ async function bookFromSession(session_id, session) {
 
   // 3) Idempotency — already booked for this session
   if (entry.duffel_order_id) {
-    return { already: true, order_id: entry.duffel_order_id, booking_reference: entry.duffel_ref || null };
+    // [ADS-CONVERSION] Return the real customer-paid amount + currency on the
+    // idempotent path too, so a page refresh / double confirm-payment / poll
+    // re-entry still carries an authoritative value (never 0). The customer
+    // charge is persisted on the pending payload at checkout-session time;
+    // it is the same source of truth used on the fresh-booking path below.
+    const p = entry.payload || {};
+    const alreadyCustomerPaid = p.customer_amount != null ? Number(p.customer_amount) : null;
+    return {
+      already: true,
+      order_id: entry.duffel_order_id,
+      booking_reference: entry.duffel_ref || null,
+      total_amount: alreadyCustomerPaid,
+      currency: p.currency || null,
+    };
   }
 
   setBookingStatus(session_id, 'paid');
@@ -771,12 +784,27 @@ async function bookFromSession(session_id, session) {
     }).then(function(){}, function(){});
   }
 
+  // [ADS-CONVERSION] total_amount must represent what the CUSTOMER actually
+  // paid Airpiv (Stripe charge incl. margin, minus promo/loyalty), NOT the
+  // Duffel net/supplier amount (result.data.total_amount). The customer
+  // charge was fixed at checkout-session time and persisted on the pending
+  // booking payload as customer_amount — the single source of truth here
+  // (pricing.customerAmount is an identical recompute and only a fallback).
+  // The conversion/analytics value downstream is derived from this field.
+  const customerPaidFinal = booking.customer_amount != null
+    ? Number(booking.customer_amount)
+    : (pricing ? pricing.customerAmount : null);
   return {
     already: false,
     order_id: orderId,
     booking_reference: bookingRef,
-    total_amount: result.data?.total_amount,
-    currency: result.data?.total_currency,
+    // customer-facing amount (source of the Google Ads / GA4 purchase value)
+    total_amount: customerPaidFinal,
+    currency: payCurrency,
+    // kept for reference/debugging — Duffel net/supplier figures, never the
+    // conversion value.
+    duffel_net_amount: result.data?.total_amount,
+    duffel_net_currency: result.data?.total_currency,
   };
 }
 
