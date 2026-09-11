@@ -126,14 +126,24 @@ end $$;
 -- server uses the service-role key and bypasses RLS for moderation/SSR.
 alter table public.reviews enable row level security;
 
+-- Drop every pre-existing permissive SELECT policy first. Besides
+-- rls_security_fixes.sql's "Anyone can read reviews", the live database also
+-- carried a legacy "read reviews" policy with USING (true) — because RLS
+-- policies are OR-combined, that one alone exposed EVERY row (pending/
+-- rejected/deleted included) to the anon key, defeating the published-only
+-- rule below. Both are removed so published-or-author is the ONLY read path.
 drop policy if exists "Anyone can read reviews" on public.reviews;
+drop policy if exists "read reviews" on public.reviews;
 drop policy if exists "Public can read published reviews" on public.reviews;
 create policy "Public can read published reviews" on public.reviews
   for select using (status = 'published' or auth.uid() = user_id);
 
 -- Author-only insert (kept identical to rls_security_fixes.sql; re-declared
--- idempotently so this file is self-contained on a fresh database).
+-- idempotently so this file is self-contained on a fresh database). The
+-- legacy "write reviews" policy was an exact duplicate — dropped so there is
+-- a single, clearly-named insert policy.
 drop policy if exists "Users can insert their own reviews" on public.reviews;
+drop policy if exists "write reviews" on public.reviews;
 create policy "Users can insert their own reviews" on public.reviews
   for insert with check (auth.uid() = user_id);
 
