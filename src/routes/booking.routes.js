@@ -416,7 +416,36 @@ app.post('/create-checkout-session', rateLimit('pay', 15, 60000), attachUserIfPr
       success_url: redirects.success_url,
       cancel_url: redirects.cancel_url,
       metadata: { flywise: '1' },
+      // [PAYMENT-LIFECYCLE §4] Manual capture: the customer's card is only
+      // AUTHORIZED at checkout (PaymentIntent → requires_capture); the money
+      // is captured ONLY after Duffel confirms the supplier booking (see
+      // bookFromSession), and the authorization is cancelled — never
+      // refunded — if the booking fails first. Payment methods that don't
+      // support manual capture (e.g. Klarna/PayPal) are captured immediately
+      // by Stripe; bookFromSession detects that (PI already `succeeded`) and
+      // keeps the legacy charge/refund fallback for them (hybrid, §44).
+      // The PI carries our own reference so it can always be tied back to the
+      // Airpiv booking/session (§5). No card data or PII is put in metadata.
+      payment_intent_data: {
+        capture_method: 'manual',
+        metadata: { flywise: '1', route_label: route_label || '' },
+      },
     });
+
+    // [PAYMENT-LIFECYCLE §5] Stamp the Checkout Session id onto its
+    // PaymentIntent's metadata now that the session (and its PI, when already
+    // created) exists — so the authoritative Airpiv reference is reachable
+    // from the PaymentIntent side too (admin/reconciliation), not only via
+    // the session→PI link. Best-effort: the PI may not be created until the
+    // customer starts paying, in which case this is a harmless no-op.
+    if (session.payment_intent) {
+      try {
+        await stripe.paymentIntents.update(
+          typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent.id,
+          { metadata: { flywise: '1', airpiv_session: session.id, route_label: route_label || '' } }
+        );
+      } catch (e) { log('warn', 'pi_metadata_stamp_failed', { session: session.id, error: e.message }); }
+    }
 
     // Store booking payload server-side, keyed by session id. Only a small
     // marker goes into Stripe metadata. Everything needed to both book with
@@ -662,11 +691,30 @@ app.post('/confirm-payment', rateLimit('pay', 20, 60000), async (req, res) => {
     }
     inFlight.add(session_id);
 
-    // 1) Retrieve the session and verify payment really succeeded
+    // 1) Retrieve the session and verify the payment is AT LEAST authorized.
+    // [PAYMENT-LIFECYCLE §17] With manual capture, a completed checkout leaves
+    // the money only AUTHORIZED (session.payment_status is typically 'unpaid'
+    // and the PaymentIntent is in `requires_capture`) — it is NOT captured yet.
+    // So we must no longer require payment_status === 'paid'. We accept the
+    // session when it is complete AND either already paid (immediate-capture
+    // method) OR its PaymentIntent is authorized (requires_capture). Capture
+    // itself happens inside bookFromSession, only after Duffel confirms.
     const session = await stripe.checkout.sessions.retrieve(session_id);
-    if (!session || session.payment_status !== 'paid') {
+    if (!session) {
       inFlight.delete(session_id);
-      return res.status(402).json({ ok: false, error: 'Zahlung nicht bestätigt', payment_status: session ? session.payment_status : 'unknown' });
+      return res.status(402).json({ ok: false, error: 'Zahlung nicht bestätigt', payment_status: 'unknown' });
+    }
+    let authorizedOrPaid = session.payment_status === 'paid';
+    if (!authorizedOrPaid && session.status === 'complete' && session.payment_intent && stripe.paymentIntents) {
+      try {
+        const piId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent.id;
+        const pi = await stripe.paymentIntents.retrieve(piId);
+        authorizedOrPaid = pi && (pi.status === 'requires_capture' || pi.status === 'succeeded');
+      } catch (e) { log('warn', 'confirm_pi_check_failed', { session: session_id, error: e.message }); }
+    }
+    if (!authorizedOrPaid) {
+      inFlight.delete(session_id);
+      return res.status(402).json({ ok: false, error: 'Zahlung nicht bestätigt', payment_status: session.payment_status });
     }
 
     const out = await bookFromSession(session_id, session);
@@ -675,21 +723,63 @@ app.post('/confirm-payment', rateLimit('pay', 20, 60000), async (req, res) => {
     // bookFromSession) — returned on BOTH the fresh and idempotent (already)
     // paths so the browser conversion/analytics value is authoritative and
     // never falls back to 0 on a refresh / double confirm / poll re-entry.
-    if (out.already) return res.json({ ok: true, already: true, order_id: out.order_id, booking_reference: out.booking_reference, total_amount: out.total_amount, currency: out.currency });
-    res.json({ ok: true, order_id: out.order_id, booking_reference: out.booking_reference, total_amount: out.total_amount, currency: out.currency });
+    // [PAYMENT-LIFECYCLE §25/§29] payment_status/booking_status/captured are
+    // forwarded so the frontend fires the Google Ads/GA4 purchase ONLY when
+    // payment_status === 'captured' (money actually taken) — never on a mere
+    // authorization. On the idempotent `already` path they may be absent
+    // (booking was completed on an earlier call); the frontend still treats a
+    // returned order_id + amount as a completed booking there.
+    if (out.already) return res.json({ ok: true, already: true, order_id: out.order_id, booking_reference: out.booking_reference, total_amount: out.total_amount, currency: out.currency, payment_status: 'captured', captured: true });
+    res.json({ ok: true, order_id: out.order_id, booking_reference: out.booking_reference, total_amount: out.total_amount, currency: out.currency, payment_status: out.payment_status, booking_status: out.booking_status, captured: !!out.captured });
   } catch (err) {
     inFlight.delete(_sid);
     if (err.code === 'NO_ENTRY') return res.status(400).json({ ok: false, error: err.message });
+    // [PAYMENT-LIFECYCLE §13] Duffel booking SUCCEEDED but Stripe capture
+    // FAILED (or the supplier response was invalid). This is NOT a "charged
+    // with no ticket" emergency and must NOT trigger a refund/cancel — the
+    // flight is booked and the money is still safely authorized. bookFromSession
+    // has already persisted a manual_review_required record and alerted ops.
+    // Surface a non-confirmed, non-error "being finalized" outcome so the
+    // customer is never told "confirmed" and no purchase conversion fires.
+    if (err.code === 'CAPTURE_FAILED_AFTER_BOOKING') {
+      setBookingStatus(req.body && req.body.session_id, 'manual_review', { order_id: err.order_id, booking_reference: err.booking_reference, error: err.message });
+      return res.status(202).json({
+        ok: false, code: 'CAPTURE_FAILED_AFTER_BOOKING', pending: true, manual_review: true,
+        error: err.message, order_id: err.order_id, booking_reference: err.booking_reference,
+        payment_status: 'capture_failed', booking_status: 'manual_review_required',
+      });
+    }
     // [PRICE-DRIFT-PROTECTION] This case already refunded the customer in
     // full inside bookFromSession() before throwing — it's a handled,
     // safe outcome (no money is stuck anywhere), not the "customer was
     // charged with no ticket and no refund" emergency the Sentry alert
     // below exists for. Logged normally, but skips the critical-alert path.
     if (err.code === 'PRICE_DRIFT') {
-      log('warn', 'booking_blocked_price_drift', { message: err.message, drift: err.priceDrift });
+      log('warn', 'booking_blocked_price_drift', { message: err.message, drift: err.priceDrift, refunded: !!err.refunded, cancelled: !!err.cancelled });
       return res.status(409).json({
         ok: false, error: err.message, code: 'PRICE_DRIFT',
-        booking_failed_after_payment: true, refunded: true,
+        booking_failed_after_payment: true,
+        // For a manual authorization nothing was captured, so the money was
+        // released by CANCELLING the hold (no refund). Only an immediate-
+        // capture method is actually refunded.
+        refunded: !!err.refunded, cancelled: !!err.cancelled,
+      });
+    }
+    // [PAYMENT-LIFECYCLE §8] Duffel booking failed BEFORE capture and the
+    // authorization was CANCELLED (manual-capture path) — nothing was ever
+    // charged, so this is a safe, handled outcome, NOT the "charged with no
+    // ticket" emergency the critical Sentry alert below exists for. No refund
+    // is involved. Surfaced to the customer as a clean failure.
+    if (err.cancelled) {
+      setBookingStatus(req.body && req.body.session_id, 'authorization_cancelled', { error: err.message, cancelled: true });
+      log('warn', 'booking_failed_authorization_released', { message: err.message, status: err.status, code: err.code });
+      recordBookingFailureEvent({
+        source: 'confirm-payment', session_id: req.body && req.body.session_id,
+        message: err.message, refunded: false, duffel_errors: err.details || null,
+      });
+      return res.status(err.status && err.status >= 400 && err.status < 500 ? err.status : 409).json({
+        ok: false, error: err.message, code: err.code || 'BOOKING_FAILED',
+        booking_failed_after_payment: false, refunded: false, cancelled: true,
       });
     }
     // Payment succeeded but booking failed → surface clearly so support can refund/retry

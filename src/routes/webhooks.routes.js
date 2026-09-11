@@ -56,25 +56,49 @@ app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async (r
   }
 
   try {
-    if (event.type === 'checkout.session.completed') {
+    if (event.type === 'checkout.session.completed' || event.type === 'checkout.session.async_payment_succeeded') {
       const session = event.data.object;
-      if (session.payment_status === 'paid') {
-        // /confirm-payment is already handling it — leave the event row as
-        // 'received' so a later re-delivery can still complete the booking
-        // if that path fails (bookFromSession is idempotent).
+      // [PAYMENT-LIFECYCLE §16] With manual capture, checkout.session.completed
+      // fires with the money only AUTHORIZED (session.payment_status is
+      // typically 'unpaid', PaymentIntent in `requires_capture`) — NOT
+      // captured. So we must not gate on payment_status === 'paid' here; a
+      // completed session (status === 'complete') is the trigger to run the
+      // booking. bookFromSession then revalidates, books Duffel and CAPTURES
+      // the same PaymentIntent — this is the browser-independent recovery
+      // path (§15): it completes the booking even if the customer closed the
+      // tab. Idempotent + inFlight-guarded against the browser's
+      // /confirm-payment running at the same time.
+      const shouldBook = session.status === 'complete' || session.payment_status === 'paid';
+      if (shouldBook) {
         if (inFlight.has(session.id)) return;
         inFlight.add(session.id);
         try {
           const out = await bookFromSession(session.id, session);
-          log('info', 'webhook_booking_done', { session: session.id, order_id: out.order_id, already: out.already });
+          log('info', 'webhook_booking_done', { session: session.id, order_id: out.order_id, already: out.already, payment_status: out.payment_status });
         } finally {
           inFlight.delete(session.id);
         }
         await completeStripeEvent(event.id);
       } else {
-        // Not paid — nothing to book, but the event itself is handled.
+        // Session not complete (e.g. still awaiting an async method) — nothing
+        // to book yet, but the event itself is handled.
         await completeStripeEvent(event.id);
       }
+    } else if (event.type === 'payment_intent.canceled') {
+      // Authorization was released (our cancel, or a Stripe auto-expiry).
+      // Best-effort sync of the durable record; a booking may or may not exist.
+      const pi = event.data.object;
+      log('info', 'webhook_payment_intent_canceled', { payment_intent: pi.id, reason: pi.cancellation_reason || null });
+      if (supa && pi.id) {
+        try { await supa.from('bookings').update({ payment_status: 'authorization_cancelled', authorization_cancelled_at: new Date().toISOString() }).eq('payment_intent_id', pi.id).is('captured_at', null); } catch (_) { /* best-effort */ }
+      }
+      await completeStripeEvent(event.id);
+    } else if (event.type === 'payment_intent.amount_capturable_updated') {
+      // Authorization succeeded (money held, awaiting capture). Booking is
+      // driven by checkout.session.completed; here we only acknowledge.
+      const pi = event.data.object;
+      log('info', 'PAYMENT_AUTHORIZED', { payment_intent: pi.id });
+      await completeStripeEvent(event.id);
     } else if (event.type === 'payment_intent.payment_failed') {
       const pi = event.data.object;
       log('warn', 'webhook_payment_failed', { payment_intent: pi.id });
@@ -87,12 +111,31 @@ app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async (r
     // [F3] Mark durable so a reconciliation/worker job can retry only what
     // actually failed — instead of the failure being Sentry-only and lost.
     await failStripeEvent(event.id, err.message);
-    // [PRICE-DRIFT-PROTECTION] Already refunded in full inside
-    // bookFromSession() before throwing — a handled, safe outcome, not
-    // the "customer charged with no ticket" emergency the Sentry alert
-    // below exists for.
+    // [PAYMENT-LIFECYCLE §13] Duffel booked but Stripe capture failed — a
+    // handled manual-review outcome (bookFromSession already persisted the
+    // record + alerted). NOT the "customer charged with no ticket" emergency,
+    // and NOT a refund case (the money is still safely authorized).
+    if (err.code === 'CAPTURE_FAILED_AFTER_BOOKING') {
+      log('warn', 'webhook_capture_failed_manual_review', { type: event.type, order_id: err.order_id, booking_reference: err.booking_reference });
+      return;
+    }
+    // [PRICE-DRIFT / AUTH-CANCEL] Pre-capture failure released the money the
+    // safe way (cancelled authorization, or refunded for an immediate-capture
+    // method) inside bookFromSession() before throwing — a handled, safe
+    // outcome, not the "customer charged with no ticket" emergency below.
     if (err.code === 'PRICE_DRIFT') {
-      log('warn', 'webhook_booking_blocked_price_drift', { type: event.type, message: err.message, drift: err.priceDrift });
+      log('warn', 'webhook_booking_blocked_price_drift', { type: event.type, message: err.message, drift: err.priceDrift, refunded: !!err.refunded, cancelled: !!err.cancelled });
+      return;
+    }
+    // [PAYMENT-LIFECYCLE §8] Duffel failed pre-capture and the authorization
+    // was cancelled — no money moved, a safe handled outcome, not the critical
+    // emergency below.
+    if (err.cancelled) {
+      log('warn', 'webhook_booking_failed_authorization_released', { type: event.type, message: err.message, code: err.code });
+      recordBookingFailureEvent({
+        source: 'webhook', session_id: event.data && event.data.object && event.data.object.id,
+        message: err.message, refunded: false, duffel_errors: err.details || null,
+      });
       return;
     }
     // Booking failed after a paid webhook → log loudly for support follow-up

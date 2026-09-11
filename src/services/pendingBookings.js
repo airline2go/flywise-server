@@ -69,6 +69,24 @@ function getBookingStatus(sessionId) {
   return bookingStatus.get(sessionId) || null;
 }
 
+// [PAYMENT-LIFECYCLE] Record the Stripe payment lifecycle state
+// (authorized → capture_pending → captured / authorization_cancelled /
+// capture_failed) durably on the pending_bookings row so /booking-status
+// recovery and reconciliation can observe it across restarts/instances.
+// Best-effort + additive: a no-op when Supabase isn't configured, and the
+// in-memory map is also updated so a same-process poll sees it immediately.
+function setPaymentStatus(sessionId, paymentStatus, extra) {
+  if (!sessionId) return;
+  const prev = bookingStatus.get(sessionId) || {};
+  bookingStatus.set(sessionId, Object.assign({}, prev, { payment_status: paymentStatus, at: Date.now() }, extra || {}));
+  if (supa) {
+    const patch = { payment_status: paymentStatus };
+    if (extra && extra.payment_intent_id) patch.payment_intent_id = extra.payment_intent_id;
+    supa.from('pending_bookings').update(patch).eq('session_id', sessionId)
+      .then(function () {}, function (e) { log('warn', 'supa_pending_payment_status_failed', { error: e.message }); });
+  }
+}
+
 // [DURABLE-STATUS] The in-memory bookingStatus Map above is process-local:
 // a Render restart/redeploy, or a second instance handling the poll,
 // returns "unknown" for a booking that actually succeeded — the customer
@@ -109,6 +127,7 @@ module.exports = {
   getPendingBooking,
   markPendingBooked,
   setBookingStatus,
+  setPaymentStatus,
   getBookingStatus,
   resolveBookingStatus,
 };
