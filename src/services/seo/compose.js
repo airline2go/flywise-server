@@ -48,9 +48,12 @@ function weightedPick(rng, items, k) {
 }
 
 // ─── Derived facts (verifiable only) ────────────────────────────
-function durationFromDistance(km) {
-  return Math.max(45, Math.round(30 + (km / 800) * 60)); // minutes, approximate
-}
+// [P0.1 DATA-TRUTH] There is deliberately NO distance→duration estimator here.
+// Airpiv's editorial policy forbids inventing a flight time we did not observe:
+// a duration is rendered ONLY from a real observed value (avg_duration_min /
+// min_duration_min). distance_km alone is never a duration signal — not in
+// visible HTML, not in a title/meta, not in a FAQ, not in JSON-LD. Regression:
+// test/seo-compose-duration.test.js.
 function fmtHM(min) {
   const h = Math.floor(min / 60), m = Math.round(min % 60);
   if (h <= 0) return `${m} Min.`;
@@ -125,9 +128,12 @@ function popularityBucket(route) {
 // Core enricher: everything derivable from the route_pages row itself.
 function coreEnricher(ctx, route) {
   const km = route.distance_km ? Math.round(route.distance_km) : null;
-  const durMin = route.avg_duration_min || route.min_duration_min ||
-    (km ? durationFromDistance(km) : null);
-  const durationIsReal = !!(route.avg_duration_min || route.min_duration_min);
+  // [P0.1 DATA-TRUTH] durMin is a REAL observed duration or null — never
+  // derived from distance. fmtDur therefore stays null for a distance-only
+  // route, and every block/title/meta/FAQ written as `c.fmtDur ? … : …`
+  // self-heals to its no-duration branch.
+  const durMin = route.avg_duration_min || route.min_duration_min || null;
+  const durationIsReal = durMin != null;
 
   Object.assign(ctx, {
     o: route.origin_city, d: route.destination_city,
@@ -192,6 +198,6 @@ function buildContext(route, sources = {}) {
 module.exports = {
   makeRng, pick, shuffle, weightedPick,
   buildContext, registerEnricher, ENRICHERS, coreEnricher,
-  durationFromDistance, fmtHM,
+  fmtHM,
   priceBucket, airlineBucket, directnessBucket, popularityBucket,
 };

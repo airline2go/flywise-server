@@ -66,7 +66,9 @@ function assessEligibility(route) {
 function scoreAngles(c) {
   const s = {};
   if (c.facts.has('price')) s.price = c.priceB === 'budget' ? 3 : c.priceB === 'premium' ? 2.5 : 1.2;
-  if (c.facts.has('duration') || c.km) s.duration = c.haul === 'long-haul' ? 2.4 : c.haul === 'short-haul' ? 1.6 : 1.0;
+  // [P0.1] duration angle requires a REAL observed duration — distance alone
+  // (c.km) is not a flight-time signal, so it can no longer open a page on it.
+  if (c.facts.has('duration')) s.duration = c.haul === 'long-haul' ? 2.4 : c.haul === 'short-haul' ? 1.6 : 1.0;
   if (c.facts.has('airlines')) s.airline = c.airlineB === 'many' ? 2.6 : c.airlineB === 'single' ? 2.0 : 0.9;
   if (c.facts.has('directness')) s.business = c.directB === 'all-direct' ? 1.8 : c.directB === 'connections-only' ? 2.2 : 1.0;
   if (c.facts.has('popularity')) s.destination = c.popB === 'high' ? 2.3 : 1.0;
