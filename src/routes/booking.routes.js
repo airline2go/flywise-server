@@ -671,7 +671,11 @@ app.post('/confirm-payment', rateLimit('pay', 20, 60000), async (req, res) => {
 
     const out = await bookFromSession(session_id, session);
     inFlight.delete(session_id);
-    if (out.already) return res.json({ ok: true, already: true, order_id: out.order_id, booking_reference: out.booking_reference });
+    // [ADS-CONVERSION] total_amount is the customer-paid amount (see
+    // bookFromSession) — returned on BOTH the fresh and idempotent (already)
+    // paths so the browser conversion/analytics value is authoritative and
+    // never falls back to 0 on a refresh / double confirm / poll re-entry.
+    if (out.already) return res.json({ ok: true, already: true, order_id: out.order_id, booking_reference: out.booking_reference, total_amount: out.total_amount, currency: out.currency });
     res.json({ ok: true, order_id: out.order_id, booking_reference: out.booking_reference, total_amount: out.total_amount, currency: out.currency });
   } catch (err) {
     inFlight.delete(_sid);
