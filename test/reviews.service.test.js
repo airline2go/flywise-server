@@ -40,6 +40,16 @@ describe('submitReview — verified logic', () => {
     expect(res).toEqual({ ok: true, id: 'rev1', status: 'pending', verified: true });
   });
 
+  test('verified via booking_ref (the browser only has the reference, not the uuid)', async () => {
+    supa.__setQueue([
+      { data: { id: 'b-uuid-1', user_id: 'u1', origin: 'BER', destination: 'BCN' }, error: null }, // booking by reference
+      { data: { id: 'route-9' }, error: null },                                                     // route_pages by iata
+      { data: { id: 'rev-ref', status: 'pending', verified: true }, error: null },                  // insert...select
+    ]);
+    const res = await reviews.submitReview('u1', { rating: 5, booking_ref: 'AP-ABC123' });
+    expect(res).toEqual({ ok: true, id: 'rev-ref', status: 'pending', verified: true });
+  });
+
   test('a booking that is NOT the caller’s is dropped — never grants verified', async () => {
     supa.__setQueue([
       { data: { id: 'b1', user_id: 'someone-else', origin: 'BER', destination: 'BCN' }, error: null }, // not owner

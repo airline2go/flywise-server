@@ -23,6 +23,7 @@ const SUBMIT_SCHEMA = {
   language: { type: 'string', required: false, max: 12 },
   liked_tags: { type: 'array', required: false, max: 5, of: { type: 'string', max: 40 } },
   booking_id: { type: 'string', required: false, max: 64 },
+  booking_ref: { type: 'string', required: false, max: 40 },
   route_slug: { type: 'string', required: false, max: 120 },
   search_experience_rating: { type: 'number', required: false, min: 1, max: 5 },
   price_transparency_rating: { type: 'number', required: false, min: 1, max: 5 },

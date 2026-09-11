@@ -64,19 +64,21 @@ async function resolveRouteIdBySlug(slug) {
   return data ? data.id : null;
 }
 
-// Verify a booking really belongs to this user, and derive its published
-// route_id from the booking's own origin/destination. Returns
-// { ok, routeId } — ok=false means the booking isn't the caller's (so the
+// Verify a booking really belongs to this user, looked up by its DB id OR
+// its booking reference (the browser only ever has the reference, never the
+// uuid — see the frontend review card), and derive its published route_id
+// from the booking's own origin/destination. Returns
+// { ok, bookingId, routeId } — ok=false means no such owned booking (so the
 // review is still allowed, but never gets verified=true / booking linkage).
-async function verifyBookingAndResolveRoute(userId, bookingId) {
-  if (!supa || !userId || !bookingId) return { ok: false, routeId: null };
-  const { data: booking, error } = await supa
-    .from('bookings')
-    .select('id, user_id, origin, destination')
-    .eq('id', bookingId)
-    .maybeSingle();
-  if (error) { log('warn', 'reviews_booking_lookup_failed', { error: error.message }); return { ok: false, routeId: null }; }
-  if (!booking || booking.user_id !== userId) return { ok: false, routeId: null };
+async function verifyBookingAndResolveRoute(userId, { bookingId = null, bookingRef = null } = {}) {
+  if (!supa || !userId || (!bookingId && !bookingRef)) return { ok: false, bookingId: null, routeId: null };
+  let q = supa.from('bookings').select('id, user_id, origin, destination');
+  // Prefer the uuid when present; otherwise resolve by the reference. Never
+  // trust the lookup alone — ownership is re-checked below either way.
+  q = bookingId ? q.eq('id', bookingId) : q.eq('booking_reference', bookingRef);
+  const { data: booking, error } = await q.maybeSingle();
+  if (error) { log('warn', 'reviews_booking_lookup_failed', { error: error.message }); return { ok: false, bookingId: null, routeId: null }; }
+  if (!booking || booking.user_id !== userId) return { ok: false, bookingId: null, routeId: null };
 
   let routeId = null;
   if (booking.origin && booking.destination) {
@@ -89,7 +91,9 @@ async function verifyBookingAndResolveRoute(userId, bookingId) {
       .maybeSingle();
     routeId = route ? route.id : null;
   }
-  return { ok: true, routeId };
+  // Always return the real DB id (§5's unique(user_id, booking_id) needs the
+  // uuid, even when the caller only supplied a reference).
+  return { ok: true, bookingId: booking.id, routeId };
 }
 
 // Submit a review. `userId` comes from the caller's VERIFIED auth token.
@@ -102,16 +106,16 @@ async function submitReview(userId, input) {
   const rating = clampRating(input.rating);
   if (rating === null) return { ok: false, reason: 'invalid_rating' };
 
-  // Server decides verified + linkage. A booking_id only counts if it's
-  // really the caller's booking; otherwise it's silently dropped (never an
-  // error, and never grants the verified badge).
+  // Server decides verified + linkage. A booking id/reference only counts if
+  // it really resolves to the caller's own booking; otherwise it's silently
+  // dropped (never an error, and never grants the verified badge).
   let verified = false;
   let bookingId = null;
   let routeId = null;
 
-  if (input.booking_id) {
-    const v = await verifyBookingAndResolveRoute(userId, input.booking_id);
-    if (v.ok) { verified = true; bookingId = input.booking_id; routeId = v.routeId; }
+  if (input.booking_id || input.booking_ref) {
+    const v = await verifyBookingAndResolveRoute(userId, { bookingId: input.booking_id, bookingRef: input.booking_ref });
+    if (v.ok) { verified = true; bookingId = v.bookingId; routeId = v.routeId; }
   }
 
   // A general (non-booking) review may still name the route the traveler
