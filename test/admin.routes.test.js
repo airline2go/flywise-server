@@ -366,6 +366,51 @@ describe('GET /admin/route-pages — refresh_frequency filter', () => {
   });
 });
 
+describe('DELETE /admin/route-pages/dead — bulk delete dead routes', () => {
+  test('deletes only status=dead routes and returns the count', async () => {
+    let deletedFilter = null;
+    const originalFrom = supa.from.getMockImplementation();
+    supa.from.mockImplementation((table) => {
+      if (table === 'route_pages') {
+        return {
+          delete: () => ({
+            eq: (col, val) => { deletedFilter = { col, val }; return {
+              select: () => Promise.resolve({ data: [{ id: 'd1' }, { id: 'd2' }, { id: 'd3' }], error: null }),
+            }; },
+          }),
+        };
+      }
+      return originalFrom(table);
+    });
+    const app = buildApp();
+    const res = await request(app).delete('/admin/route-pages/dead').set(AUTH);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, deleted: 3 });
+    expect(deletedFilter).toEqual({ col: 'status', val: 'dead' });
+  });
+
+  test('does not fall through to the /:id handler (route ordering)', async () => {
+    // If '/dead' were registered after '/:id', Express would match "dead"
+    // as an id and this would try to fetch/delete a route with id="dead".
+    let idHandlerHit = false;
+    const originalFrom = supa.from.getMockImplementation();
+    supa.from.mockImplementation((table) => {
+      if (table === 'route_pages') {
+        return {
+          // The /:id handler starts with .select('slug').eq(id).maybeSingle()
+          select: () => ({ eq: () => ({ maybeSingle: () => { idHandlerHit = true; return Promise.resolve({ data: null, error: null }); } }) }),
+          delete: () => ({ eq: () => ({ select: () => Promise.resolve({ data: [], error: null }) }) }),
+        };
+      }
+      return originalFrom(table);
+    });
+    const app = buildApp();
+    const res = await request(app).delete('/admin/route-pages/dead').set(AUTH);
+    expect(res.status).toBe(200);
+    expect(idHandlerHit).toBe(false);
+  });
+});
+
 describe('POST /admin/route-pages/bulk-create — refresh_frequency', () => {
   test('rejects an invalid refresh_frequency', async () => {
     const app = buildApp();

@@ -1528,6 +1528,27 @@ app.post('/admin/route-pages/publish-all-drafts', rateLimit('admin', 120, 60000)
   }
 });
 
+// [DEAD-ROUTES] حذف جماعي لكل المسارات الميتة دفعة واحدة. المسار ده
+// لازم يتسجّل قبل الـ '/:id' اللي تحته، وإلا Express هيطابق "dead" على
+// أنها قيمة id. مفيش triggerRebuild هنا: المسار الميت خرج من الموقع
+// والـsitemap ساعة ما اتوسم dead (health-check-batch بيعمل rebuild وقتها)،
+// فحذفه من قاعدة البيانات ما بيغيّرش أي صفحة منشورة.
+app.delete('/admin/route-pages/dead', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
+  try {
+    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
+    const { data: deleted, error } = await supa.from('route_pages')
+      .delete()
+      .eq('status', 'dead')
+      .select('id');
+    if (error) throw new Error(error.message);
+    const count = deleted ? deleted.length : 0;
+    log('info', 'bulk_deleted_dead_routes', { count });
+    res.json({ ok: true, deleted: count });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.delete('/admin/route-pages/:id', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
   try {
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
