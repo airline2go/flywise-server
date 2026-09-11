@@ -86,6 +86,76 @@ async function attachPassengerIds(offerId, passengers) {
   return mapped;
 }
 
+// [FREE-CHAIR-FIX] Passenger order used to tie a seat's per-passenger service
+// to a passenger index, mirroring /offer and /seatmaps: adults, then children,
+// then infants, in Duffel's own listed order. passengerOrder[i] is the Duffel
+// passenger id for "passenger index i" — the exact index the frontend stores a
+// chosen seat under.
+function offerPassengerOrder(offerData) {
+  const pax = (offerData && offerData.passengers) || [];
+  const byType = (t) => pax.filter((p) => p && p.type === t).map((p) => p.id);
+  return [...byType('adult'), ...byType('child'), ...byType('infant_without_seat')];
+}
+
+// [FREE-CHAIR-FIX] Find the CURRENT Duffel seat service id for a chosen seat in
+// a freshly-fetched seat map, matching by the seat's STABLE identity (segment +
+// designator + passenger) rather than by service id. Seat-map service ids are
+// only meaningful within the seat_maps response that produced them, so an id
+// the customer's browser captured from its own earlier /seatmaps call is not
+// guaranteed to be present in a later, independent seat_maps fetch — matching by
+// id alone silently dropped the seat (it vanished from the total and was never
+// charged or booked). Segment id + designator ARE stable for the life of the
+// offer, so re-resolving through them yields the id that IS valid in this fetch.
+// Returns null when the seat can't be found (caller then falls back to the
+// original id — no worse than the old behaviour). Mirrors normalizeSeatMap()'s
+// per-passenger service selection (passenger_ids when present, else positional).
+function findCurrentSeatServiceId(seatMapsData, passengerOrder, segmentId, designator, passengerIndex) {
+  if (!Array.isArray(seatMapsData) || !designator) return null;
+  const pos = (typeof passengerIndex === 'number' && passengerIndex >= 0) ? passengerIndex : 0;
+  for (const sm of seatMapsData) {
+    if (segmentId && sm && sm.segment_id && sm.segment_id !== segmentId) continue;
+    for (const cabin of (sm.cabins || [])) {
+      for (const row of (cabin.rows || [])) {
+        for (const section of (row.sections || [])) {
+          for (const el of (section.elements || [])) {
+            if (el.type !== 'seat' || el.designator !== designator) continue;
+            const svcs = el.available_services || [];
+            if (!svcs.length) return null;
+            const pid = (passengerOrder || [])[pos] || null;
+            const anyRealPassengerId = svcs.some((svc) => svc.passenger_ids && svc.passenger_ids[0]);
+            if (pid && anyRealPassengerId) {
+              const match = svcs.find((svc) => svc.passenger_ids && svc.passenger_ids.indexOf(pid) !== -1);
+              if (match) return match.id;
+            }
+            const positional = svcs[pos] || svcs[0];
+            return positional ? positional.id : null;
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
+// [FREE-CHAIR-FIX] Re-point each requested SEAT to its current service id in the
+// fresh seat map (see findCurrentSeatServiceId). Only seat requests carry a
+// `designator`; baggage (whose ids come from the offer's own available_services
+// and are stable) is passed through untouched. The stable identity fields are
+// preserved on the returned entries so the same re-resolution can run again at
+// booking time against the seat map fetched then.
+function resolveSeatServiceIds(services, seatMapsData, passengerOrder) {
+  if (!Array.isArray(services) || !services.length) return services || [];
+  if (!services.some((s) => s && s.designator)) return services;
+  return services.map((s) => {
+    if (!s || !s.designator) return s;
+    const current = findCurrentSeatServiceId(seatMapsData, passengerOrder, s.segment_id, s.designator, s.passenger);
+    if (current && current !== s.id) {
+      log('info', 'seat_service_id_reresolved', { designator: s.designator, segment_id: s.segment_id || null, from: s.id || null, to: current });
+    }
+    return current ? { ...s, id: current } : s;
+  });
+}
+
 // ─── Helper: validate baggage/seat services against the live offer ────────
 // Duffel rejects an order if a service id isn't actually available for it
 // (e.g. expired offer, wrong segment). To avoid "paid but booking failed",
@@ -108,7 +178,19 @@ async function validateServices(offerId, services, preFetchedAvailable) {
     const av = byId.get(svc.id);
     if (!av) { log('warn', 'service_dropped_unavailable', { id: svc.id }); continue; }
     const maxQ = (av.maximum_quantity != null) ? Number(av.maximum_quantity) : 1;
-    clean.push({ id: svc.id, quantity: Math.max(1, Math.min(Number(svc.quantity) || 1, maxQ)) });
+    // [FREE-CHAIR-FIX] Carry a seat's stable identity (designator/segment/
+    // passenger) through validation so it survives into safeServices — the
+    // booking-time pricing recompute re-resolves the seat id from the seat
+    // map fetched then, exactly as this pricing pass does. Stripped back to
+    // { id, quantity } right before the Duffel order call (Duffel rejects
+    // unknown service fields).
+    const entry = { id: svc.id, quantity: Math.max(1, Math.min(Number(svc.quantity) || 1, maxQ)) };
+    if (svc.designator) {
+      entry.designator = svc.designator;
+      if (svc.segment_id) entry.segment_id = svc.segment_id;
+      if (svc.passenger != null) entry.passenger = svc.passenger;
+    }
+    clean.push(entry);
   }
   return clean;
 }
@@ -252,7 +334,11 @@ async function computeAuthoritativePricing(offerId, requestedServices, promoCode
     // A requested service id that isn't a known baggage service can only be a
     // seat (the sole other service type this flow handles) — so nothing needs
     // the seat map unless at least one such id is present.
-    const _needsSeatMaps = (requestedServices || []).some((s) => s && s.id && !_baggageIdSet0.has(s.id));
+    // [FREE-CHAIR-FIX] A request that carries a `designator` is unambiguously a
+    // seat, so fetch the seat map for it too — even if its (possibly stale)
+    // service id happens to collide with the baggage set — so it can be
+    // re-resolved and priced instead of silently dropped.
+    const _needsSeatMaps = (requestedServices || []).some((s) => s && ((s.id && !_baggageIdSet0.has(s.id)) || s.designator));
     if (_needsSeatMaps) {
       // [P0.8] The .catch() still swallows a benign "no seat map" (Duffel 422)
       // into an empty map, but a deadline abort must NOT be swallowed — it has
@@ -290,7 +376,13 @@ async function computeAuthoritativePricing(offerId, requestedServices, promoCode
     }
   }
   const avail = baggageServices.concat(seatServices);
-  const safeServices = await validateServices(offerId, requestedServices || [], avail);
+  // [FREE-CHAIR-FIX] Re-resolve each chosen seat to its current service id in
+  // THIS fresh seat map (by segment + designator + passenger) before validating
+  // — otherwise a paid seat the customer selected can be dropped just because
+  // its browser-captured id isn't in this fetch, leaving it shown but never
+  // charged. A genuinely free seat (net 0) still stays free downstream.
+  const resolvedServices = resolveSeatServiceIds(requestedServices || [], seatMapsResult.data || [], offerPassengerOrder(offerCheck.data));
+  const safeServices = await validateServices(offerId, resolvedServices, avail);
 
   const netTicketPrice = parseFloat(offerCheck.data && offerCheck.data.total_amount || 0);
   const currency = (offerCheck.data && offerCheck.data.total_currency) || 'EUR';
@@ -507,13 +599,17 @@ async function bookFromSession(session_id, session) {
     // available_services (baggage-only), or a chosen seat would silently
     // get dropped here too and never actually get booked with Duffel.
     let fallbackAvail = [];
+    let fallbackSeatMaps = [];
+    let fallbackPaxOrder = [];
     try {
       const [offerRes, seatMapsRes] = await Promise.all([
         duffel('GET', `/air/offers/${booking.offer_id}?return_available_services=true`),
         duffel('GET', `/air/seat_maps?offer_id=${encodeURIComponent(booking.offer_id)}`).catch(() => ({ data: [] })),
       ]);
       fallbackAvail = (offerRes.data && offerRes.data.available_services) || [];
-      for (const sm of (seatMapsRes.data || [])) {
+      fallbackSeatMaps = seatMapsRes.data || [];
+      fallbackPaxOrder = offerPassengerOrder(offerRes.data);
+      for (const sm of fallbackSeatMaps) {
         for (const cabin of (sm.cabins || [])) {
           for (const row of (cabin.rows || [])) {
             for (const section of (row.sections || [])) {
@@ -527,7 +623,10 @@ async function bookFromSession(session_id, session) {
         }
       }
     } catch (e2) { log('warn', 'fallback_avail_fetch_failed', { error: e2.message }); }
-    safeServices = await validateServices(booking.offer_id, booking.services || [], fallbackAvail.length ? fallbackAvail : undefined);
+    // [FREE-CHAIR-FIX] Re-resolve chosen seats to their current ids here too, so
+    // this rare fallback books the seat the customer paid for instead of dropping it.
+    const fallbackResolved = resolveSeatServiceIds(booking.services || [], fallbackSeatMaps, fallbackPaxOrder);
+    safeServices = await validateServices(booking.offer_id, fallbackResolved, fallbackAvail.length ? fallbackAvail : undefined);
     // fall through with the stored payload's amount; Duffel will be the final judge
   }
 
@@ -587,7 +686,10 @@ async function bookFromSession(session_id, session) {
         selected_offers: [booking.offer_id],
         passengers: paxWithIds,
         payments: [{ type: 'balance', amount: String(payAmount), currency: payCurrency }],
-        ...(safeServices.length > 0 ? { services: safeServices } : {}),
+        // [FREE-CHAIR-FIX] Duffel rejects unknown fields on a service, so strip
+        // each entry back to { id, quantity } — the seat-identity fields we carry
+        // through pricing/validation are for our own re-resolution only.
+        ...(safeServices.length > 0 ? { services: safeServices.map((s) => ({ id: s.id, quantity: s.quantity })) } : {}),
       },
     }, { 'Idempotency-Key': 'order_' + session_id });
   } catch (orderErr) {
