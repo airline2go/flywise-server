@@ -365,12 +365,19 @@ describe('bookFromSession', () => {
     // [ADS-CONVERSION] total_amount is now the CUSTOMER-PAID amount (113),
     // not the Duffel net/supplier amount (100). The Duffel net figures are
     // still surfaced separately for reference/debugging.
+    // [PAYMENT-LIFECYCLE] With no Stripe PaymentIntent in this test the flow
+    // is treated as an immediate-capture payment (money already taken), so the
+    // authoritative state is captured / booking_confirmed and no capture call
+    // is attempted. These additive fields drive the frontend purchase gate.
     expect(result).toEqual({
       already: false,
       order_id: 'ord_happy',
       booking_reference: 'REFHAPPY',
       total_amount: 113,
       currency: 'EUR',
+      payment_status: 'captured',
+      booking_status: 'booking_confirmed',
+      captured: true,
       duffel_net_amount: '100',
       duffel_net_currency: 'EUR',
     });

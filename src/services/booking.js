@@ -17,8 +17,50 @@ const { computeTieredMargin, getTicketProfitTiers, getAncillaryProfitTiers } = r
 const { computeLoyaltyDiscount, applyLoyaltyForBooking } = require('./loyalty');
 const { attachBookingIfReferred } = require('./referrals');
 const { sendBookingConfirmationEmail, buildOrderSummaryForEmail } = require('./email');
-const { getPendingBooking, markPendingBooked, setBookingStatus } = require('./pendingBookings');
+const { getPendingBooking, markPendingBooked, setBookingStatus, setPaymentStatus } = require('./pendingBookings');
 const { roundMoney } = require('../utils/money');
+const {
+  BOOKING_STATUS, PAYMENT_STATUS, SUPPLIER_STATUS,
+  getPaymentIntentId, piIsAuthorized, authorizationExpiresAt,
+  captureAuthorizedPayment, cancelAuthorization, alertCritical, errorWithCode,
+} = require('./payments');
+
+// [PAYMENT-LIFECYCLE] Release the customer's money the SAFE way when a
+// supplier booking fails BEFORE capture (brief §8):
+//   - manual-capture authorization (requires_capture) → CANCEL it. No
+//     money moved, so there is NOTHING to refund — cancelling releases the
+//     hold at zero cost (this is the whole point of the new architecture).
+//   - immediate-capture payment method (money already taken) → a real
+//     refund is the only option, exactly as the legacy flow did.
+// Returns { cancelled, refunded }.
+async function releaseAuthorizationOrRefund({ sessionId, session, paymentIntentId, manualAuthorized, reason }) {
+  if (manualAuthorized && paymentIntentId) {
+    try {
+      const r = await cancelAuthorization(paymentIntentId, { sessionId, reason: reason || 'abandoned' });
+      if (r.cancelled) {
+        log('info', 'PAYMENT_AUTHORIZATION_CANCELLED', { session_id: sessionId, payment_intent_id: paymentIntentId, reason: reason || null });
+        return { cancelled: true, refunded: false };
+      }
+      // cannotCancel → money was actually captured; fall through to refund.
+    } catch (e) {
+      log('error', 'authorization_cancel_failed', { session_id: sessionId, payment_intent_id: paymentIntentId, error: e.message });
+      return { cancelled: false, refunded: false };
+    }
+  }
+  // Legacy immediate-capture path: money is already taken, so refund it.
+  let refunded = false;
+  if (stripe && stripe.refunds && session && session.payment_intent) {
+    try {
+      log('info', 'REFUND_STARTED', { session_id: sessionId, payment_intent: session.payment_intent });
+      await stripe.refunds.create({ payment_intent: session.payment_intent });
+      refunded = true;
+      log('info', 'REFUND_COMPLETED', { session_id: sessionId, payment_intent: session.payment_intent });
+    } catch (e) {
+      log('error', 'refund_failed', { session_id: sessionId, error: e.message });
+    }
+  }
+  return { cancelled: false, refunded };
+}
 
 // ─── Helper: attach Duffel passenger ids ──────────────────
 // Duffel's /air/orders requires every passenger to carry the `id` that came
@@ -380,8 +422,38 @@ async function bookFromSession(session_id, session) {
   const entry = await getPendingBooking(session_id);
   if (!entry) { const e = new Error('Buchungsdaten nicht gefunden oder abgelaufen'); e.code = 'NO_ENTRY'; throw e; }
 
+  // [PAYMENT-LIFECYCLE] Resolve the Stripe PaymentIntent and the capture
+  // mode ONCE up front (brief §5/§17). `manualAuthorized` means the money is
+  // only HELD (capture_method 'manual', PI in requires_capture) and must be
+  // captured after — never before — a confirmed Duffel booking (§7). When
+  // there is no PI (no Stripe in tests) or an immediate-capture method
+  // already took the money, manualAuthorized is false and the flow falls back
+  // to the legacy immediate-capture / refund-on-failure behaviour unchanged.
+  const paymentIntentId = getPaymentIntentId(session);
+  let pi = null;
+  if (paymentIntentId && stripe && stripe.paymentIntents && typeof stripe.paymentIntents.retrieve === 'function') {
+    try { pi = await stripe.paymentIntents.retrieve(paymentIntentId); }
+    catch (e) { log('warn', 'confirm_pi_retrieve_failed', { session_id, error: e.message }); }
+  }
+  const manualAuthorized = piIsAuthorized(pi);
+
   // 3) Idempotency — already booked for this session
   if (entry.duffel_order_id) {
+    // [CAPTURE-RECOVERY · §13/§34] A prior run created the Duffel order but
+    // may have crashed / been interrupted BEFORE capturing. If the money is
+    // still only authorized (requires_capture), capture it now against the
+    // SAME PaymentIntent — never a second Duffel booking. Idempotent: a
+    // genuinely-already-captured PI short-circuits inside
+    // captureAuthorizedPayment().
+    if (manualAuthorized && paymentIntentId) {
+      try {
+        await captureAuthorizedPayment(paymentIntentId, { sessionId: session_id });
+        setPaymentStatus(session_id, PAYMENT_STATUS.CAPTURED);
+      } catch (capErr) {
+        alertCritical('capture_failed_recovery', capErr, { session_id, payment_intent_id: paymentIntentId, order_id: entry.duffel_order_id });
+        setBookingStatus(session_id, 'manual_review', { order_id: entry.duffel_order_id, booking_reference: entry.duffel_ref || null, error: capErr.message });
+      }
+    }
     // [ADS-CONVERSION] Return the real customer-paid amount + currency on the
     // idempotent path too, so a page refresh / double confirm-payment / poll
     // re-entry still carries an authoritative value (never 0). The customer
@@ -398,7 +470,8 @@ async function bookFromSession(session_id, session) {
     };
   }
 
-  setBookingStatus(session_id, 'paid');
+  setBookingStatus(session_id, manualAuthorized ? 'authorized' : 'paid');
+  if (manualAuthorized) setPaymentStatus(session_id, PAYMENT_STATUS.AUTHORIZED, { payment_intent_id: paymentIntentId });
   const booking = entry.payload;
 
   // 4) Book with Duffel (attach passenger ids + drop unavailable services)
@@ -486,18 +559,23 @@ async function bookFromSession(session_id, session) {
       session_id, offer_id: booking.offer_id,
       expected: expectedCustomerAmount, recomputed: recomputedCustomerAmount, drift: priceDrift,
     });
-    if (stripe && session && session.payment_intent) {
-      try {
-        await stripe.refunds.create({ payment_intent: session.payment_intent });
-        log('info', 'price_drift_refund_issued', { session_id, payment_intent: session.payment_intent });
-      } catch (refundErr) {
-        log('error', 'price_drift_refund_failed', { session_id, error: refundErr.message });
-      }
-    }
-    setBookingStatus(session_id, 'failed_price_drift', { drift: priceDrift, expected: expectedCustomerAmount, recomputed: recomputedCustomerAmount });
-    const e = new Error('Der Flugpreis hat sich vor der Bezahlung erheblich geändert. Deine Zahlung wurde vollständig zurückerstattet.');
+    // [PAYMENT-LIFECYCLE §9] No Duffel booking has happened yet, so the money
+    // must be released BEFORE any capture. For a manual authorization that
+    // means CANCEL (no refund, no lost fees); only an immediate-capture method
+    // is actually refunded.
+    const release = await releaseAuthorizationOrRefund({ sessionId: session_id, session, paymentIntentId, manualAuthorized, reason: 'requested_by_customer' });
+    setBookingStatus(session_id, manualAuthorized ? 'authorization_cancelled' : 'failed_price_drift', {
+      drift: priceDrift, expected: expectedCustomerAmount, recomputed: recomputedCustomerAmount,
+      refunded: release.refunded, cancelled: release.cancelled,
+    });
+    setPaymentStatus(session_id, manualAuthorized ? PAYMENT_STATUS.AUTHORIZATION_CANCELLED : PAYMENT_STATUS.REFUNDED);
+    const e = new Error(release.cancelled
+      ? 'Der Flugpreis hat sich vor der Bezahlung erheblich geändert. Es wurde nichts berechnet.'
+      : 'Der Flugpreis hat sich vor der Bezahlung erheblich geändert. Deine Zahlung wurde vollständig zurückerstattet.');
     e.code = 'PRICE_DRIFT';
     e.priceDrift = priceDrift;
+    e.refunded = release.refunded;
+    e.cancelled = release.cancelled;
     throw e;
   }
 
@@ -513,44 +591,88 @@ async function bookFromSession(session_id, session) {
       },
     }, { 'Idempotency-Key': 'order_' + session_id });
   } catch (orderErr) {
-    // [REFUND-SAFETY-FIX] The customer has already paid via Stripe at
-    // this point — ANY failure creating the actual Duffel order (offer
-    // expired between payment and confirmation, an unexpected airline
-    // rejection, a transient API error, anything) means they were
-    // charged with nothing to show for it unless this refunds them right
-    // now. Previously only PRICE_DRIFT (a deliberate pre-emptive check
-    // above) ever triggered a refund — every other failure here had none
-    // at all, confirmed by a real production incident where
-    // "offer_no_longer_available" left a paid customer with no ticket
-    // and no refund.
-    let refunded = false;
-    if (stripe && session && session.payment_intent) {
-      try {
-        await stripe.refunds.create({ payment_intent: session.payment_intent });
-        refunded = true;
-        log('info', 'order_failure_refund_issued', { session_id, payment_intent: session.payment_intent, original_error: orderErr.message });
-      } catch (refundErr) {
-        log('error', 'order_failure_refund_failed', { session_id, error: refundErr.message, original_error: orderErr.message });
-      }
-    }
-    setBookingStatus(session_id, 'failed', { error: orderErr.message, refunded });
-    const e = new Error(refunded
-      ? 'Die Buchung konnte nicht abgeschlossen werden. Deine Zahlung wurde vollständig zurückerstattet.'
-      : orderErr.message);
+    // [PAYMENT-LIFECYCLE §8] Duffel booking failed BEFORE any capture
+    // (offer expired, airline rejection, transient API error, timeout,
+    // missing supplier data — anything). The customer's money must be
+    // released, but the SAFE way:
+    //   - manual authorization (requires_capture) → CANCEL it. No money
+    //     ever moved, so there is no refund and no lost processing fees —
+    //     this is exactly the financial risk the new architecture removes.
+    //   - immediate-capture method (money already taken) → refund, as the
+    //     legacy flow did (still the only correct option there).
+    // DUFFEL_BOOKING_FAILED is logged with safe identifiers only (§30).
+    log('warn', 'DUFFEL_BOOKING_FAILED', { session_id, offer_id: booking.offer_id, status: orderErr.status || null });
+    const release = await releaseAuthorizationOrRefund({ sessionId: session_id, session, paymentIntentId, manualAuthorized, reason: 'abandoned' });
+    setBookingStatus(session_id, manualAuthorized ? 'authorization_cancelled' : 'failed', {
+      error: orderErr.message, refunded: release.refunded, cancelled: release.cancelled,
+    });
+    setPaymentStatus(session_id, manualAuthorized ? PAYMENT_STATUS.AUTHORIZATION_CANCELLED : (release.refunded ? PAYMENT_STATUS.REFUNDED : PAYMENT_STATUS.CAPTURED));
+    const e = new Error(release.cancelled
+      ? 'Die Buchung konnte nicht abgeschlossen werden. Es wurde nichts berechnet — die Autorisierung wurde freigegeben.'
+      : (release.refunded
+        ? 'Die Buchung konnte nicht abgeschlossen werden. Deine Zahlung wurde vollständig zurückerstattet.'
+        : orderErr.message));
     e.code = orderErr.code || 'ORDER_CREATE_FAILED';
     e.status = orderErr.status;
     e.details = orderErr.details;
-    e.refunded = refunded;
+    e.refunded = release.refunded;
+    e.cancelled = release.cancelled;
     throw e;
   }
 
   const orderId = result.data?.id;
   const bookingRef = result.data?.booking_reference;
 
+  // [DUFFEL-BOOKING-SUCCESS §10] Validate the supplier response before
+  // treating it as bookable — a 200 alone is not proof (§10). A missing
+  // order id means we must NOT capture blindly: enter manual review.
+  const orderValidationFailed = !orderId;
+  log('info', 'DUFFEL_BOOKING_SUCCESS', { session_id, order_id: orderId || null, ref: bookingRef || null });
+
   // 5) Mark booked so retries/refresh can't double-book
   await markPendingBooked(session_id, orderId || '', bookingRef || '');
-  setBookingStatus(session_id, 'booked', { order_id: orderId, booking_reference: bookingRef });
-  log('info', 'booking_confirmed', { order_id: orderId, ref: bookingRef });
+
+  // ─── CAPTURE — only AFTER a confirmed Duffel booking (brief §7/§13) ───
+  // GOLDEN RULE: NO CAPTURE WITHOUT SUPPLIER CONFIRMATION. For a manual
+  // authorization we capture the SAME PaymentIntent now; the booking is only
+  // "financially completed" once Stripe capture actually succeeds. For an
+  // immediate-capture method the money is already taken — nothing to capture.
+  let captureFailed = false;
+  let capErr = null;
+  let paymentStatusFinal = manualAuthorized ? PAYMENT_STATUS.CAPTURE_PENDING : PAYMENT_STATUS.CAPTURED;
+  let capturedAmountMinor = null;
+  if (manualAuthorized && !orderValidationFailed) {
+    setPaymentStatus(session_id, PAYMENT_STATUS.CAPTURE_PENDING, { payment_intent_id: paymentIntentId });
+    try {
+      const cap = await captureAuthorizedPayment(paymentIntentId, { sessionId: session_id });
+      paymentStatusFinal = PAYMENT_STATUS.CAPTURED;
+      capturedAmountMinor = cap.pi && (cap.pi.amount_received != null ? cap.pi.amount_received : cap.pi.amount);
+      setPaymentStatus(session_id, PAYMENT_STATUS.CAPTURED);
+    } catch (e) {
+      // [CRITICAL §13] Duffel SUCCESS + Stripe CAPTURE FAILURE. The flight IS
+      // booked, so we do NOT cancel and do NOT refund. Enter manual review,
+      // alert operations, keep the Duffel order, and surface a NON-confirmed
+      // outcome so the customer is never told "confirmed" and no purchase
+      // conversion fires. Recovery can re-capture the SAME PaymentIntent later.
+      captureFailed = true;
+      capErr = e;
+      paymentStatusFinal = PAYMENT_STATUS.CAPTURE_FAILED;
+    }
+  } else if (orderValidationFailed) {
+    // Order id missing despite a 2xx → manual review, do not capture (§10).
+    captureFailed = true;
+    capErr = errorWithCode('Duffel-Bestellung ohne gültige Order-ID', 'DUFFEL_ORDER_INVALID');
+    paymentStatusFinal = manualAuthorized ? PAYMENT_STATUS.MANUAL_REVIEW : PAYMENT_STATUS.CAPTURED;
+  }
+
+  const bookingStatusFinal = captureFailed ? BOOKING_STATUS.MANUAL_REVIEW : BOOKING_STATUS.BOOKING_CONFIRMED;
+  if (captureFailed) {
+    setBookingStatus(session_id, 'manual_review', { order_id: orderId, booking_reference: bookingRef, error: capErr && capErr.message });
+    setPaymentStatus(session_id, paymentStatusFinal);
+  } else {
+    setBookingStatus(session_id, 'booked', { order_id: orderId, booking_reference: bookingRef });
+  }
+  log('info', 'booking_confirmed', { order_id: orderId, ref: bookingRef, payment_status: paymentStatusFinal, capture_failed: captureFailed });
 
   // 6) Persist financial records (best-effort). Compute the authoritative
   // figures ONCE and reuse them for both the payments ledger and the
@@ -578,14 +700,22 @@ async function bookFromSession(session_id, session) {
     // independently (brief §8.1/§8.2). supplier_amount/margin_amount are
     // additive nullable columns (sql/payment_ledger.sql) — harmless if the
     // migration hasn't run yet.
+    // [PAYMENT-LIFECYCLE] Legacy `status` stays 'paid' on capture and
+    // 'failed' on capture failure (its CHECK only allows paid|refunded|
+    // failed); the richer lifecycle state goes in payment_status. Additive
+    // columns — harmless if sql/payment_lifecycle.sql hasn't run yet.
     supa.from('payments').insert({
       stripe_session_id: session_id,
-      stripe_payment_id: (session && session.payment_intent) || null,
+      stripe_payment_id: paymentIntentId || (session && session.payment_intent) || null,
+      payment_intent_id: paymentIntentId || (session && session.payment_intent) || null,
       amount: customerPaid,
       supplier_amount: supplierAmount,
       margin_amount: marginAmount,
       currency: payCurrency,
-      status: 'paid',
+      status: captureFailed ? 'failed' : 'paid',
+      payment_status: paymentStatusFinal,
+      captured_at: paymentStatusFinal === PAYMENT_STATUS.CAPTURED ? new Date().toISOString() : null,
+      captured_amount: paymentStatusFinal === PAYMENT_STATUS.CAPTURED ? customerPaid : null,
     }).then(function(){}, function(e){ log('error', 'supa_payment_insert_failed', { error: e.message }); });
 
     // [RACE-CONDITION-FIX] This was previously fire-and-forget
@@ -647,17 +777,38 @@ async function bookFromSession(session_id, session) {
         promo_code: booking.promo_code || null,
         loyalty_discount: loyaltyUsed,
         customer_paid: customerPaid,
-        stripe_payment_id: (session && session.payment_intent) || null,
+        stripe_payment_id: paymentIntentId || (session && session.payment_intent) || null,
+        // [PAYMENT-LIFECYCLE] Separate booking / payment / supplier state
+        // (brief §5/§6/§20). Legacy `status` above is unchanged; these
+        // additive columns carry the authorize→capture lifecycle so a
+        // capture failure is a distinct, admin-visible manual-review state
+        // rather than a silently "confirmed" booking.
+        payment_intent_id: paymentIntentId || (session && session.payment_intent) || null,
+        payment_status: paymentStatusFinal,
+        booking_status: bookingStatusFinal,
+        supplier_status: SUPPLIER_STATUS.BOOKED,
+        authorized_amount: manualAuthorized ? customerPaid : null,
+        authorized_at: manualAuthorized ? new Date().toISOString() : null,
+        authorization_expires_at: (manualAuthorized && pi) ? authorizationExpiresAt(pi) : null,
+        captured_amount: paymentStatusFinal === PAYMENT_STATUS.CAPTURED ? customerPaid : null,
+        captured_at: paymentStatusFinal === PAYMENT_STATUS.CAPTURED ? new Date().toISOString() : null,
+        capture_id: paymentStatusFinal === PAYMENT_STATUS.CAPTURED ? (paymentIntentId || null) : null,
+        capture_attempts: manualAuthorized ? 1 : 0,
+        last_payment_error: captureFailed && capErr ? String(capErr.message || '').slice(0, 500) : null,
       }, { onConflict: 'stripe_session_id', ignoreDuplicates: true });
       if (bookingInsertError) log('error', 'supa_booking_insert_failed', { error: bookingInsertError.message });
     } catch (e) {
       log('error', 'supa_booking_insert_failed', { error: e.message });
     }
 
+    // [PAYMENT-LIFECYCLE §38] Rewards/promo usage are granted ONLY when the
+    // booking is financially complete (Duffel booked AND Stripe captured) —
+    // never for a capture-failed / manual-review booking, which is not yet a
+    // completed sale.
     // [ADMIN-MARGIN] Bump the promo code's usage counter now that the
     // booking is actually confirmed (not at checkout-session creation,
     // when the customer might still abandon payment).
-    if (booking.promo_id) incrementPromoUsage(booking.promo_id).then(function(){}, function(){});
+    if (!captureFailed && booking.promo_id) incrementPromoUsage(booking.promo_id).then(function(){}, function(){});
 
     // [LOYALTY-FIX] Only a real logged-in user has a loyalty account to
     // credit/debit at all now — computeAuthoritativePricing() never
@@ -671,7 +822,7 @@ async function bookFromSession(session_id, session) {
     // booking row — needed for a later cancellation to reverse this
     // EXACT figure, not a value recomputed against whatever tier the
     // account is at by then.
-    if (booking.user_id) {
+    if (!captureFailed && booking.user_id) {
       try {
         const earnedPoints = await applyLoyaltyForBooking('user', booking.user_id, loyaltyUsed, customerPaid);
         if (earnedPoints > 0 && orderId) {
@@ -690,6 +841,34 @@ async function bookFromSession(session_id, session) {
         attachBookingIfReferred(booking.user_id, orderId, result.data).catch((e) => log('warn', 'referral_attach_call_failed', { error: e.message }));
       }
     }
+  }
+
+  // [CRITICAL §13/§31] Duffel SUCCESS + Stripe CAPTURE FAILURE (or an invalid
+  // supplier response). The Duffel order and the manual-review record are now
+  // persisted above; alert operations and surface a NON-confirmed outcome. We
+  // deliberately throw AFTER persistence and BEFORE the confirmation email /
+  // rewards so the customer is never told "confirmed" and no purchase
+  // conversion fires. The authorization is NOT cancelled (the flight is
+  // booked) — recovery re-captures the SAME PaymentIntent later.
+  if (captureFailed) {
+    alertCritical('capture_failed_after_booking', capErr || new Error('capture_failed'), {
+      session_id,
+      payment_intent_id: paymentIntentId,
+      duffel_order_id: orderId,
+      booking_reference: bookingRef,
+      stripe_error_code: capErr && capErr.stripeCode,
+      capture_attempts: capErr && capErr.attempts,
+      payment_status: paymentStatusFinal,
+      supplier_status: SUPPLIER_STATUS.BOOKED,
+    });
+    const e = errorWithCode(
+      'Deine Buchung wird gerade finalisiert. Unser Team prüft die Zahlung und meldet sich in Kürze.',
+      'CAPTURE_FAILED_AFTER_BOOKING',
+      { manualReview: true, order_id: orderId, booking_reference: bookingRef, status: 202 }
+    );
+    e.refunded = false;
+    e.cancelled = false;
+    throw e;
   }
 
   // [EMAIL-SEAT-FIX] The order data we just got back from POST
@@ -801,6 +980,13 @@ async function bookFromSession(session_id, session) {
     // customer-facing amount (source of the Google Ads / GA4 purchase value)
     total_amount: customerPaidFinal,
     currency: payCurrency,
+    // [PAYMENT-LIFECYCLE] Authoritative state — reaching here means Duffel
+    // booked AND (for a manual authorization) Stripe capture succeeded, so
+    // the booking is financially complete. The frontend gates its purchase
+    // conversion on payment_status === 'captured' (§25/§29).
+    payment_status: paymentStatusFinal,        // 'captured'
+    booking_status: bookingStatusFinal,        // 'booking_confirmed'
+    captured: paymentStatusFinal === PAYMENT_STATUS.CAPTURED,
     // kept for reference/debugging — Duffel net/supplier figures, never the
     // conversion value.
     duffel_net_amount: result.data?.total_amount,
