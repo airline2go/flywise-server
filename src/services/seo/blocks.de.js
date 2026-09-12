@@ -213,8 +213,11 @@ const BLOCKS = [
 
 // FAQ candidates — the composer selects a subset and their answers branch on data.
 const FAQ_CANDIDATES = [
-  { id: 'duration', applicable: (c) => c.facts.has('duration') || c.km, q: (c) => `Wie lange dauert der Flug von ${c.o} nach ${c.d}?`,
-    a: (c) => c.fmtDur ? `Die typische reine Flugzeit liegt bei rund ${c.fmtDur}${c.km ? ` bei etwa ${c.km} km Distanz` : ''}. Die genaue Dauer hängt von Wind, Route und Flugzeugtyp ab.` : `Bei rund ${c.km} km Distanz ist mit einer für eine ${haulWord(c.haul)} üblichen Flugzeit zu rechnen.` },
+  // [P0.1] Only ask/answer the flight-time question when we actually observed a
+  // duration. Distance (c.km) is NOT a flight-time signal, so a distance-only
+  // route gets no duration FAQ at all — never an estimated "übliche Flugzeit".
+  { id: 'duration', applicable: (c) => c.facts.has('duration') && !!c.fmtDur, q: (c) => `Wie lange dauert der Flug von ${c.o} nach ${c.d}?`,
+    a: (c) => `Die typische reine Flugzeit liegt bei rund ${c.fmtDur}${c.km ? ` bei etwa ${c.km} km Distanz` : ''}. Die genaue Dauer hängt von Wind, Route und Flugzeugtyp ab.` },
   { id: 'book-when', applicable: () => true, q: (c) => `Wann sollte ich Flüge von ${c.o} nach ${c.d} buchen?`,
     a: (c) => { const w = c.haul === 'long-haul' ? 'sechs bis acht Wochen' : c.haul === 'medium-haul' ? 'drei bis vier Wochen' : 'zwei bis drei Wochen'; return `Für diese ${haulWord(c.haul)} ist ein Vorlauf von ${w} meist ideal.${c.priceTrend === 'up' ? ' Da die Tarife zuletzt anzogen, lohnt frühes Buchen zusätzlich.' : c.priceTrend === 'down' ? ' Weil die Preise zuletzt nachgaben, kann ein Preisalarm bei flexiblen Daten helfen.' : ''} Abflüge unter der Woche sind in der Regel günstiger.`; } },
   { id: 'direct', applicable: (c) => c.facts.has('directness'), q: (c) => `Gibt es Direktflüge von ${c.o} nach ${c.d}?`,

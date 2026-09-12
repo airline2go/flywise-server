@@ -216,7 +216,15 @@ describe('similarity health check (diagnostic, not a target)', () => {
   });
 
   test('no accidental full templating (canary, not a target)', () => {
-    const rep = similarityReport(pages, { k: 4, threshold: 0.4 });
+    // [P0.1] Data-truth: a distance-only route no longer receives an estimated
+    // flight duration to differentiate it (that was fabricated content). Such
+    // near-dataless pages (<2 real data dimensions) are HONESTLY alike and must
+    // NOT be padded with filler to lower similarity (rule #14) — they are also
+    // the routes that fail the evidence gate and are not indexed. The templating
+    // canary therefore runs on the content-bearing corpus, where an accidental
+    // template really would be a bug.
+    const corpus = pages.filter((p) => p.facts >= 2);
+    const rep = similarityReport(corpus, { k: 4, threshold: 0.4 });
     // Generous canary bounds. The purpose is ONLY to detect a regression into
     // templating (which would push mean/max toward 1.0), never to minimize the
     // score. Two routes with genuinely near-identical bucketed data are ALLOWED
