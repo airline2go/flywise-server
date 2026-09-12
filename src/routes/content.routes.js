@@ -740,7 +740,12 @@ app.get('/route-pages/:slug', rateLimit('content', 2500, 60000), async (req, res
 
     // [SEO] Resolve effective SEO content (manual override wins over generated)
     // so the SSG build reads a single `seo` object without caring about source.
-    res.json({ ok: true, route: Object.assign({}, data, { airlines, cached_price, cached_currency, intelligence: buildRouteIntelligenceSnapshot(data), seo: effectiveRouteSeo(data) }) });
+    // [P0.7 SINGLE-SOURCE-OF-TRUTH] Attach the canonical `indexable` verdict —
+    // the SAME rule (routeIndexable, honoring SEO_EVIDENCE_POLICY_ENFORCED) the
+    // /route-pages list feed and the sitemap already use. The frontend route
+    // renderer honors this verbatim for <meta robots>, so the evidence policy is
+    // decided in ONE place (this server) and the frontend needs no policy env.
+    res.json({ ok: true, route: Object.assign({}, data, { airlines, cached_price, cached_currency, indexable: routeIndexable(data), intelligence: buildRouteIntelligenceSnapshot(data), seo: effectiveRouteSeo(data) }) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
