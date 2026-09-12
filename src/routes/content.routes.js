@@ -30,6 +30,24 @@ function parsePageParam(raw) {
   return { page };
 }
 
+// [P0.7] Evidence columns a hub page's route list must SELECT so the canonical
+// `indexable` verdict can be computed per route, mirroring the /route-pages
+// list feed. Appended to each hub route-list SELECT.
+const HUB_ROUTE_EVIDENCE_COLS = 'airline_count,avg_duration_min,stop_distribution,price_sample_count,itinerary_count,intro_text,custom_faq,distance_km';
+// Attach `indexable` (routeIndexable, honoring SEO_EVIDENCE_POLICY_ENFORCED) to
+// each route in a hub list, then strip the heavy evidence-only columns pulled
+// solely to compute it (same set the list feed strips; distance_km/airline_count
+// stay — they are light and may be displayed). This lets the frontend filter its
+// internal route links on `indexable` so a hub page never links to a noindex
+// route, without re-deriving the policy on the static host.
+function attachHubRouteIndexable(routes) {
+  return (routes || []).map((r) => {
+    const indexable = routeIndexable(r);
+    const { avg_duration_min, stop_distribution, price_sample_count, itinerary_count, intro_text, custom_faq, ...rest } = r;
+    return { ...rest, indexable };
+  });
+}
+
 // [RATE-LIMIT-FIX] None of these routes had any rate limiting at all —
 // public, unauthenticated, and an unmetered surface for scraping/DB-
 // hammering. The limit here (2500/min per IP) is deliberately generous
@@ -377,7 +395,7 @@ app.get('/countries/:code', rateLimit('content', 2500, 60000), async (req, res) 
     if (!country) return res.status(404).json({ ok: false, error: 'Land nicht gefunden' });
 
     const { data: routes, error: routesErr } = await supa.from('route_pages')
-      .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_country,destination_country')
+      .select(`slug,origin_iata,destination_iata,origin_city,destination_city,origin_country,destination_country,${HUB_ROUTE_EVIDENCE_COLS}`)
       .eq('status', 'published')
       .or(`origin_country.eq.${code},destination_country.eq.${code}`)
       .order('origin_city', { ascending: true });
@@ -393,7 +411,7 @@ app.get('/countries/:code', rateLimit('content', 2500, 60000), async (req, res) 
     const translations = {};
     (t || []).forEach((r) => { translations[r.language] = r.name; });
 
-    res.json({ ok: true, country: { ...country, translations }, routes });
+    res.json({ ok: true, country: { ...country, translations }, routes: attachHubRouteIndexable(routes) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -449,7 +467,7 @@ app.get('/cities/:slug', rateLimit('content', 2500, 60000), async (req, res) => 
     if (!city) return res.status(404).json({ ok: false, error: 'Stadt nicht gefunden' });
 
     const { data: routes, error: routesErr } = await supa.from('route_pages')
-      .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_city_slug,destination_city_slug,origin_country,destination_country')
+      .select(`slug,origin_iata,destination_iata,origin_city,destination_city,origin_city_slug,destination_city_slug,origin_country,destination_country,${HUB_ROUTE_EVIDENCE_COLS}`)
       .eq('status', 'published')
       .or(`origin_city_slug.eq.${citySlug},destination_city_slug.eq.${citySlug}`)
       .order('origin_city', { ascending: true });
@@ -462,7 +480,7 @@ app.get('/cities/:slug', rateLimit('content', 2500, 60000), async (req, res) => 
     const translations = {};
     (t || []).forEach((r) => { translations[r.language] = r.name; });
 
-    res.json({ ok: true, city: { ...city, translations }, routes });
+    res.json({ ok: true, city: { ...city, translations }, routes: attachHubRouteIndexable(routes) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -510,7 +528,7 @@ app.get('/airports/:code', rateLimit('content', 2500, 60000), async (req, res) =
     if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
     const code = req.params.code.toUpperCase();
     const { data: routes, error: routesErr } = await supa.from('route_pages')
-      .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_city_slug,destination_city_slug,origin_country,destination_country,origin_lat,origin_lng,destination_lat,destination_lng')
+      .select(`slug,origin_iata,destination_iata,origin_city,destination_city,origin_city_slug,destination_city_slug,origin_country,destination_country,origin_lat,origin_lng,destination_lat,destination_lng,${HUB_ROUTE_EVIDENCE_COLS}`)
       .eq('status', 'published')
       .or(`origin_iata.eq.${code},destination_iata.eq.${code}`)
       .order('origin_city', { ascending: true });
@@ -590,7 +608,7 @@ app.get('/airports/:code', rateLimit('content', 2500, 60000), async (req, res) =
     airport.city_translations = cityTranslations;
     airport.country_translations = countryTranslations;
 
-    res.json({ ok: true, airport, routes });
+    res.json({ ok: true, airport, routes: attachHubRouteIndexable(routes) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -650,7 +668,7 @@ app.get('/airlines/:code', rateLimit('content', 2500, 60000), async (req, res) =
     const routesBySlug = new Map();
     for (let i = 0; i < pairs.length; i += OR_CHUNK) {
       const { data: part, error: routesErr } = await supa.from('route_pages')
-        .select('slug,origin_iata,destination_iata,origin_city,destination_city,origin_city_slug,destination_city_slug,origin_country,destination_country')
+        .select(`slug,origin_iata,destination_iata,origin_city,destination_city,origin_city_slug,destination_city_slug,origin_country,destination_country,${HUB_ROUTE_EVIDENCE_COLS}`)
         .eq('status', 'published')
         .or(pairs.slice(i, i + OR_CHUNK).join(','));
       if (routesErr) throw new Error(routesErr.message);
@@ -687,7 +705,7 @@ app.get('/airlines/:code', rateLimit('content', 2500, 60000), async (req, res) =
       }
     }
 
-    res.json({ ok: true, airline: Object.assign({}, airline, { hubAirport }), routes, mostUsedRoutes });
+    res.json({ ok: true, airline: Object.assign({}, airline, { hubAirport }), routes: attachHubRouteIndexable(routes), mostUsedRoutes: attachHubRouteIndexable(mostUsedRoutes) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
