@@ -86,8 +86,22 @@ async function computeRouteScoresOnce() {
       from += pageSize;
     }
 
-    const { data: routePages, error: rpError } = await supa.from('route_pages').select('id, slug');
-    if (rpError) { log('warn', 'route_score_route_pages_read_failed', { error: rpError.message }); return; }
+    // [ROUTE-SCORE-PAGINATION] PostgREST caps a single select at ~1000 rows, and
+    // the route_pages catalogue is larger than that — an unpaginated read scored
+    // only the first ~1000 routes each cycle and left the rest frozen at an old
+    // value (or never scored at all). Walk page=0,1,2,… until a short page, the
+    // same pattern the route_traffic_daily read above uses, so EVERY route is
+    // rescored every cycle.
+    const routePages = [];
+    for (let rpFrom = 0; ; rpFrom += pageSize) {
+      const { data: rpRows, error: rpError } = await supa.from('route_pages')
+        .select('id, slug')
+        .range(rpFrom, rpFrom + pageSize - 1);
+      if (rpError) { log('warn', 'route_score_route_pages_read_failed', { error: rpError.message }); return; }
+      if (!rpRows || !rpRows.length) break;
+      routePages.push(...rpRows);
+      if (rpRows.length < pageSize) break;
+    }
 
     let updated = 0;
     for (const rp of routePages || []) {

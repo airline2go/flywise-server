@@ -5,7 +5,15 @@ jest.mock('../src/clients/supabase', () => {
     const builder = {
       select: () => builder,
       gte: () => builder,
-      range: () => Promise.resolve((responses[table] && responses[table].select) || { data: [], error: null }),
+      // Faithful pagination: slice the configured dataset by the requested
+      // [from, to] window so a >1000-row table is returned page-by-page, exactly
+      // as PostgREST's .range() does. Lets a test prove the reader walks EVERY
+      // page instead of stopping at the first ~1000 rows.
+      range: (from, to) => {
+        const base = (responses[table] && responses[table].select) || { data: [], error: null };
+        if (base.error || !Array.isArray(base.data)) return Promise.resolve(base);
+        return Promise.resolve({ data: base.data.slice(from, to + 1), error: null });
+      },
       update: (patch) => ({
         eq: (col, val) => {
           updateCalls.push({ table, patch, col, val });
@@ -154,6 +162,24 @@ test('a route_pages read failure aborts the cycle without throwing', async () =>
   supa.__setResponse('route_pages', 'select', { data: null, error: { message: 'boom' } });
   await expect(computeRouteScoresOnce()).resolves.toBeUndefined();
   expect(log).toHaveBeenCalledWith('warn', 'route_score_route_pages_read_failed', expect.objectContaining({ error: 'boom' }));
+});
+
+test('scores EVERY route when route_pages spans more than one PostgREST page (>1000)', async () => {
+  // Regression: routeScore.js used to read route_pages without pagination, so
+  // PostgREST's ~1000-row cap silently left every route past the first page
+  // unscored (frozen/null). With pagination, all rows across all pages are read
+  // and updated in one cycle.
+  const TOTAL = 1500;
+  const pages = Array.from({ length: TOTAL }, (_, i) => ({ id: String(i), slug: `route-${i}` }));
+  supa.__setResponse('route_traffic_daily', 'select', { data: [], error: null });
+  supa.__setResponse('route_pages', 'select', { data: pages, error: null });
+
+  await computeRouteScoresOnce();
+
+  // Every one of the 1500 routes got an update — nothing past row 1000 was dropped.
+  expect(supa.__updateCalls).toHaveLength(TOTAL);
+  expect(supa.__updateCalls.some((c) => c.val === '0')).toBe(true);
+  expect(supa.__updateCalls.some((c) => c.val === '1499')).toBe(true);
 });
 
 test('a single row update failure is logged but does not stop other rows from updating', async () => {
