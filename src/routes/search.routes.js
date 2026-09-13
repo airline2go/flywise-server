@@ -162,10 +162,18 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
   // [ROUTE-INTELLIGENCE-1] Fire-and-forget persistence of the insights
   // object above onto route_pages — previously this lived only inside a
   // single /route-price response and the price cache (which overwrites on
-  // every fetch), so the SSG build never saw it. airline_count here is a
-  // same-search approximation (capped at 8, like insights.airlines); the
-  // authoritative count gets recomputed periodically by
-  // routeIntelligenceRefresh.js from the accumulating route_airlines table.
+  // every fetch), so the SSG build never saw it.
+  //
+  // [AIRLINE-COUNT-CLOBBER-FIX] airline_count is deliberately NOT written
+  // here. insights.airlines is a single search's carriers, capped at 8, so
+  // writing it would overwrite the AUTHORITATIVE, uncapped count that
+  // routeIntelligenceRefresh.js (hourly) and the admin backfill both derive
+  // from the accumulating route_airlines table — the same list the route
+  // page renders from. That clobber is exactly what produced the recurring
+  // `airline-count-mismatch` warnings (airline_count=8 vs unique=19). The
+  // carriers from this search still accumulate into route_airlines below
+  // (ensureRouteAirlineObserved), so the authoritative count stays complete;
+  // route_pages.airline_count is owned solely by those two aggregate paths.
   if (insights && supa) {
     const stopDistribution = stopCounts.reduce((acc, s) => { acc[s] = (acc[s] || 0) + 1; return acc; }, {});
     supa.from('route_pages').update({
@@ -174,7 +182,6 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
       avg_duration_min: insights.avgDurationMin,
       min_duration_min: insights.minDurationMin,
       stop_distribution: stopDistribution,
-      airline_count: insights.airlines.length,
       // [ECONOMIC-INTELLIGENCE] Live itinerary count from this exact search —
       // the "number of available itineraries" metric. Persisted inline (like
       // the operational insights) so the SSG build sees the latest count.

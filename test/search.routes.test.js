@@ -243,7 +243,13 @@ describe('GET /route-price', () => {
     }));
     expect(call.patch.avg_duration_min).toBe(180); // (120 + 240) / 2
     expect(call.patch.stop_distribution).toEqual({ 0: 1, 1: 1 });
-    expect(call.patch.airline_count).toBe(2);
+    // [AIRLINE-COUNT-CLOBBER-FIX] airline_count must NOT be written here: the
+    // inline value is a single search's carriers (capped at 8) and would
+    // overwrite the authoritative, uncapped count owned by
+    // routeIntelligenceRefresh.js / the admin backfill (both derived from the
+    // accumulating route_airlines table). Writing it is what produced the
+    // recurring airline-count-mismatch warnings, so assert it is absent.
+    expect(call.patch).not.toHaveProperty('airline_count');
     expect(call.patch.insights_updated_at).toEqual(expect.any(String));
   });
 
