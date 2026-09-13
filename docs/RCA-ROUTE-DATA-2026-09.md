@@ -152,3 +152,59 @@ reviewed dry-run.
 - No rows deleted or status-changed by this document.
 - No URLs changed. F1's redirects and F2's de-indexing are separate, reviewed PRs.
 - No mass noindex of Category D on the assumption it is junk (rule #3).
+
+---
+
+## Addendum — 2026-09-13: two pipeline bugs that keep NULL-count routes thin forever
+
+**Author:** Claude Code (session) · **Scope:** `src/services/routeIntelligenceRefresh.js`,
+`src/routes/admin.routes.js` (`POST /admin/route-pages/backfill-airlines-batch`).
+
+Follow-up from the flywise-app SEO priority work. The Arabic GSC page
+`/ar/flights/mxp-muc` (Milan MXP → Munich) earns impressions (pos ~9.5) yet is
+served `noindex`. Live checks:
+
+- `GET /route-pages/mxp-muc` → `airline_count = **null**`, `avg_duration_min = null`,
+  `stop_distribution = null`, `price_sample_count = null` → no verified flight
+  evidence → `indexable = false` (correct per `indexability.js`).
+- `route_pages` published total: **2063** (> the PostgREST 1000-row cap).
+
+The RCA above focused on `airline_count = 0` routes. The `mxp-muc` case exposes a
+distinct class — `airline_count = **NULL**` (never computed at all) — kept thin by
+two independent bugs:
+
+### Bug B — the intelligence refresh only ever saw the first 1000 routes
+`refreshRouteIntelligenceOnce()` read `route_pages` with a bare `.select()`. A
+single PostgREST response is capped at 1000 rows, so with 2063 routes every route
+past the cap **never had `airline_count` (re)computed** and stayed `NULL`
+indefinitely. `indexabilityData.js` already paginates its route scan with
+`.range()` for exactly this reason; the refresh did not.
+**Fix:** paginate the scan (`fetchAllRoutePages()`, `.range()` loop until a short
+page) so all published routes are maintained regardless of catalogue size. A route
+with no `route_airlines` rows now correctly gets `airline_count = 0` (NULL → 0),
+moving it into the backfill's reach.
+
+### Bug A — the airline backfill skipped every NULL-count route
+`POST /admin/route-pages/backfill-airlines-batch` targeted
+`.eq('airline_count', 0)`. In SQL `NULL ≠ 0`, so a never-probed route (NULL) was
+**never selected for a Duffel probe** — it could never gain carriers, so it could
+never earn indexability. `mxp-muc` sat in exactly this gap.
+**Fix:** target `.or('airline_count.is.null,airline_count.eq.0')` for both the
+batch selection and the "remaining" count.
+
+### Net effect (no fabricated data)
+Together the pipeline self-heals: the refresh normalizes NULL → 0 across all
+routes, and the backfill probes real Duffel offers for 0/NULL routes, recording
+only genuinely observed carriers. A route with real flights (like MXP→MUC) then
+gains a true `airline_count > 0` and becomes indexable on its own merits; a route
+with genuinely no offers stays honestly `noindex`. No count is invented.
+
+**Tests:** `test/routeIntelligenceRefresh.test.js` gains a >1000-row pagination
+regression (all routes updated, none dropped past the cap);
+`test/admin.routes.test.js` gains a check that the backfill selection predicate is
+null-inclusive. Full server suite green (814 tests).
+
+**Not done here (data action, separate + reviewed):** running the backfill in
+production to repopulate the NULL/0 set is an operational step, not a code change —
+it makes live Duffel calls and is bounded/rate-limited by design. The code fixes
+above are the prerequisite that makes that run actually reach `mxp-muc`.

@@ -42,14 +42,41 @@ async function computeAirlineCounts() {
   return counts;
 }
 
+// [SCALE-PAGINATION] PostgREST caps a single response at 1000 rows, so a bare
+// .select() over route_pages silently returns only the first 1000 — every route
+// beyond that would never have its airline_count (re)computed, leaving it stuck
+// at NULL and therefore permanently thin/noindex. Page explicitly with .range()
+// until a short page signals the end, exactly like indexabilityData.js's route
+// scan, so ALL published routes are maintained no matter the catalogue size.
+async function fetchAllRoutePages() {
+  const PAGE = 1000;
+  const out = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supa.from('route_pages')
+      .select('id, origin_iata, destination_iata, airline_count, stop_distribution')
+      .order('id', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(error.message);
+    const batch = data || [];
+    out.push(...batch);
+    if (batch.length < PAGE) break;
+  }
+  return out;
+}
+
 async function refreshRouteIntelligenceOnce() {
   if (!supa) return;
   try {
     const counts = await computeAirlineCounts();
     if (!counts) return;
 
-    const { data: routePages, error: rpError } = await supa.from('route_pages').select('id, origin_iata, destination_iata, airline_count, stop_distribution');
-    if (rpError) { log('warn', 'route_intelligence_refresh_route_pages_read_failed', { error: rpError.message }); return; }
+    let routePages;
+    try {
+      routePages = await fetchAllRoutePages();
+    } catch (e) {
+      log('warn', 'route_intelligence_refresh_route_pages_read_failed', { error: e.message });
+      return;
+    }
 
     let updated = 0;
     let inconsistent = 0;

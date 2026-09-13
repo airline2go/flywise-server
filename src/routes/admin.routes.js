@@ -1198,10 +1198,16 @@ app.post('/admin/route-pages/backfill-airlines-batch', rateLimit('admin', 120, 6
     // Oldest-touched first so repeated runs cycle through the whole set; only
     // published + zero-airline routes (Category C is already 'dead', so this is
     // exactly the Category-D remainder).
+    // [NULL-COUNT-BLINDSPOT] Target routes with NO observed carriers yet: both
+    // airline_count = 0 (probed, none found) AND airline_count IS NULL (never
+    // touched — a freshly created route, or one beyond the route-intelligence
+    // refresh's reach before its own fix landed). A bare .eq('airline_count', 0)
+    // silently skipped every NULL-count route forever (NULL ≠ 0 in SQL), so real
+    // routes like mxp-muc were never probed and stayed thin/noindex.
     const { data: batch, error: fetchErr } = await supa.from('route_pages')
       .select('id, slug, origin_iata, destination_iata, origin_city_slug, destination_city_slug, origin_country, destination_country')
       .eq('status', 'published')
-      .eq('airline_count', 0)
+      .or('airline_count.is.null,airline_count.eq.0')
       .order('updated_at', { ascending: true })
       .limit(BATCH_SIZE);
     if (fetchErr) throw new Error(fetchErr.message);
@@ -1288,7 +1294,7 @@ app.post('/admin/route-pages/backfill-airlines-batch', rateLimit('admin', 120, 6
 
     const { count: remaining } = await supa.from('route_pages')
       .select('id', { count: 'exact', head: true })
-      .eq('status', 'published').eq('airline_count', 0);
+      .eq('status', 'published').or('airline_count.is.null,airline_count.eq.0');
 
     log('info', 'route_backfill_airlines_batch', { checked: results.length, backfilled });
     res.json({ ok: true, checked: results.length, backfilled, remaining: remaining || 0 });

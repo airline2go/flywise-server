@@ -4,7 +4,16 @@ jest.mock('../src/clients/supabase', () => {
   function makeBuilder(table) {
     const builder = {
       select: () => builder,
-      range: () => Promise.resolve((responses[table] && responses[table].select) || { data: [], error: null }),
+      order: () => builder,
+      range: (from, to) => {
+        const cfg = (responses[table] && responses[table].select) || { data: [], error: null };
+        // Faithfully page a slice of the configured dataset so a paginated scan
+        // (which walks range windows until a short page) is exercised, not just a
+        // single all-rows fetch. An error config still surfaces on the first call.
+        if (cfg.error) return Promise.resolve({ data: null, error: cfg.error });
+        const all = cfg.data || [];
+        return Promise.resolve({ data: all.slice(from, to + 1), error: null });
+      },
       update: (patch) => ({
         eq: (col, val) => {
           updateCalls.push({ table, patch, col, val });
@@ -85,6 +94,26 @@ test('a route_pages read failure aborts the cycle without throwing', async () =>
   supa.__setResponse('route_pages', 'select', { data: null, error: { message: 'boom' } });
   await expect(refreshRouteIntelligenceOnce()).resolves.toBeUndefined();
   expect(log).toHaveBeenCalledWith('warn', 'route_intelligence_refresh_route_pages_read_failed', expect.objectContaining({ error: 'boom' }));
+});
+
+test('[SCALE] refreshes EVERY published route, not just the first PostgREST page (>1000)', async () => {
+  // Regression for the NULL-count blind spot: a bare .select() capped at 1000
+  // rows left every route beyond the cap stuck at NULL airline_count (thin /
+  // noindex forever). The scan must page until a short page ends it. Here 1500
+  // routes span two pages (1000 + 500); all must be updated.
+  supa.__setResponse('route_airlines', 'select', { data: [], error: null });
+  const routes = Array.from({ length: 1500 }, (_, i) => ({
+    id: String(i), origin_iata: 'BER', destination_iata: `D${i}`,
+  }));
+  supa.__setResponse('route_pages', 'select', { data: routes, error: null });
+
+  await refreshRouteIntelligenceOnce();
+
+  // Every one of the 1500 routes got its airline_count written (→ 0 here, which
+  // moves it out of NULL and into the backfill's reach), proving no route was
+  // silently dropped past the 1000-row cap.
+  expect(supa.__updateCalls).toHaveLength(1500);
+  expect(supa.__updateCalls.every((c) => c.patch.airline_count === 0)).toBe(true);
 });
 
 test('a single row update failure is logged but does not stop other rows from updating', async () => {
