@@ -694,3 +694,36 @@ describe('rate limiting on requireAdmin-protected routes', () => {
     expect(lastStatus).toBe(429);
   });
 });
+
+describe('POST /admin/route-pages/backfill-airlines-batch — NULL-count blind spot', () => {
+  beforeEach(() => { supa.from.mockImplementation(trueOriginalFrom); });
+
+  test('targets routes with airline_count NULL as well as 0 (not just = 0)', async () => {
+    // Regression: a bare .eq('airline_count', 0) never matched a NULL-count row
+    // (NULL ≠ 0 in SQL), so a never-probed real route like mxp-muc was skipped
+    // forever and stayed thin/noindex. The batch + remaining-count queries must
+    // use a null-inclusive predicate.
+    const orClauses = [];
+    const originalFrom = supa.from.getMockImplementation();
+    supa.from.mockImplementation((table) => {
+      if (table === 'route_pages') {
+        return {
+          select: () => ({
+            eq: () => ({
+              // batch query: .eq(status).or(...).order(...).limit(...) → [] (empty → early return, no Duffel)
+              or: (clause) => { orClauses.push(clause); return { order: () => ({ limit: () => Promise.resolve({ data: [], error: null }) }) }; },
+            }),
+          }),
+        };
+      }
+      return originalFrom(table);
+    });
+    const app = buildApp();
+    const res = await request(app).post('/admin/route-pages/backfill-airlines-batch').set(AUTH);
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    // The batch selection filtered on both NULL and 0 airline_count.
+    expect(orClauses.length).toBeGreaterThan(0);
+    expect(orClauses[0]).toBe('airline_count.is.null,airline_count.eq.0');
+  });
+});
