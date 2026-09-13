@@ -692,7 +692,15 @@ app.get('/airlines/:code', rateLimit('content', 2500, 60000), async (req, res) =
       .filter(Boolean)
       .slice(0, 6);
 
+    // [HUB-PROVENANCE] Distinguish an admin-VERIFIED hub (airlines.hub_iata was
+    // hand-set — a real fact) from an INFERRED top airport (the most frequent
+    // IATA across the routes we observe). The inference is catalogue-biased and
+    // often wrong (e.g. KLM → FRA not AMS, Air Transat → LAX not YUL), so the
+    // frontend must NOT assert it as the airline's official hub. hubSource lets
+    // it label an admin hub as "Hub" and an inferred one honestly as
+    // "most-served on our routes" (never in the hub FAQ / FAQPage JSON-LD).
     let hubAirport = airline.hub_iata || null;
+    let hubSource = hubAirport ? 'admin' : null;
     if (!hubAirport) {
       const airportCounts = new Map();
       observed.forEach((o) => {
@@ -703,9 +711,10 @@ app.get('/airlines/:code', rateLimit('content', 2500, 60000), async (req, res) =
       for (const [code, count] of airportCounts) {
         if (count > topCount) { hubAirport = code; topCount = count; }
       }
+      if (hubAirport) hubSource = 'inferred';
     }
 
-    res.json({ ok: true, airline: Object.assign({}, airline, { hubAirport }), routes: attachHubRouteIndexable(routes), mostUsedRoutes: attachHubRouteIndexable(mostUsedRoutes) });
+    res.json({ ok: true, airline: Object.assign({}, airline, { hubAirport, hubSource }), routes: attachHubRouteIndexable(routes), mostUsedRoutes: attachHubRouteIndexable(mostUsedRoutes) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }

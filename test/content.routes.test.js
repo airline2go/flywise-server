@@ -341,6 +341,7 @@ describe('GET /airlines/:code', () => {
     const app = buildApp();
     const res = await request(app).get('/airlines/LH');
     expect(res.body.airline.hubAirport).toBe('MUC'); // not FRA, which is what inference would have picked
+    expect(res.body.airline.hubSource).toBe('admin'); // [HUB-PROVENANCE] verified → may be asserted as fact
   });
 
   test('[ROUTE-INTELLIGENCE-3] without an admin override, hubAirport is inferred as the most-observed IATA code', async () => {
@@ -370,6 +371,7 @@ describe('GET /airlines/:code', () => {
     // FRA and JFK both appear twice (origin twice for FRA; destination twice for JFK) — a tie,
     // broken by first-observed-in-iteration-order, which is FRA (appears first in the observed list).
     expect(res.body.airline.hubAirport).toBe('FRA');
+    expect(res.body.airline.hubSource).toBe('inferred'); // [HUB-PROVENANCE] inferred → frontend must NOT assert it as the hub
   });
 });
 
