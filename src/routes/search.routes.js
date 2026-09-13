@@ -1,14 +1,11 @@
-// ═══════════════════════════════════════════════════════════════
-// src/routes/search.routes.js
-// /search (بحث الرحلات الرئيسي)، /route-price (سعر تقديري لصفحات
-// SEO، كاش 6 ساعات)، /search/airports (بحث حي عن المطارات، كاش
-// 5 دقائق)، /debug/raw (تشخيصي، محمي بالأدمن).
-// ═══════════════════════════════════════════════════════════════
-
 const log = require('../utils/log');
 const redis = require('../clients/redis');
 const rateLimit = require('../middleware/rateLimit');
-const { requireAdmin } = require('../middleware/auth');
+const { requireAdmin, attachUserIfPresent } = require('../middleware/auth');
+const {
+  searchGuard, createSearchSession, verifyTurnstile, clientIp, logSearchAccess,
+} = require('../middleware/searchGuard');
+const env = require('../config/env');
 const duffel = require('../services/duffel');
 const { getAdminConfig, setAdminConfig, getTicketProfitTiers, computeTieredMargin } = require('../services/adminConfig');
 const { normalizeOffer } = require('../services/normalizeOffer');
@@ -16,32 +13,21 @@ const { getFareRulesByAirlines, logBaggageResolution } = require('../services/fa
 const { ensureAirlineExists, ensureRouteAirlineObserved } = require('../services/routePages');
 const { isExcludedCarrier } = require('../services/carrierFilter');
 const supa = require('../clients/supabase');
-// [PRICE-SNAPSHOT] Central price freshness/TTL + canonical snapshot builder.
-// The single place that defines "live", the freshness window, and the fixed
-// quote assumptions — see src/config/price.js.
 const { PRICE_FRESHNESS_MS, buildPriceSnapshot } = require('../config/price');
 
-// [MEMORY-LEAK-FIX] كاش 5 دقائق لبحث المطارات — بينضف نفسه دوري
-// كل 5 دقائق عشان مايتراكمش مصطلحات بحث قديمة للأبد.
 const _apCache = new Map();
 setInterval(() => {
   const cutoff = Date.now() - 300000;
   for (const [k, v] of _apCache) { if (v.t < cutoff) _apCache.delete(k); }
 }, 300000).unref();
 
-// [LIVE-TRUST-SIGNAL] عدّاد حقيقي 100% — بيزيد قيمته مرة واحدة بس كل
-// مرة السيرفر فعلاً بيسأل Duffel عن سعر جديد (مش عند كل طلب من
-// المتصفح، وليس لما الرد جاي من الكاش). مفتاح Redis بينتهي تلقائياً
-// بعد 25 ساعة (يعني بيتصفّر لوحده كل يوم من غير أي مهمة مجدولة
-// منفصلة). لو Redis مش متاح، الدالة بترجع null بهدوء والواجهة
-// الأمامية بتخفي القسم ده تماماً بدل ما تعرض صفر أو رقم مختلق.
 async function incrementDailyPriceCheckCounter() {
   if (!redis || redis.status !== 'ready') return;
   try {
     const key = 'daily_price_checks:' + new Date().toISOString().slice(0, 10);
     const count = await redis.incr(key);
     if (count === 1) await redis.expire(key, 25 * 60 * 60);
-  } catch (e) { /* عداد تجميلي — أي فشل هنا أبداً مايوقفش السعر نفسه */ }
+  } catch (e) { /* decorative */ }
 }
 async function getDailyPriceCheckCount() {
   if (!redis || redis.status !== 'ready') return null;
@@ -52,24 +38,9 @@ async function getDailyPriceCheckCount() {
   } catch (e) { return null; }
 }
 
-// [ROUTE-PRICE-TIMEOUT-FIX] supplier_timeout=8000 tells Duffel itself to
-// stop waiting on slow airlines after 8s and return whatever it has —
-// but our OWN client-side abort timer was still the generic 20s used
-// for slower operations like order creation. If Duffel took anywhere
-// close to that 20s despite being told to give up at 8s, our timer
-// aborted, the call got retried as "transient", and a SECOND up-to-20s
-// attempt started — a real ~32.8s case seen in production logs. Passing
-// a matching timeoutMs here (8s + a realistic buffer for network/
-// processing overhead) keeps a single attempt's worst case close to
-// what supplier_timeout already promised, and even the rare retried
-// case stays well under half of what it could reach before.
 const ROUTE_PRICE_DUFFEL_OPTS = { timeoutMs: 12000 };
 
 async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
-  // A representative near-future date — NOT today, which would surface
-  // artificially high last-minute fares that don't reflect a typical
-  // "from" price for the route. (Unless days_ahead was explicitly
-  // requested — then that IS the point, e.g. the Last Minute page.)
   const searchDate = new Date();
   searchDate.setDate(searchDate.getDate() + daysAhead);
   const departure_date = searchDate.toISOString().slice(0, 10);
@@ -81,10 +52,7 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
       cabin_class: 'economy',
     },
   }, null, Object.assign({}, ROUTE_PRICE_DUFFEL_OPTS, {
-    // [API-COST-MONITORING] Only the two route-pricing call sites (this
-    // one, reached by both warming and on-demand /route-price) tag their
-    // Duffel calls with a route — every other Duffel call in the app
-    // (booking, cancellation, etc.) is intentionally left untagged.
+    source: 'admin',
     logContext: { route_origin: from.toUpperCase(), route_destination: to.toUpperCase() },
   }));
 
@@ -101,10 +69,6 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
   }
 
   const ticketTiers = await getTicketProfitTiers();
-  // [3-OFFER-CACHE] One pass over the SAME offers already fetched for
-  // pricing — never a second Duffel call — retaining price/duration/
-  // stops/airline PER offer instead of only a running-minimum scalar,
-  // so cheapest/fastest/best-value can all be picked from one search.
   const priced = offers.map((o) => {
     const netPrice = parseFloat(o.total_amount || 0);
     const margin = computeTieredMargin(netPrice, ticketTiers);
@@ -114,24 +78,15 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
     const segs = slice ? (slice.segments || []) : [];
     const stops = slice ? Math.max(0, segs.length - 1) : null;
     const mc = segs[0] && segs[0].marketing_carrier;
-    // [CARRIER-FILTER] Suppress the display airline name too when it's the
-    // test-mode/placeholder carrier, so it never reaches the offer UI.
     const airline = (mc && mc.name && !isExcludedCarrier(mc.iata_code, mc.name)) ? mc.name : null;
     return { id: o.id, price, durationMin, stops, airline };
   });
   const { cheapest, fastest, bestValue } = selectRouteOffers(priced);
 
-  // [ROUTE-INSIGHTS] Real flight facts pulled from the SAME Duffel
-  // offers already fetched above for pricing — duration, stop count,
-  // and actual operating airlines for this specific route. Previously
-  // every field except total_amount was discarded. These are the
-  // figures the route page's new "Route Insights" section displays —
-  // every one computed from real data for this exact origin/
-  // destination pair, never invented or generic boilerplate.
   const durations = [];
   const stopCounts = [];
   const airlines = new Set();
-  const airlinesObserved = new Map(); // iata_code -> name, for [AIRLINE-PAGES] observation below
+  const airlinesObserved = new Map();
   for (const o of offers) {
     const slice = (o.slices || [])[0];
     if (!slice) continue;
@@ -142,10 +97,6 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
     segs.forEach((s) => {
       const carrierName = s.marketing_carrier?.name;
       const carrierIata = s.marketing_carrier?.iata_code;
-      // [CARRIER-FILTER] Never store or surface Duffel's test-mode carrier
-      // ("Duffel Airways"/ZZ) or normalizeOffer's XX/Unknown placeholder —
-      // token-independent, so a mis-set env or a malformed offer can't leak
-      // a fake airline onto public route/airline pages.
       if (isExcludedCarrier(carrierIata, carrierName)) return;
       if (carrierName) airlines.add(carrierName);
       if (carrierIata) airlinesObserved.set(carrierIata, carrierName);
@@ -156,24 +107,9 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
     minDurationMin: Math.min(...durations),
     directAvailable: stopCounts.some((s) => s === 0),
     allDirect: stopCounts.every((s) => s === 0),
-    airlines: Array.from(airlines).slice(0, 8), // cap — purely defensive, real routes rarely exceed this
+    airlines: Array.from(airlines).slice(0, 8),
   } : null;
 
-  // [ROUTE-INTELLIGENCE-1] Fire-and-forget persistence of the insights
-  // object above onto route_pages — previously this lived only inside a
-  // single /route-price response and the price cache (which overwrites on
-  // every fetch), so the SSG build never saw it.
-  //
-  // [AIRLINE-COUNT-CLOBBER-FIX] airline_count is deliberately NOT written
-  // here. insights.airlines is a single search's carriers, capped at 8, so
-  // writing it would overwrite the AUTHORITATIVE, uncapped count that
-  // routeIntelligenceRefresh.js (hourly) and the admin backfill both derive
-  // from the accumulating route_airlines table — the same list the route
-  // page renders from. That clobber is exactly what produced the recurring
-  // `airline-count-mismatch` warnings (airline_count=8 vs unique=19). The
-  // carriers from this search still accumulate into route_airlines below
-  // (ensureRouteAirlineObserved), so the authoritative count stays complete;
-  // route_pages.airline_count is owned solely by those two aggregate paths.
   if (insights && supa) {
     const stopDistribution = stopCounts.reduce((acc, s) => { acc[s] = (acc[s] || 0) + 1; return acc; }, {});
     supa.from('route_pages').update({
@@ -182,22 +118,12 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
       avg_duration_min: insights.avgDurationMin,
       min_duration_min: insights.minDurationMin,
       stop_distribution: stopDistribution,
-      // [ECONOMIC-INTELLIGENCE] Live itinerary count from this exact search —
-      // the "number of available itineraries" metric. Persisted inline (like
-      // the operational insights) so the SSG build sees the latest count.
       itinerary_count: offers.length,
       insights_updated_at: new Date().toISOString(),
     }).eq('origin_iata', from.toUpperCase()).eq('destination_iata', to.toUpperCase())
       .then(() => {}).catch(() => {});
   }
 
-  // [AIRLINE-PAGES] Fire-and-forget — never blocks or slows down the price
-  // response. Same data already extracted above for `insights.airlines`,
-  // now also persisted (via ensureAirlineExists()/ensureRouteAirlineObserved(),
-  // mirroring ensureCityExists()'s auto-upsert-on-observation pattern) so
-  // it accumulates into real airline pages and a real "airlines flying
-  // this route" list instead of being recomputed from one live search
-  // every page view.
   airlinesObserved.forEach((name, iataCode) => {
     ensureAirlineExists(iataCode, name)
       .then((airlineId) => { if (airlineId) return ensureRouteAirlineObserved(from.toUpperCase(), to.toUpperCase(), airlineId); })
@@ -207,11 +133,6 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
   const currency = offers[0].total_currency || 'EUR';
   const routeOffers = { cheapest, fastest, bestValue };
 
-  // [ECONOMIC-INTELLIGENCE] Append this observed "from" price to the
-  // route_price_history log (append-only) so the periodic aggregator can
-  // compute a real price range / cheapest-ever / trend. Fire-and-forget:
-  // a failed insert must never slow or break the price response. Only
-  // records genuine priced results (cheapest.price is a real fare here).
   if (supa && cheapest && cheapest.price != null) {
     supa.from('route_price_history').insert({
       route_origin_iata: from.toUpperCase(),
@@ -223,34 +144,19 @@ async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
   }
 
   const fetchedAt = new Date().toISOString();
-  // [PRICE-SNAPSHOT] offersCount (route-specific itineraries compared) is now
-  // persisted alongside the price so both the cache path and the snapshot can
-  // surface an honest, per-route "N offers compared" figure — replacing the
-  // site-wide daily counter as the trust number the route page should show.
   await setAdminConfig(cacheKey, { price: cheapest.price, currency, departure_date, insights, offers: routeOffers, offersCount: offers.length, fetchedAt });
   await incrementDailyPriceCheckCounter();
   const checksToday = await getDailyPriceCheckCount();
   const snapshot = buildPriceSnapshot({ price: cheapest.price, currency, checkedAt: fetchedAt, source: 'live', offersCount: offers.length });
-  // Legacy top-level fields kept for backward compatibility; `snapshot` is the
-  // canonical object every consumer should migrate to.
   return { ok: true, price: cheapest.price, currency, departure_date, insights, offers: routeOffers, cached: false, checksToday, checkedAt: fetchedAt, offersCount: offers.length, snapshot };
 }
 
-// [3-OFFER-CACHE] bestValue is a documented, simple heuristic — a
-// weighted, normalized score across price/duration/stops (each 0-1
-// against this search's own min/max; stops capped at 2 for the
-// normalization) — not a black box, and easily retunable via the
-// weights below. Offers with no parseable slice duration are still
-// eligible for "cheapest" but excluded from "fastest"/"bestValue"
-// (both fall back to "cheapest" if NO offer has a usable duration).
 const BEST_VALUE_WEIGHTS = { price: 0.5, duration: 0.3, stops: 0.2 };
 function selectRouteOffers(priced) {
   const cheapest = priced.reduce((a, b) => (b.price < a.price ? b : a));
   const withDuration = priced.filter((p) => p.durationMin != null);
   if (!withDuration.length) return { cheapest, fastest: cheapest, bestValue: cheapest };
-
   const fastest = withDuration.reduce((a, b) => (b.durationMin < a.durationMin ? b : a));
-
   const prices = withDuration.map((p) => p.price);
   const durations = withDuration.map((p) => p.durationMin);
   const minP = Math.min(...prices), maxP = Math.max(...prices);
@@ -267,29 +173,9 @@ function selectRouteOffers(priced) {
   return { cheapest, fastest, bestValue };
 }
 
-// [ROUTE-PRICE-WARMING] Proactively keeps the price cache full so a
-// customer clicking a route-page link — even the very first person ever
-// to visit that specific route — finds a price already there, instead
-// of being the unlucky one who triggers a live ~8-11s Duffel call.
-// Runs entirely in the background, independent of customer traffic:
-// walks the published route list, finds routes whose cached price is
-// missing or older than their OWN configured refresh_frequency, and
-// refreshes a small batch of them one at a time with a deliberate pause
-// between each — so warming the catalog never bursts Duffel with
-// concurrent requests or burns the whole rate-limit budget in one
-// sweep. Safe to run indefinitely: once the catalog is fully warm, a
-// cycle finds nothing due and does almost nothing, only picking up
-// again as routes naturally cross their own threshold.
-//
-// [ROUTE-REFRESH-TIER] refresh_frequency='none' (SEO-only) routes are
-// excluded from this query entirely — this is the actual Duffel-cost
-// control mechanism the whole route-tiering system exists for. A
-// visitor to an SEO-only route page can still trigger an on-demand
-// price via GET /route-price below; it's just never proactively kept
-// warm by this background cycle.
-const ROUTE_PRICE_WARM_BATCH_SIZE = 25; // routes refreshed per cycle — deliberately modest
-const ROUTE_PRICE_WARM_DELAY_MS = 2000; // pause between each Duffel call inside a cycle
-const ROUTE_PRICE_WARM_INTERVAL_MS = 15 * 60 * 1000; // how often a new cycle starts
+const ROUTE_PRICE_WARM_BATCH_SIZE = 25;
+const ROUTE_PRICE_WARM_DELAY_MS = 2000;
+const ROUTE_PRICE_WARM_INTERVAL_MS = 15 * 60 * 1000;
 const REFRESH_FREQUENCY_MS = { '6h': 6 * 60 * 60 * 1000, '12h': 12 * 60 * 60 * 1000, '24h': 24 * 60 * 60 * 1000 };
 
 async function warmRoutePricesOnce() {
@@ -300,16 +186,11 @@ async function warmRoutePricesOnce() {
       .eq('status', 'published')
       .neq('refresh_frequency', 'none');
     if (error || !routes || !routes.length) return;
-
-    // De-dupe origin/destination pairs — multiple route_pages rows can
-    // share the same IATA pair via different slugs/languages, possibly
-    // at different refresh_frequency values; keep the shortest interval
-    // among duplicates so no row's chosen cadence is ever under-served.
     const byPair = new Map();
     for (const r of routes) {
       if (!r.origin_iata || !r.destination_iata) continue;
       const thresholdMs = REFRESH_FREQUENCY_MS[r.refresh_frequency];
-      if (!thresholdMs) continue; // unrecognized value — skip rather than guess
+      if (!thresholdMs) continue;
       const key = r.origin_iata.toUpperCase() + '_' + r.destination_iata.toUpperCase();
       const existing = byPair.get(key);
       if (!existing || thresholdMs < existing.thresholdMs) {
@@ -317,7 +198,6 @@ async function warmRoutePricesOnce() {
       }
     }
     const pairs = Array.from(byPair.values());
-
     let warmedThisCycle = 0;
     for (const p of pairs) {
       if (warmedThisCycle >= ROUTE_PRICE_WARM_BATCH_SIZE) break;
@@ -325,9 +205,8 @@ async function warmRoutePricesOnce() {
       try {
         const cached = await getAdminConfig(p.cacheKey, null);
         if (cached && cached.fetchedAt && (Date.now() - new Date(cached.fetchedAt).getTime()) < p.thresholdMs) due = false;
-      } catch (e) { /* any read error → treat as due, safe default */ }
+      } catch (e) { /* treat as due */ }
       if (!due) continue;
-
       try {
         await fetchAndCacheRoutePrice(p.from, p.to, 21, p.cacheKey);
         log('info', 'route_price_warmed', { from: p.from, to: p.to });
@@ -342,20 +221,11 @@ async function warmRoutePricesOnce() {
   }
 }
 
-// Starts ~30s after boot (lets the server finish starting up first),
-// then repeats on a fixed interval. .unref() so these timers never keep
-// the process alive on their own during shutdown.
-setTimeout(() => { warmRoutePricesOnce(); }, 30000).unref();
-setInterval(() => { warmRoutePricesOnce(); }, ROUTE_PRICE_WARM_INTERVAL_MS).unref();
+if (env.DUFFEL_BACKGROUND_SEARCH_ENABLED) {
+  setTimeout(() => { warmRoutePricesOnce(); }, 30000).unref();
+  setInterval(() => { warmRoutePricesOnce(); }, ROUTE_PRICE_WARM_INTERVAL_MS).unref();
+}
 
-// [DURATION-OUTLIERS] The "average flight time" must reflect a TYPICAL
-// itinerary, not be dragged up by a handful of absurd multi-stop / overnight
-// connections a single search can return (e.g. Amsterdam→Paris showing a
-// 6h33m average against a 1h06m nonstop). We exclude any itinerary whose
-// total duration exceeds DURATION_OUTLIER_MULTIPLE× the shortest itinerary on
-// the route — a connection taking more than triple the fastest option is an
-// outlier, not representative of the route. If trimming would leave nothing
-// (degenerate data), we fall back to the raw mean so a value is still shown.
 const DURATION_OUTLIER_MULTIPLE = 3;
 function avgDurationExcludingOutliers(durations) {
   if (!durations || !durations.length) return null;
@@ -366,7 +236,72 @@ function avgDurationExcludingOutliers(durations) {
   return Math.round(source.reduce((a, b) => a + b, 0) / source.length);
 }
 
+const _publishedRouteCache = { t: 0, map: new Map() };
+const PUBLISHED_ROUTE_CACHE_MS = 60000;
+
+async function isPublishedRoute(from, to) {
+  const origin = String(from || '').toUpperCase();
+  const dest = String(to || '').toUpperCase();
+  if (!/^[A-Z]{3}$/.test(origin) || !/^[A-Z]{3}$/.test(dest)) return false;
+  const pair = origin + '_' + dest;
+  const hit = _publishedRouteCache.map.get(pair);
+  if (hit && (Date.now() - hit.t) < PUBLISHED_ROUTE_CACHE_MS) return hit.ok;
+  if (!supa) {
+    _publishedRouteCache.map.set(pair, { t: Date.now(), ok: false });
+    return false;
+  }
+  try {
+    const { data, error } = await supa.from('route_pages')
+      .select('origin_iata,destination_iata')
+      .eq('status', 'published');
+    let ok = false;
+    if (!error && Array.isArray(data)) {
+      ok = data.some((r) =>
+        String(r.origin_iata || '').toUpperCase() === origin &&
+        String(r.destination_iata || '').toUpperCase() === dest
+      );
+    }
+    _publishedRouteCache.map.set(pair, { t: Date.now(), ok });
+    return ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+function duffelSearchOpts(req, source, extra) {
+  return Object.assign({
+    source,
+    searchContext: {
+      valid: !!(req.searchSession && req.searchSession.valid),
+      sid: req.searchSession && req.searchSession.sid,
+      userId: req.userId || null,
+      ip: clientIp(req),
+    },
+  }, extra || {});
+}
+
 module.exports = (app) => {
+app.post('/search/session', rateLimit('search-session', 10, 60000), async (req, res) => {
+  try {
+    const ip = clientIp(req);
+    const ts = await verifyTurnstile(req.body && req.body.turnstile_token, ip);
+    if (!ts.ok) {
+      logSearchAccess({
+        endpoint: '/search/session', source: 'session_issue', sid: null, ip,
+        allowed: false, reason: ts.reason || 'turnstile_failed',
+      });
+      return res.status(403).json({ ok: false, error: 'Suche nicht verfügbar. Bitte Seite neu laden.' });
+    }
+    const session = createSearchSession();
+    logSearchAccess({
+      endpoint: '/search/session', source: 'session_issue', sid: session.sid, ip, allowed: true,
+    });
+    res.json({ ok: true, token: session.token, expires_at: session.exp });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: 'Suche nicht verfügbar. Bitte Seite neu laden.' });
+  }
+});
+
 app.get('/debug/raw', requireAdmin, rateLimit('pay', 10, 60000), async (req, res) => {
   try {
     const { origin, destination, departure_date, cabin_class = 'economy' } = req.query;
@@ -374,14 +309,9 @@ app.get('/debug/raw', requireAdmin, rateLimit('pay', 10, 60000), async (req, res
       return res.status(400).json({ ok: false, error: 'use ?origin=BER&destination=ORD&departure_date=2026-06-25' });
     }
     const result = await duffel('POST', '/air/offer_requests?return_offers=true', {
-      data: {
-        slices: [{ origin, destination, departure_date }],
-        passengers: [{ type: 'adult' }],
-        cabin_class
-      },
-    });
+      data: { slices: [{ origin, destination, departure_date }], passengers: [{ type: 'adult' }], cabin_class },
+    }, null, { source: 'admin' });
     const offers = result.data?.offers || [];
-    // Return the first 3 offers raw, plus a focused summary of the fare-related fields
     const summary = offers.slice(0, 5).map(o => {
       const seg0 = o.slices?.[0]?.segments?.[0];
       const pax0 = seg0?.passengers?.[0];
@@ -395,30 +325,23 @@ app.get('/debug/raw', requireAdmin, rateLimit('pay', 10, 60000), async (req, res
         conditions: o.conditions || null,
       };
     });
-    res.json({
-      ok: true,
-      total_offers: offers.length,
-      fare_summary: summary,
-      first_offer_raw: offers[0] || null
-    });
+    res.json({ ok: true, total_offers: offers.length, fare_summary: summary, first_offer_raw: offers[0] || null });
   } catch (err) {
     res.status(err.status || 500).json({ ok: false, error: err.message, details: err.details });
   }
 });
 
-// [SEARCH-CACHE] كاش قصير جداً (90 ثانية بس) لنفس البحث بالظبط —
-// بيحمي من حالات زي دبل كليك على زرار البحث، أو أكتر من مستخدم
-// بيدوّر على نفس المسار/التاريخ في نفس اللحظة تقريباً، من غير ما
-// يضربوا Duffel مرتين لنفس الحاجة بالظبط. المدة قصيرة جداً عمداً —
-// عروض Duffel بتتغيّر وبتنتهي صلاحيتها، فمكانش آمن نخليها كاش
-// طويل زي أسعار route-price التقديرية.
 const _searchCache = new Map();
 setInterval(() => {
   const cutoff = Date.now() - 90000;
   for (const [k, v] of _searchCache) { if (v.t < cutoff) _searchCache.delete(k); }
 }, 90000).unref();
 
-app.post('/search', rateLimit('search', 30, 60000), async (req, res) => {
+app.post('/search', attachUserIfPresent, searchGuard({
+  bucket: 'search', source: 'user_search',
+  ipMax: 30, ipWindowMs: 60000,
+  sessionMax: 15, sessionWindowMs: 60000,
+}), async (req, res) => {
   try {
     const {
       origin, destination, departure_date,
@@ -438,10 +361,8 @@ app.post('/search', rateLimit('search', 30, 60000), async (req, res) => {
     for (let i = 0; i < children; i++) passengers.push({ type: 'child' });
     for (let i = 0; i < infants; i++) passengers.push({ type: 'infant_without_seat' });
 
-    // Build slices: either multi-city (slices provided) or simple one-way/return
     let slices;
     if (Array.isArray(bodySlices) && bodySlices.length) {
-      // Multi-city: accept the slices the client built, keep only valid legs
       slices = bodySlices
         .filter((s) => s && s.origin && s.destination && s.departure_date)
         .map((s) => ({ origin: s.origin, destination: s.destination, departure_date: s.departure_date }));
@@ -458,16 +379,9 @@ app.post('/search', rateLimit('search', 30, 60000), async (req, res) => {
 
     const result = await duffel('POST', '/air/offer_requests?return_offers=true&supplier_timeout=8000', {
       data: { slices, passengers, cabin_class },
-    }, null, ROUTE_PRICE_DUFFEL_OPTS);
+    }, null, duffelSearchOpts(req, 'user_search', ROUTE_PRICE_DUFFEL_OPTS));
 
-    // [PRICING-FIX] Fetch the tiers ONCE for this whole search response —
-    // a single search can return dozens of offers, and they all share the
-    // same admin-configured margin tiers at this moment in time.
     const ticketTiers = await getTicketProfitTiers();
-    // [FARE-INTEL] Prefetch verified fare rules for every carrier in this
-    // response in ONE round trip, then hand the map to each normalizeOffer call
-    // (same once-per-search pattern as ticketTiers) so baggage is resolved
-    // against verified, sourced rules instead of guessed defaults.
     const rawOffers = result.data?.offers || [];
     const carrierCodes = [...new Set(rawOffers
       .map((o) => o?.slices?.[0]?.segments?.[0]?.marketing_carrier?.iata_code)
@@ -477,10 +391,6 @@ app.post('/search', rateLimit('search', 30, 60000), async (req, res) => {
       fareRulesByAirline = await getFareRulesByAirlines(carrierCodes);
     } catch (_) { fareRulesByAirline = {}; }
     const offers = rawOffers.map((o) => normalizeOffer(o, ticketTiers, fareRulesByAirline));
-    // [FARE-INTEL §27] Observability: record every offer whose baggage was
-    // actually resolved from a verified rule (not Duffel, not a guess), so we
-    // can later answer "why did Airpiv say 23 kg for this ticket?". Best-effort,
-    // fire-and-forget — never delays or breaks the search response.
     try {
       for (const off of offers) {
         if (off && off.baggage) logBaggageResolution(off.id, off.baggage.meta && off.baggage.meta.ctx || {}, off.baggage);
@@ -490,8 +400,7 @@ app.post('/search', rateLimit('search', 30, 60000), async (req, res) => {
     const responseData = { ok: true, offer_request_id: result.data?.id, offers, total: offers.length };
     _searchCache.set(searchCacheKey, { t: Date.now(), data: responseData });
     res.json(responseData);
-    incrementDailyPriceCheckCounter(); // بعد إرسال الرد — أبداً ميأخرش وقت استجابة البحث نفسه
-
+    incrementDailyPriceCheckCounter();
   } catch (err) {
     res.status(err.status || 500).json({ ok: false, error: err.message, details: err.details });
   }
@@ -501,84 +410,67 @@ app.get('/route-price', rateLimit('route-price', 60, 60000), async (req, res) =>
   try {
     const { from, to } = req.query;
     if (!from || !to) return res.status(400).json({ ok: false, error: 'from und to sind erforderlich' });
-
-    // [LAST-MINUTE-SUPPORT] اختياري تماماً — لو ماتبعتش days_ahead، السلوك
-    // زي ما كان بالظبط (21 يوم). لو اتبعت (زي صفحة Last Minute اللي
-    // بتحتاج تاريخ قريب حقيقي فعلاً، مش تقديري بعيد)، بيتقيّد بين يوم
-    // واحد و90 يوم عشان مايتستخدمش لإرهاق Duffel بتواريخ عشوائية.
-    // مفتاح كاش منفصل تماماً — سعر تاريخ قريب مختلف فعلياً عن السعر
-    // التقديري العادي، مش بديل له.
+    const origin = String(from).toUpperCase();
+    const dest = String(to).toUpperCase();
+    const allowed = await isPublishedRoute(origin, dest);
+    if (!allowed) {
+      logSearchAccess({
+        endpoint: '/route-price', source: 'route_price', ip: clientIp(req),
+        route: origin + '-' + dest, allowed: false, reason: 'route_not_allowed',
+      });
+      return res.status(403).json({ ok: false, error: 'Route nicht verfügbar.' });
+    }
     const daysAhead = req.query.days_ahead ? Math.max(1, Math.min(90, parseInt(req.query.days_ahead, 10) || 21)) : 21;
-    const cacheKey = 'route_price_' + from.toUpperCase() + '_' + to.toUpperCase() + (daysAhead !== 21 ? '_d' + daysAhead : '');
+    const cacheKey = 'route_price_' + origin + '_' + dest + (daysAhead !== 21 ? '_d' + daysAhead : '');
     const cached = await getAdminConfig(cacheKey, null);
     const cacheAgeMs = cached && cached.fetchedAt ? (Date.now() - new Date(cached.fetchedAt).getTime()) : Infinity;
-
-    // [PRICE-CACHE-STALE-WHILE-REVALIDATE] Fresh cache (<12h): return
-    // immediately, unchanged fast path. Stale cache (cached but ≥12h
-    // old): respond immediately with the stale price so the visitor
-    // never waits, then refresh it in the background for next time.
-    // Only a route that has NEVER been priced before falls through to a
-    // true blocking live call — a one-time cost per route, ever.
-    // [CENTRAL-TTL] Freshness is governed by the single PRICE_FRESHNESS_MS knob
-    // (config/price.js), not a hard-coded 12h here. A cache younger than the
-    // window is served as fresh; an older one is served stale-while-revalidate
-    // and its snapshot reports isLive=false so the page never calls it live.
-    if (cached && cacheAgeMs < PRICE_FRESHNESS_MS) {
-      const checksToday = await getDailyPriceCheckCount();
-      const snapshot = buildPriceSnapshot({ price: cached.price, currency: cached.currency, checkedAt: cached.fetchedAt, source: 'cache', offersCount: cached.offersCount });
-      return res.json({ ok: true, price: cached.price, currency: cached.currency, departure_date: cached.departure_date, insights: cached.insights || null, offers: cached.offers || null, cached: true, checksToday, checkedAt: cached.fetchedAt, offersCount: cached.offersCount ?? null, snapshot });
-    }
     if (cached) {
       const checksToday = await getDailyPriceCheckCount();
-      const snapshot = buildPriceSnapshot({ price: cached.price, currency: cached.currency, checkedAt: cached.fetchedAt, source: 'stale-cache', offersCount: cached.offersCount });
-      res.json({ ok: true, price: cached.price, currency: cached.currency, departure_date: cached.departure_date, insights: cached.insights || null, offers: cached.offers || null, cached: true, stale: true, checksToday, checkedAt: cached.fetchedAt, offersCount: cached.offersCount ?? null, snapshot });
-      fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey).catch((e) => log('warn', 'route_price_revalidate_failed', { error: e.message }));
-      return;
+      const stale = cacheAgeMs >= PRICE_FRESHNESS_MS;
+      const snapshot = buildPriceSnapshot({
+        price: cached.price, currency: cached.currency, checkedAt: cached.fetchedAt,
+        source: stale ? 'stale-cache' : 'cache', offersCount: cached.offersCount,
+      });
+      return res.json({
+        ok: true, price: cached.price, currency: cached.currency,
+        departure_date: cached.departure_date, insights: cached.insights || null,
+        offers: cached.offers || null, cached: true, stale: stale || undefined,
+        checksToday, checkedAt: cached.fetchedAt, offersCount: cached.offersCount ?? null, snapshot,
+      });
     }
-
-    const fresh = await fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey);
-    res.json(fresh);
+    logSearchAccess({
+      endpoint: '/route-price', source: 'route_price', ip: clientIp(req),
+      route: origin + '-' + dest, allowed: true, reason: 'cache_miss_no_duffel',
+    });
+    res.json({
+      ok: true, price: null, currency: null, departure_date: null,
+      snapshot: buildPriceSnapshot({ source: 'none' }),
+    });
   } catch (err) {
-    // Fail soft — a route page should still render (without a price) if
-    // Duffel is briefly unavailable, never show a broken page.
     log('warn', 'route_price_failed', { error: err.message });
     res.json({ ok: true, price: null, currency: null, departure_date: null });
   }
 });
 
-app.get('/search/airports', rateLimit('airports', 60, 60000), async (req, res) => {
+app.get('/search/airports', attachUserIfPresent, searchGuard({
+  bucket: 'airports', source: 'airport_search',
+  ipMax: 60, ipWindowMs: 60000,
+  sessionMax: 60, sessionWindowMs: 60000,
+}), async (req, res) => {
   try {
     const q = (req.query.q || '').toString().trim();
     if (q.length < 2) return res.json({ ok: true, airports: [] });
-
     const key = q.toLowerCase();
     const hit = _apCache.get(key);
     if (hit && (Date.now() - hit.t) < 300000) {
       return res.json({ ok: true, airports: hit.data });
     }
-
-    const result = await duffel('GET', '/places/suggestions?query=' + encodeURIComponent(q));
-
+    const result = await duffel('GET', '/places/suggestions?query=' + encodeURIComponent(q), null, null, duffelSearchOpts(req, 'airport_search'));
     const out = [];
     const seen = new Set();
-    // [DEDUP-TYPE-FIX] Was keyed by `o.code` alone — a city entry from
-    // Duffel shares the exact same IATA code as its own main airport
-    // (e.g. city "MUC" and airport "MUC" for Munich). Since the city
-    // entry got pushed first, the real airport entry (with real lat/lng)
-    // was silently rejected as a "duplicate" — this is exactly why
-    // searching "Munich" or "Berlin" could return the city placeholder
-    // with no usable coordinates instead of the real airport. Keying by
-    // `type + ':' + code` lets a city and an airport with the same code
-    // coexist as two distinct, valid results.
     const push = (o) => { const k = o.type + ':' + o.code; if (o.code && !seen.has(k)) { seen.add(k); out.push(o); } };
     (result.data || []).forEach((p) => {
       if (p.type === 'city') {
-        // [ROUTE-PAGES] Cities deliberately get no lat/lng — a city can
-        // span multiple airports at different points, so there's no
-        // single coordinate that accurately represents it. Only
-        // individual airports (below) carry coordinates, which is what
-        // route-distance calculations actually need anyway (search is by
-        // airport code, never by city code).
         push({ type: 'city', code: p.iata_code, name: p.name, city: p.name, country: p.iata_country_code });
         (p.airports || []).forEach((ap) => push({
           type: 'airport', code: ap.iata_code, name: ap.name,
@@ -595,9 +487,8 @@ app.get('/search/airports', rateLimit('airports', 60, 60000), async (req, res) =
         });
       }
     });
-
     _apCache.set(key, { t: Date.now(), data: out });
-    res.set('Cache-Control', 'public, max-age=3600'); // المتصفح يخزّن نتائج المطارات ساعة
+    res.set('Cache-Control', 'public, max-age=3600');
     res.json({ ok: true, airports: out });
   } catch (err) {
     res.status(err.status || 500).json({ ok: false, error: err.message, airports: [] });
@@ -607,3 +498,6 @@ app.get('/search/airports', rateLimit('airports', 60, 60000), async (req, res) =
 module.exports.warmRoutePricesOnce = warmRoutePricesOnce;
 module.exports.selectRouteOffers = selectRouteOffers;
 module.exports.avgDurationExcludingOutliers = avgDurationExcludingOutliers;
+module.exports.fetchAndCacheRoutePrice = fetchAndCacheRoutePrice;
+module.exports.isPublishedRoute = isPublishedRoute;
+module.exports.resetPublishedRouteCache = function () { _publishedRouteCache.map.clear(); };

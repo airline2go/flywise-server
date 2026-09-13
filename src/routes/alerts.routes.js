@@ -1,8 +1,7 @@
-// ═══════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════
 // src/routes/alerts.routes.js
-// [#18] تنبيهات الأسعار (saved_trips) — حفظ مسار للمتابعة، عرض
-// تنبيهات المستخدم، حذف/تعطيل، وفحص السعر الحي لمسار محفوظ.
-// ═══════════════════════════════════════════════════════════════
+// [#18] تنبيهات الأسعار (saved_trips)
+// ═════════════════════════════════════════════════════════════
 
 const log = require('../utils/log');
 const supa = require('../clients/supabase');
@@ -12,11 +11,6 @@ const { attachUserIfPresent } = require('../middleware/auth');
 
 module.exports = (app) => {
 
-// [IDOR-FIX] Saved-trip alerts are per-account data — every route below
-// requires a verified Supabase auth token (attachUserIfPresent +
-// req.userId check) and always scopes the query to req.userId, never to
-// a client-supplied user_id. Mirrors the same pattern already used by
-// /my-bookings in auth.routes.js.
 app.post('/alerts', attachUserIfPresent, rateLimit('alerts', 20, 60000), async (req, res) => {
   try {
     if (!req.userId) return res.status(401).json({ ok: false, error: 'Nicht angemeldet' });
@@ -37,7 +31,6 @@ app.post('/alerts', attachUserIfPresent, rateLimit('alerts', 20, 60000), async (
   }
 });
 
-// List the caller's own saved routes
 app.get('/alerts', attachUserIfPresent, rateLimit('alerts', 60, 60000), async (req, res) => {
   try {
     if (!req.userId) return res.status(401).json({ ok: false, error: 'Nicht angemeldet' });
@@ -52,7 +45,6 @@ app.get('/alerts', attachUserIfPresent, rateLimit('alerts', 60, 60000), async (r
   }
 });
 
-// Delete / deactivate a saved route (only if it belongs to the caller)
 app.post('/alerts/:id/delete', attachUserIfPresent, rateLimit('alerts', 30, 60000), async (req, res) => {
   try {
     if (!req.userId) return res.status(401).json({ ok: false, error: 'Nicht angemeldet' });
@@ -66,8 +58,6 @@ app.post('/alerts/:id/delete', attachUserIfPresent, rateLimit('alerts', 30, 6000
   }
 });
 
-// Live cheapest-price check for a saved route (also updates last_price) —
-// only for a route the caller owns.
 app.post('/alerts/:id/check', attachUserIfPresent, rateLimit('alerts', 20, 60000), async (req, res) => {
   try {
     if (!req.userId) return res.status(401).json({ ok: false, error: 'Nicht angemeldet' });
@@ -82,6 +72,9 @@ app.post('/alerts/:id/check', attachUserIfPresent, rateLimit('alerts', 20, 60000
         passengers: [{ type: 'adult' }],
         cabin_class: 'economy',
       },
+    }, null, {
+      source: 'user_search',
+      searchContext: { valid: true, sid: 'user:' + req.userId, userId: req.userId },
     });
     const offers = (offerReq.data && offerReq.data.offers) || [];
     let cheapest = null;
