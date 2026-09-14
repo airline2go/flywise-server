@@ -126,8 +126,8 @@ async function main() {
   console.log(`  Selected routes:   ${results.total}`);
   if (results.availableTotal !== undefined) console.log(`  Available routes:  ${results.availableTotal}`);
   console.log(`  Updated:           ${results.updated}${dryRun ? ' (dry-run, not written)' : ''}`);
-  console.log(`  Skipped:            ${results.skipped}`);
-  console.log(`  Failed:             ${results.failed}`);
+  console.log(`  Skipped:           ${results.skipped}`);
+  console.log(`  Failed:            ${results.failed}`);
   const angles = Object.entries(results.angleCounts || {});
   if (angles.length) {
     console.log('\n  Opening angles used:');
