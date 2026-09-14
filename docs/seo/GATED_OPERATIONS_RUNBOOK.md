@@ -7,9 +7,10 @@ Each is one approval away.
 ---
 
 ## A. Flight-data backfill (fills airline_count from real Duffel offers)
-**Why:** 182 published routes are distance-only. Most (176) were never
-health-checked/backfilled — likely real routes missing data (e.g. `ams-auh`,
-`arn-hel`), not dead. Backfill first, kill nothing prematurely.
+**Current state (2026-09-14):** 2,063 published routes. Of these, 317 currently
+have `airline_count = 0`; 139 of those already have other hard flight evidence
+(duration / stops / itinerary), while 178 have no hard flight evidence at all.
+Do the Duffel backfill before any indexability flip — kill nothing prematurely.
 
 **How (operational — admin endpoint, Duffel-backed):** repeatedly POST
 `/admin/route-pages/backfill-airlines-batch` (admin auth) until `remaining` = 0.
@@ -27,7 +28,7 @@ Also run the P0-3-safe health-check the same way
 (`/admin/route-pages/health-check-batch`) — multi-date, streak-based, never dead
 on one empty date or an API error.
 
-## B. Re-run the 182 report, then flip (only after A)
+## B. Re-run the evidence report, then flip (only after A)
 1. Re-run the evidence query (see `flywise-app/docs/seo/P0-1_indexability_report.md`)
    to get the NEW count of routes with still zero verified evidence.
 2. Review that shortened list with the owner (buckets A–E).
@@ -37,24 +38,16 @@ on one empty date or an API error.
    verified evidence to `noindex` and drops them from the sitemap; URLs are kept.
    Rollback: unset the env var and redeploy.
 
-## C. Delete the 10 duplicate losers + add the unique constraint (P1-1)
-Safe now: the 10 losers have persistent 301s (P0-4), so deleting the rows keeps
-the old URLs redirecting.
-1. Verify preconditions:
-   ```sql
-   -- every redirect source has a published target:
-   SELECT count(*) FROM route_redirects r
-   WHERE NOT EXISTS (SELECT 1 FROM route_pages p WHERE p.slug=r.target_slug AND p.status='published');
-   -- expect 0
-   ```
-2. Apply `flywise-server/sql/seo_p1_1_route_pair_unique.sql` (deletes losers in a
-   guarded way, asserts 0 remaining published-pair dups, adds the partial unique
-   index). It aborts itself if anything is off.
-3. Confirm: `SELECT count(*) FROM (…published pair dups…)=0` and the old loser
-   URLs still 301 (spot-check e.g. `/flights/ams-vie`).
+## C. Duplicate published route pairs (P1-1) — DONE / VERIFIED
+The guarded migration `sql/seo_p1_1_route_pair_unique.sql` was already applied.
+Production now has **0 published pair duplicates** and the partial unique index
+`uq_route_pages_published_pair` is present. The 10 loser URLs retain persistent
+301 redirects through `route_redirects`.
+
+No further production migration is required for C.
 
 ## D. Finance / security migrations (P2-9) — SEPARATE PR, out of SEO scope
-Live check found these are **NOT in production**: `webhook_events`,
+Live check found these are NOT in production: `webhook_events`,
 `booking_idempotency`, `payment_ledger`, and the promo atomic-increment RPC
 (SQL files exist in `flywise-server/sql/`). Apply them in a dedicated,
 reviewed finance/security PR (not mixed with SEO), then re-verify RLS + indexes
@@ -73,7 +66,7 @@ Choose one; then P2-5 (crawlable blog listing) is covered by A/B.
 - Route (data-backed): 200 + self-canonical + `index,follow`.
 - No-evidence route (post-flip): `noindex,follow` + absent from sitemap; URL still 200.
 - Duplicate loser: `/flights/ams-vie` → 301 → `/flights/amsterdam-vienna` (200);
-  still 301 after the loser row is deleted (C).
+  still 301 after the loser row was deleted (C).
 - Blog post: 200; alternates reciprocal; x-default → de.
 - Sitemap: index + every child 200 + valid XML; run `scripts/audit-sitemap.mjs --base=https://airpiv.com`.
 - API: `api.airpiv.com/robots.txt` = Disallow:/ ; responses carry `X-Robots-Tag: noindex,nofollow`.
