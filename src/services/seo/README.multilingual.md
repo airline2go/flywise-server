@@ -1,0 +1,1 @@
+Multilingual route SEO is implemented in engine.js + blocks.secondary.js + multilingualSeoBatchProcessor.js. Secondary locales are stored separately in route_seo_locales. Use generate-seo-content.js --language=<locale> or --all-languages after applying sql/route_seo_locales.sql.
