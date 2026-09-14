@@ -13,8 +13,14 @@
 // مابيمنعش قراءة الملف ده.
 // ═══════════════════════════════════════════════════════════════
 
+const registerLocalizedRouteSeo = require('./localized-route-seo.routes');
+
 module.exports = (app) => {
   app.get('/robots.txt', (req, res) => {
     res.type('text/plain').send('User-agent: *\nDisallow: /\n');
   });
+
+  // Register before content.routes so /route-pages/:slug/localized and
+  // /route-pages/:slug/hreflang are handled by the localized SEO surface.
+  registerLocalizedRouteSeo(app);
 };
