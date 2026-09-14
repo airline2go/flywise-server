@@ -72,15 +72,16 @@ function recordQualityRejection(qualityReasons, reasons) {
   }
 }
 
-async function processRoutes(progressCallback, { dryRun = false, force = false, language = PRIMARY_LANGUAGE } = {}) {
-  const routes = await fetchRoutePagesForUpdate();
+async function processRoutes(progressCallback, { dryRun = false, force = false, language = PRIMARY_LANGUAGE, limit = null } = {}) {
+  const allRoutes = await fetchRoutePagesForUpdate();
+  const routes = Number.isInteger(limit) && limit > 0 ? allRoutes.slice(0, limit) : allRoutes;
   const total = routes.length;
   let processed = 0, updated = 0, skipped = 0, failed = 0, qualityRejected = 0;
   const skipReasons = {};
   const qualityReasons = {};
   const angleCounts = {};
 
-  log('info', 'seo_batch_start', { total, dryRun, force, language });
+  log('info', 'seo_batch_start', { total, availableTotal: allRoutes.length, dryRun, force, language, limit });
 
   for (let i = 0; i < routes.length; i += BATCH_SIZE) {
     const batch = routes.slice(i, i + BATCH_SIZE);
@@ -114,14 +115,14 @@ async function processRoutes(progressCallback, { dryRun = false, force = false, 
         log('warn', 'route_processing_error', { route: route.id, error: err.message });
       }
       if (progressCallback) {
-        progressCallback({ processed, total, updated, skipped, failed, qualityRejected,
+        progressCallback({ processed, total, availableTotal: allRoutes.length, updated, skipped, failed, qualityRejected,
           current: `${route.origin_city} → ${route.destination_city}` });
       }
     }
     if (!dryRun) await new Promise((r) => setTimeout(r, 100));
   }
 
-  const summary = { total, processed, updated, skipped, failed, qualityRejected, skipReasons, qualityReasons, angleCounts, dryRun, force, language };
+  const summary = { total, availableTotal: allRoutes.length, processed, updated, skipped, failed, qualityRejected, skipReasons, qualityReasons, angleCounts, dryRun, force, language, limit };
   log('info', 'seo_batch_complete', summary);
   return summary;
 }
