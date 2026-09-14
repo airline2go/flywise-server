@@ -1,9 +1,8 @@
 // [MULTI-DATE-AIRLINE-BACKFILL]
 // Controlled admin-only recovery path for published routes that still have
-// no observed carriers. Unlike the legacy one-date backfill, each route gets
-// up to three representative future departure dates and stops at the first
-// date that returns an offer. Empty results are never treated as proof that
-// the route is dead.
+// no observed carriers. Each route gets up to five representative future
+// departure dates and stops at the first date that returns an offer. Empty
+// results are never treated as proof that the route is dead.
 
 const log = require('../utils/log');
 const supa = require('../clients/supabase');
@@ -16,7 +15,7 @@ const triggerRebuild = require('../utils/triggerRebuild');
 const { routeEntities, dedupeEntities } = require('../utils/routeEntities');
 
 const BATCH_SIZE = 10;
-const DATE_OFFSETS = (process.env.ROUTE_AIRLINE_BACKFILL_DATE_OFFSETS || '21,60,135').split(',')
+const DATE_OFFSETS = (process.env.ROUTE_AIRLINE_BACKFILL_DATE_OFFSETS || '3,7,14,21,45').split(',')
   .map((n) => parseInt(n.trim(), 10)).filter((n) => Number.isFinite(n) && n > 0).slice(0, 5);
 
 function pad2(value) { return String(value).padStart(2, '0'); }
