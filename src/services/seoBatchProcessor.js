@@ -14,11 +14,14 @@
 //     columns and never collides with a human edit.
 //   • Every page is data-composed and seed-varied — corpus similarity is kept
 //     well under the 40% rule (verified in test/seoEngine.test.js).
+//   • Generated content is written only after the deterministic SEO quality
+//     gate passes; rejected content is never persisted.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const supa = require('../clients/supabase');
 const log = require('../utils/log');
 const { generateRoutePage, assessEligibility, supportedLanguages } = require('./seo/engine');
+const { validateGeneratedSeo } = require('./seo/quality');
 
 const BATCH_SIZE = 50;
 // route_pages base row content is German (platform's primary market).
@@ -62,11 +65,18 @@ async function writeGenerated(route, gen, language, { dryRun = false, force = fa
   return { updated: true };
 }
 
+function recordQualityRejection(qualityReasons, reasons) {
+  for (const reason of reasons || []) {
+    qualityReasons[reason] = (qualityReasons[reason] || 0) + 1;
+  }
+}
+
 async function processRoutes(progressCallback, { dryRun = false, force = false, language = PRIMARY_LANGUAGE } = {}) {
   const routes = await fetchRoutePagesForUpdate();
   const total = routes.length;
-  let processed = 0, updated = 0, skipped = 0, failed = 0;
+  let processed = 0, updated = 0, skipped = 0, failed = 0, qualityRejected = 0;
   const skipReasons = {};
+  const qualityReasons = {};
   const angleCounts = {};
 
   log('info', 'seo_batch_start', { total, dryRun, force, language });
@@ -81,24 +91,36 @@ async function processRoutes(progressCallback, { dryRun = false, force = false, 
           skipped++;
           for (const r of gen.reasons) skipReasons[r] = (skipReasons[r] || 0) + 1;
         } else {
-          const w = await writeGenerated(route, gen, language, { dryRun, force });
-          if (w.error) failed++;
-          else if (w.updated) { updated++; angleCounts[gen.angle] = (angleCounts[gen.angle] || 0) + 1; }
-          else skipped++;
+          const quality = validateGeneratedSeo(route, gen.content);
+          if (!quality.valid) {
+            qualityRejected++;
+            recordQualityRejection(qualityReasons, quality.reasons);
+            log('info', 'route_seo_quality_rejected', {
+              route_id: route.id,
+              language,
+              reasons: quality.reasons,
+              metrics: quality.metrics,
+            });
+          } else {
+            const w = await writeGenerated(route, gen, language, { dryRun, force });
+            if (w.error) failed++;
+            else if (w.updated) { updated++; angleCounts[gen.angle] = (angleCounts[gen.angle] || 0) + 1; }
+            else skipped++;
+          }
         }
       } catch (err) {
         failed++;
         log('warn', 'route_processing_error', { route: route.id, error: err.message });
       }
       if (progressCallback) {
-        progressCallback({ processed, total, updated, skipped, failed,
+        progressCallback({ processed, total, updated, skipped, failed, qualityRejected,
           current: `${route.origin_city} → ${route.destination_city}` });
       }
     }
     if (!dryRun) await new Promise((r) => setTimeout(r, 100));
   }
 
-  const summary = { total, processed, updated, skipped, failed, skipReasons, angleCounts, dryRun, force, language };
+  const summary = { total, processed, updated, skipped, failed, qualityRejected, skipReasons, qualityReasons, angleCounts, dryRun, force, language };
   log('info', 'seo_batch_complete', summary);
   return summary;
 }
@@ -114,6 +136,18 @@ async function processSingleRoute(routeId, language = PRIMARY_LANGUAGE, { dryRun
     log('info', 'single_route_skipped', { route_id: routeId, reasons: gen.reasons });
     return { skipped: true, reasons: gen.reasons };
   }
+
+  const quality = validateGeneratedSeo(route, gen.content);
+  if (!quality.valid) {
+    log('info', 'single_route_quality_rejected', {
+      route_id: routeId,
+      language,
+      reasons: quality.reasons,
+      metrics: quality.metrics,
+    });
+    return { skipped: true, qualityRejected: true, reasons: quality.reasons, metrics: quality.metrics };
+  }
+
   const w = await writeGenerated(route, gen, language, { dryRun, force });
   log('info', 'single_route_seo_generated', { route_id: routeId, language, angle: gen.angle, dryRun, updated: w.updated });
   return { skipped: false, angle: gen.angle, content: gen.content, ...w };
