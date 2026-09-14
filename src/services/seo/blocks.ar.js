@@ -3,9 +3,23 @@ const AR = {
   intro:'قارن هذا المسار بالاعتماد على الأسعار وشركات الطيران ومدة الرحلة وخيارات الاتصال المرصودة، دون افتراضات غير مدعومة.',
   price:'الأسعار المرصودة', air:'شركة طيران', direct:'الخيارات المباشرة', airport:'تفاصيل المطارات', plan:'التخطيط للرحلة',
   faq:['كم تستغرق الرحلة؟','ما السعر المتوقع؟','هل توجد رحلات مباشرة؟','ما شركات الطيران التي تشغّل هذا المسار؟'],
-  title:c=>`${c.o} إلى ${c.d}: الأسعار وشركات الطيران والمدة | Airpiv`,
-  meta:c=>`قارن رحلات ${c.o} إلى ${c.d} باستخدام بيانات المسار المتاحة عن الأسعار وشركات الطيران ومدة الرحلة والخيارات المباشرة.`
+  title:c=>`${c.o} إلى ${c.d}: السعر والمدة | Airpiv`,
+  meta:c=>`قارن رحلات ${c.o} إلى ${c.d} باستخدام بيانات المسار المتاحة عن الأسعار وشركات الطيران ومدة الرحلة والخيارات المباشرة. راجع البيانات المتاحة قبل الحجز.`
 };
+
+function safeTitle(c) {
+  const preferred=AR.title(c);
+  if(preferred.length>=30&&preferred.length<=70)return preferred;
+  const compact=`${c.o} إلى ${c.d} | Airpiv`;
+  if(compact.length>=30&&compact.length<=70)return compact;
+  return preferred;
+}
+function safeMeta(c) {
+  const preferred=AR.meta(c);
+  if(preferred.length>=90&&preferred.length<=170)return preferred;
+  const compact=`قارن رحلات ${c.o} إلى ${c.d} باستخدام بيانات الأسعار وشركات الطيران ومدة الرحلة والخيارات المباشرة. راجع البيانات المتاحة قبل الحجز.`;
+  return compact.length>=90&&compact.length<=170?compact:preferred;
+}
 
 function makeArabicPack(){
   const l=AR;
@@ -29,6 +43,6 @@ function makeArabicPack(){
     {id:'direct-analysis',weight:c=>c.facts.has('directness')?6:0,applicable:c=>c.facts.has('directness'),render:c=>({heading:l.h[3],body:direct(c)})},
     {id:'airport-detail',weight:()=>4,applicable:()=>true,render:c=>({heading:l.h[4],body:airport(c)})},
     {id:'travel-planning',weight:()=>3,applicable:()=>true,render:c=>({heading:l.h[5],body:plan(c)})}
-  ],FAQ_CANDIDATES:faq,TITLES:[l.title],METAS:[l.meta]};
+  ],FAQ_CANDIDATES:faq,TITLES:[safeTitle],METAS:[safeMeta]};
 }
 module.exports={makeArabicPack};
