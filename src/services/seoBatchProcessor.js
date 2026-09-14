@@ -25,18 +25,25 @@ const { validateGeneratedSeo } = require('./seo/quality');
 const { sortRoutesForSeo } = require('./seo/routePriority');
 
 const BATCH_SIZE = 50;
+const ROUTE_PAGE_FETCH_SIZE = 1000;
 // route_pages base row content is German (platform's primary market).
 const PRIMARY_LANGUAGE = 'de';
 
 async function fetchRoutePagesForUpdate() {
   if (!supa) throw new Error('Database not available');
-  const { data, error } = await supa
-    .from('route_pages')
-    .select('*')
-    .eq('status', 'published')
-    .order('created_at', { ascending: false });
-  if (error) throw new Error(error.message);
-  return sortRoutesForSeo(data || []);
+  const allRoutes = [];
+  for (let from = 0; ; from += ROUTE_PAGE_FETCH_SIZE) {
+    const { data, error } = await supa
+      .from('route_pages')
+      .select('*')
+      .eq('status', 'published')
+      .order('created_at', { ascending: false })
+      .range(from, from + ROUTE_PAGE_FETCH_SIZE - 1);
+    if (error) throw new Error(error.message);
+    allRoutes.push(...(data || []));
+    if (!data || data.length < ROUTE_PAGE_FETCH_SIZE) break;
+  }
+  return sortRoutesForSeo(allRoutes);
 }
 
 // Writes generated content to the seo_* columns. `force` re-generates even when

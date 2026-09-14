@@ -6,12 +6,23 @@ const { sortRoutesForSeo } = require('./seo/routePriority');
 
 const SECONDARY_LANGUAGES = supportedLanguages().filter((language) => language !== 'de');
 const BATCH_SIZE = 100;
+const ROUTE_PAGE_FETCH_SIZE = 1000;
 
 async function fetchRoutes() {
   if (!supa) throw new Error('Database not available');
-  const { data, error } = await supa.from('route_pages').select('*').eq('status', 'published').order('created_at', { ascending: false });
-  if (error) throw new Error(error.message);
-  return sortRoutesForSeo(data || []);
+  const allRoutes = [];
+  for (let from = 0; ; from += ROUTE_PAGE_FETCH_SIZE) {
+    const { data, error } = await supa
+      .from('route_pages')
+      .select('*')
+      .eq('status', 'published')
+      .order('created_at', { ascending: false })
+      .range(from, from + ROUTE_PAGE_FETCH_SIZE - 1);
+    if (error) throw new Error(error.message);
+    allRoutes.push(...(data || []));
+    if (!data || data.length < ROUTE_PAGE_FETCH_SIZE) break;
+  }
+  return sortRoutesForSeo(allRoutes);
 }
 
 async function processLocalizedRoutes({ language, limit = null, dryRun = false, force = false, progressCallback } = {}) {
