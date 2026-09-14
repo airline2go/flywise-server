@@ -14,11 +14,11 @@ const route = {
 
 describe('multilingual route SEO', () => {
   test('supports all eight target locales', () => {
-    expect(supportedLanguages()).toEqual(expect.arrayContaining(['de','en','fr','es','it','nl','pl','tr']));
+    expect(supportedLanguages()).toEqual(expect.arrayContaining(['de','en','fr','es','it','nl','tr','ar']));
     expect(supportedLanguages()).toHaveLength(8);
   });
 
-  test.each(['en','fr','es','it','nl','pl','tr'])('generates native secondary content for %s', (language) => {
+  test.each(['en','fr','es','it','nl','tr','ar'])('generates native secondary content for %s', (language) => {
     const result = generateRoutePage(route, language);
     expect(result.skipped).toBe(false);
     expect(result.content.title).toBeTruthy();
