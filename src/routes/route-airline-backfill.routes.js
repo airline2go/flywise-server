@@ -16,7 +16,7 @@ const triggerRebuild = require('../utils/triggerRebuild');
 const { routeEntities, dedupeEntities } = require('../utils/routeEntities');
 
 const BATCH_SIZE = 10;
-const DATE_OFFSETS = (process.env.ROUTE_AIRLINE_BACKFILL_DATE_OFFSETS || '21,60,135').split(',')
+const DATE_OFFSETS = (process.env.ROUTE_AIRLINE_BACKFILL_DATE_OFFSETS || '3,14,45').split(',')
   .map((n) => parseInt(n.trim(), 10)).filter((n) => Number.isFinite(n) && n > 0).slice(0, 5);
 
 function pad2(value) { return String(value).padStart(2, '0'); }
@@ -38,16 +38,18 @@ function inspectOffers(offers) {
   for (const offer of offers || []) {
     const segments = (offer.slices && offer.slices[0] && offer.slices[0].segments) || [];
     let hasCarrier = false;
+    const offerCarriers = [];
     for (const segment of segments) {
       const iata = segment.marketing_carrier && segment.marketing_carrier.iata_code;
       const name = segment.marketing_carrier && segment.marketing_carrier.name;
       if (!iata && !name) continue;
       hasCarrier = true;
-      const key = `${iata || ''}|${name || ''}`;
-      carrierSamples.set(key, { iata: iata || null, name: name || null, excluded: isExcludedCarrier(iata, name) });
+      const sample = { iata: iata || null, name: name || null, excluded: isExcludedCarrier(iata, name) };
+      carrierSamples.set(`${iata || ''}|${name || ''}`, sample);
+      offerCarriers.push(sample);
     }
     if (!hasCarrier) missingCarrierOffers++;
-    else if ([...carrierSamples.values()].every((carrier) => carrier.excluded)) excludedCarrierOffers++;
+    else if (offerCarriers.length && offerCarriers.every((carrier) => carrier.excluded)) excludedCarrierOffers++;
   }
   return { totalOffers: (offers || []).length, excludedCarrierOffers, missingCarrierOffers, carrierSamples: [...carrierSamples.values()].slice(0, 10) };
 }
@@ -82,15 +84,16 @@ module.exports = (app) => {
       const changedEntities = [];
 
       const probeRoute = async (route) => {
-        let probes = 0; let found = 0; let matchedDate = null;
+        let probes = 0; let found = 0; let matchedDate = null; let error = null;
         let totalOffers = 0; let excludedCarrierOffers = 0; let missingCarrierOffers = 0;
-        const carrierSamples = [];
+        const carrierSamples = []; const attemptedDates = [];
         try {
           for (const departure_date of dates) {
+            attemptedDates.push(departure_date);
             probes++;
             const result = await duffel('POST', '/air/offer_requests?return_offers=true&supplier_timeout=8000', {
               data: { slices: [{ origin: route.origin_iata, destination: route.destination_iata, departure_date }], passengers: [{ type: 'adult' }], cabin_class: 'economy' },
-            }, null, { source: 'admin', logContext: { route_origin: route.origin_iata, route_destination: route.destination_iata } });
+            }, null, { source: 'admin', logContext: { route_origin: route.origin_iata, route_destination: route.destination_iata, departure_date } });
             const offers = (result.data && result.data.offers) || [];
             const inspection = inspectOffers(offers);
             totalOffers += inspection.totalOffers;
@@ -110,19 +113,12 @@ module.exports = (app) => {
             }
           }
         } catch (e) {
-          log('warn', 'multidate_backfill_airlines_error', {
-            route_id: route.id, route_origin: route.origin_iata, route_destination: route.destination_iata,
-            error: e.message, code: e.code || null, status: e.status || null, probes, totalOffers,
-            excludedCarrierOffers, missingCarrierOffers, carrierSamples,
-          });
-          return { id: route.id, found: null, probes, matchedDate: null, totalOffers, excludedCarrierOffers, missingCarrierOffers, carrierSamples };
+          error = e.message;
+          log('warn', 'multidate_backfill_airlines_error', { route_id: route.id, route_origin: route.origin_iata, route_destination: route.destination_iata, error: e.message, code: e.code || null, status: e.status || null, probes, attemptedDates, totalOffers, excludedCarrierOffers, missingCarrierOffers, carrierSamples });
+          return { id: route.id, origin_iata: route.origin_iata, destination_iata: route.destination_iata, found: null, probes, attemptedDates, matchedDate: null, error, totalOffers, excludedCarrierOffers, missingCarrierOffers, carrierSamples };
         }
-        log('info', 'multidate_backfill_airlines_probe', {
-          route_id: route.id, route_origin: route.origin_iata, route_destination: route.destination_iata,
-          probes, totalOffers, excludedCarrierOffers, missingCarrierOffers, carrierSamples,
-          found, matchedDate,
-        });
-        return { id: route.id, origin_iata: route.origin_iata, destination_iata: route.destination_iata, found, probes, matchedDate, totalOffers, excludedCarrierOffers, missingCarrierOffers, carrierSamples };
+        log('info', 'multidate_backfill_airlines_probe', { route_id: route.id, route_origin: route.origin_iata, route_destination: route.destination_iata, probes, attemptedDates, totalOffers, excludedCarrierOffers, missingCarrierOffers, carrierSamples, found, matchedDate });
+        return { id: route.id, origin_iata: route.origin_iata, destination_iata: route.destination_iata, found, probes, attemptedDates, matchedDate, error, totalOffers, excludedCarrierOffers, missingCarrierOffers, carrierSamples };
       };
 
       for (let i = 0; i < batch.length; i += 2) {
@@ -139,28 +135,17 @@ module.exports = (app) => {
         offersFound += result.found;
         const update = { updated_at: now };
         if (result.found > 0) {
-          const { count } = await supa.from('route_airlines').select('id', { count: 'exact', head: true })
-            .eq('route_origin_iata', result.origin_iata).eq('route_destination_iata', result.destination_iata);
+          const { count } = await supa.from('route_airlines').select('id', { count: 'exact', head: true }).eq('route_origin_iata', result.origin_iata).eq('route_destination_iata', result.destination_iata);
           update.airline_count = count || result.found; backfilled++;
           const full = byId.get(result.id); if (full) changedEntities.push(routeEntities(full));
         }
         await supa.from('route_pages').update(update).eq('id', result.id);
       }
       if (changedEntities.length) triggerRebuild(dedupeEntities(changedEntities));
-      const { count: remaining } = await supa.from('route_pages').select('id', { count: 'exact', head: true })
-        .eq('status', 'published').or('airline_count.is.null,airline_count.eq.0');
-      log('info', 'route_backfill_airlines_multidate_batch', {
-        checked: results.length, backfilled, offersFound, probes, dates,
-        diagnostics: results.map(({ id, totalOffers, excludedCarrierOffers, missingCarrierOffers, carrierSamples, matchedDate }) => ({
-          id, totalOffers, excludedCarrierOffers, missingCarrierOffers, carrierSamples, matchedDate,
-        })),
-      });
-      res.json({
-        ok: true, checked: results.length, backfilled, offersFound, probes, dates, remaining: remaining || 0,
-        diagnostics: results.map(({ id, totalOffers, excludedCarrierOffers, missingCarrierOffers, carrierSamples, matchedDate }) => ({
-          id, totalOffers, excludedCarrierOffers, missingCarrierOffers, carrierSamples, matchedDate,
-        })),
-      });
+      const { count: remaining } = await supa.from('route_pages').select('id', { count: 'exact', head: true }).eq('status', 'published').or('airline_count.is.null,airline_count.eq.0');
+      const diagnostics = results.map(({ id, totalOffers, excludedCarrierOffers, missingCarrierOffers, carrierSamples, matchedDate, attemptedDates, error }) => ({ id, totalOffers, excludedCarrierOffers, missingCarrierOffers, carrierSamples, matchedDate, attemptedDates, error }));
+      log('info', 'route_backfill_airlines_multidate_batch', { checked: results.length, backfilled, offersFound, probes, dates, diagnostics });
+      res.json({ ok: true, checked: results.length, backfilled, offersFound, probes, dates, remaining: remaining || 0, diagnostics });
     } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
   });
 };
