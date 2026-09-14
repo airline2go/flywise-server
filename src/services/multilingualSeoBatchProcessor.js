@@ -31,9 +31,22 @@ async function processLocalizedRoutes({ language, limit = null, dryRun = false, 
           if (existing && existing.seo_generated_at) { skipped++; continue; }
         }
         const gen = generateRoutePage(route, language);
-        if (gen.skipped) { skipped++; continue; }
+        if (gen.skipped) {
+          skipped++;
+          log('info', 'localized_route_seo_skipped', { route_id: route.id, language, reasons: gen.reasons || [] });
+          continue;
+        }
         const quality = validateGeneratedSeo(route, gen.content);
-        if (!quality.valid) { qualityRejected++; continue; }
+        if (!quality.valid) {
+          qualityRejected++;
+          log('warn', 'localized_route_seo_quality_rejected', {
+            route_id: route.id,
+            language,
+            reasons: quality.reasons,
+            metrics: quality.metrics,
+          });
+          continue;
+        }
         const row = {
           route_page_id: route.id,
           language,
