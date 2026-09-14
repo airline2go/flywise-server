@@ -36,13 +36,13 @@ jobs:
           fi
 
           for i in $(seq 1 "$BATCHES"); do
-            echo "=== Backfill batch $i/$BATCHES ==="
+            echo "=== Multi-date backfill batch $i/$BATCHES ==="
             curl --fail-with-body --silent --show-error \
               --request POST \
               --header "Authorization: Bearer $ADMIN_TOKEN" \
               --header "Accept: application/json" \
               --header "Content-Type: application/json" \
-              https://api.airpiv.com/admin/route-pages/backfill-airlines-batch
+              https://api.airpiv.com/admin/route-pages/backfill-airlines-multi-date-batch
             echo
             if [ "$i" -lt "$BATCHES" ]; then
               sleep 1
