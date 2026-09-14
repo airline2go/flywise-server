@@ -1,5 +1,5 @@
 // Locale metadata for route SEO. Content generation remains evidence-first.
-const SUPPORTED_ROUTE_SEO_LOCALES = ['de', 'en', 'fr', 'es', 'it', 'nl', 'pl', 'tr'];
+const SUPPORTED_ROUTE_SEO_LOCALES = ['de', 'en', 'fr', 'es', 'it', 'nl', 'tr', 'ar'];
 
 const LOCALE_META = {
   de: { lang: 'de', label: 'Deutsch' },
@@ -8,8 +8,8 @@ const LOCALE_META = {
   es: { lang: 'es', label: 'Español' },
   it: { lang: 'it', label: 'Italiano' },
   nl: { lang: 'nl', label: 'Nederlands' },
-  pl: { lang: 'pl', label: 'Polski' },
   tr: { lang: 'tr', label: 'Türkçe' },
+  ar: { lang: 'ar', label: 'العربية' },
 };
 
 function isSupportedRouteSeoLocale(locale) {
