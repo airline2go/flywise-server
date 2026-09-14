@@ -31,6 +31,26 @@ function futureDates() {
     return formatUtcDate(d);
   });
 }
+function inspectOffers(offers) {
+  let excludedCarrierOffers = 0;
+  let missingCarrierOffers = 0;
+  const carrierSamples = new Map();
+  for (const offer of offers || []) {
+    const segments = (offer.slices && offer.slices[0] && offer.slices[0].segments) || [];
+    let hasCarrier = false;
+    for (const segment of segments) {
+      const iata = segment.marketing_carrier && segment.marketing_carrier.iata_code;
+      const name = segment.marketing_carrier && segment.marketing_carrier.name;
+      if (!iata && !name) continue;
+      hasCarrier = true;
+      const key = `${iata || ''}|${name || ''}`;
+      carrierSamples.set(key, { iata: iata || null, name: name || null, excluded: isExcludedCarrier(iata, name) });
+    }
+    if (!hasCarrier) missingCarrierOffers++;
+    else if ([...carrierSamples.values()].every((carrier) => carrier.excluded)) excludedCarrierOffers++;
+  }
+  return { totalOffers: (offers || []).length, excludedCarrierOffers, missingCarrierOffers, carrierSamples: [...carrierSamples.values()].slice(0, 10) };
+}
 function extractCarriers(offers) {
   const observed = new Map();
   for (const offer of offers || []) {
@@ -63,13 +83,24 @@ module.exports = (app) => {
 
       const probeRoute = async (route) => {
         let probes = 0; let found = 0; let matchedDate = null;
+        let totalOffers = 0; let excludedCarrierOffers = 0; let missingCarrierOffers = 0;
+        const carrierSamples = [];
         try {
           for (const departure_date of dates) {
             probes++;
             const result = await duffel('POST', '/air/offer_requests?return_offers=true&supplier_timeout=8000', {
               data: { slices: [{ origin: route.origin_iata, destination: route.destination_iata, departure_date }], passengers: [{ type: 'adult' }], cabin_class: 'economy' },
             }, null, { source: 'admin', logContext: { route_origin: route.origin_iata, route_destination: route.destination_iata } });
-            const observed = extractCarriers(result.data && result.data.offers);
+            const offers = (result.data && result.data.offers) || [];
+            const inspection = inspectOffers(offers);
+            totalOffers += inspection.totalOffers;
+            excludedCarrierOffers += inspection.excludedCarrierOffers;
+            missingCarrierOffers += inspection.missingCarrierOffers;
+            for (const sample of inspection.carrierSamples) {
+              if (carrierSamples.length >= 10) break;
+              if (!carrierSamples.some((existing) => existing.iata === sample.iata && existing.name === sample.name)) carrierSamples.push(sample);
+            }
+            const observed = extractCarriers(offers);
             if (observed.size) {
               for (const [iata, name] of observed) {
                 const airlineId = await ensureAirlineExists(iata, name);
@@ -79,10 +110,19 @@ module.exports = (app) => {
             }
           }
         } catch (e) {
-          log('warn', 'multidate_backfill_airlines_error', { route_id: route.id, error: e.message, probes });
-          return { id: route.id, found: null, probes, matchedDate: null };
+          log('warn', 'multidate_backfill_airlines_error', {
+            route_id: route.id, route_origin: route.origin_iata, route_destination: route.destination_iata,
+            error: e.message, code: e.code || null, status: e.status || null, probes, totalOffers,
+            excludedCarrierOffers, missingCarrierOffers, carrierSamples,
+          });
+          return { id: route.id, found: null, probes, matchedDate: null, totalOffers, excludedCarrierOffers, missingCarrierOffers, carrierSamples };
         }
-        return { id: route.id, origin_iata: route.origin_iata, destination_iata: route.destination_iata, found, probes, matchedDate };
+        log('info', 'multidate_backfill_airlines_probe', {
+          route_id: route.id, route_origin: route.origin_iata, route_destination: route.destination_iata,
+          probes, totalOffers, excludedCarrierOffers, missingCarrierOffers, carrierSamples,
+          found, matchedDate,
+        });
+        return { id: route.id, origin_iata: route.origin_iata, destination_iata: route.destination_iata, found, probes, matchedDate, totalOffers, excludedCarrierOffers, missingCarrierOffers, carrierSamples };
       };
 
       for (let i = 0; i < batch.length; i += 2) {
@@ -109,8 +149,18 @@ module.exports = (app) => {
       if (changedEntities.length) triggerRebuild(dedupeEntities(changedEntities));
       const { count: remaining } = await supa.from('route_pages').select('id', { count: 'exact', head: true })
         .eq('status', 'published').or('airline_count.is.null,airline_count.eq.0');
-      log('info', 'route_backfill_airlines_multidate_batch', { checked: results.length, backfilled, offersFound, probes, dates });
-      res.json({ ok: true, checked: results.length, backfilled, offersFound, probes, dates, remaining: remaining || 0 });
+      log('info', 'route_backfill_airlines_multidate_batch', {
+        checked: results.length, backfilled, offersFound, probes, dates,
+        diagnostics: results.map(({ id, totalOffers, excludedCarrierOffers, missingCarrierOffers, carrierSamples, matchedDate }) => ({
+          id, totalOffers, excludedCarrierOffers, missingCarrierOffers, carrierSamples, matchedDate,
+        })),
+      });
+      res.json({
+        ok: true, checked: results.length, backfilled, offersFound, probes, dates, remaining: remaining || 0,
+        diagnostics: results.map(({ id, totalOffers, excludedCarrierOffers, missingCarrierOffers, carrierSamples, matchedDate }) => ({
+          id, totalOffers, excludedCarrierOffers, missingCarrierOffers, carrierSamples, matchedDate,
+        })),
+      });
     } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
   });
 };
