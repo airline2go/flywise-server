@@ -19,6 +19,7 @@ async function processLocalizedRoutes({ language, limit = null, dryRun = false, 
   const allRoutes = await fetchRoutes();
   const routes = Number.isInteger(limit) && limit > 0 ? allRoutes.slice(0, limit) : allRoutes;
   let processed = 0, updated = 0, skipped = 0, failed = 0, qualityRejected = 0;
+  const qualityRejectedReasons = {};
 
   for (let i = 0; i < routes.length; i += BATCH_SIZE) {
     const batch = routes.slice(i, i + BATCH_SIZE);
@@ -33,7 +34,13 @@ async function processLocalizedRoutes({ language, limit = null, dryRun = false, 
         const gen = generateRoutePage(route, language);
         if (gen.skipped) { skipped++; continue; }
         const quality = validateGeneratedSeo(route, gen.content);
-        if (!quality.valid) { qualityRejected++; continue; }
+        if (!quality.valid) {
+          qualityRejected++;
+          for (const reason of quality.reasons || ['unknown quality rejection']) {
+            qualityRejectedReasons[reason] = (qualityRejectedReasons[reason] || 0) + 1;
+          }
+          continue;
+        }
         const row = {
           route_page_id: route.id,
           language,
@@ -56,11 +63,11 @@ async function processLocalizedRoutes({ language, limit = null, dryRun = false, 
         failed++;
         log('warn', 'localized_route_seo_failed', { route_id: route.id, language, error: error.message });
       }
-      if (progressCallback) progressCallback({ processed, total: routes.length, updated, skipped, failed, qualityRejected, language });
+      if (progressCallback) progressCallback({ processed, total: routes.length, updated, skipped, failed, qualityRejected, qualityRejectedReasons, language });
     }
     if (!dryRun) await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  return { language, total: routes.length, processed, updated, skipped, failed, qualityRejected, dryRun, force };
+  return { language, total: routes.length, processed, updated, skipped, failed, qualityRejected, qualityRejectedReasons, dryRun, force };
 }
 
 module.exports = { SECONDARY_LANGUAGES, processLocalizedRoutes, fetchRoutes, BATCH_SIZE };
