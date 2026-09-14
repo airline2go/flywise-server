@@ -1,64 +1,28 @@
 #!/usr/bin/env node
 
-// ═══════════════════════════════════════════════════════════════════════════
-// CLI: generate quality-gated SEO content for published route pages.
-//
-// Usage:
-//   node src/cli/generate-seo-content.js --stats            # readiness report
-//   node src/cli/generate-seo-content.js --route-id=<id>    # one route
-//   node src/cli/generate-seo-content.js --limit=50         # process top N routes
-//   node src/cli/generate-seo-content.js --dry-run          # preview, no writes
-//   node src/cli/generate-seo-content.js                    # generate all
-//
-// The engine SKIPS routes with manual content or insufficient data — skips are
-// reported, not treated as failures.
-// ═══════════════════════════════════════════════════════════════════════════
-
 require('../config/env');
-const {
-  processRoutes,
-  generateStatistics,
-  processSingleRoute,
-  PRIMARY_LANGUAGE,
-} = require('../services/seoBatchProcessor');
+const { processRoutes, generateStatistics, processSingleRoute, PRIMARY_LANGUAGE } = require('../services/seoBatchProcessor');
+const { processLocalizedRoutes, SECONDARY_LANGUAGES } = require('../services/multilingualSeoBatchProcessor');
 
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
 const force = args.includes('--force');
 const routeId = args.find((a) => a.startsWith('--route-id='))?.split('=')[1];
 const limitArg = args.find((a) => a.startsWith('--limit='))?.split('=')[1];
+const language = args.find((a) => a.startsWith('--language='))?.split('=')[1] || PRIMARY_LANGUAGE;
+const allLanguages = args.includes('--all-languages');
 const limit = limitArg === undefined ? null : Number(limitArg);
 const statsOnly = args.includes('--stats');
 
 if (limitArg !== undefined && (!Number.isInteger(limit) || limit <= 0)) {
-  console.error('--limit must be a positive integer');
-  process.exit(2);
+  console.error('--limit must be a positive integer'); process.exit(2);
+}
+if (!['de', ...SECONDARY_LANGUAGES].includes(language)) {
+  console.error(`Unsupported language: ${language}`); process.exit(2);
 }
 
 if (args.includes('--help')) {
-  console.log(`
-Usage: node src/cli/generate-seo-content.js [options]
-
-  --stats            Show a readiness report and exit (no writes)
-  --route-id=<id>    Generate for a single route
-  --limit=<n>        Process only the top N routes by SEO priority
-  --dry-run          Preview generated fields without writing to the database
-  --force            Refresh routes that already have generated content
-  --help             Show this help
-
-Generated content is written to the dedicated seo_* columns; the manual
-override columns (custom_title/…/intro_text) are never touched and always win
-at render time. Routes with insufficient real data are skipped, not filled.
-The batch limit applies after the deterministic route-priority sort, so each
-run processes the highest-priority slice without an unsafe offset.
-
-Examples:
-  node src/cli/generate-seo-content.js --stats
-  node src/cli/generate-seo-content.js --route-id=abc123 --dry-run
-  node src/cli/generate-seo-content.js --limit=50
-  node src/cli/generate-seo-content.js            # fill routes not yet generated
-  node src/cli/generate-seo-content.js --force    # refresh all after data changes
-`);
+  console.log(`\nUsage: node src/cli/generate-seo-content.js [options]\n\n  --stats                 Show readiness report and exit\n  --route-id=<id>         Generate one German route\n  --language=<lang>       Generate a secondary locale (en/fr/es/it/nl/pl/tr)\n  --all-languages         Generate all seven secondary locales\n  --limit=<n>             Process only the top N routes\n  --dry-run               Preview without database writes\n  --force                 Refresh already generated localized rows\n  --help                  Show this help\n`);
   process.exit(0);
 }
 
@@ -69,82 +33,44 @@ function printStats(stats) {
   console.log(`  Already generated:           ${stats.already_generated}`);
   console.log(`  Skipped — manual content:    ${stats.skipped_manual_content}`);
   console.log(`  Skipped — insufficient data: ${stats.skipped_insufficient_data}`);
-  console.log(`  Languages supported:          ${stats.languages_supported.join(', ')}`);
-  const hauls = Object.entries(stats.eligible_by_haul || {});
-  if (hauls.length) {
-    console.log('\n  Eligible by haul:');
-    hauls.forEach(([h, n]) => console.log(`    ${n.toString().padStart(5)}  ${h}`));
-  }
-  const reasons = Object.entries(stats.skip_reason_breakdown || {});
-  if (reasons.length) {
-    console.log('\n  Skip reasons:');
-    reasons.sort((a, b) => b[1] - a[1]).forEach(([r, n]) => console.log(`    ${n.toString().padStart(5)}  ${r}`));
-  }
-  console.log('');
+  console.log(`  Languages supported:         ${stats.languages_supported.join(', ')}`);
+}
+
+async function runLocalized(lang) {
+  console.log(`\n=== Localized SEO: ${lang} ===`);
+  const results = await processLocalizedRoutes({ language: lang, limit, dryRun, force, progressCallback: (p) => {
+    if (p.processed === p.total || p.processed % 25 === 0) {
+      console.log(`${lang}: ${p.processed}/${p.total} updated:${p.updated} skipped:${p.skipped} failed:${p.failed} rejected:${p.qualityRejected}`);
+    }
+  }});
+  console.log(`Summary ${lang}: updated=${results.updated} skipped=${results.skipped} failed=${results.failed} rejected=${results.qualityRejected}`);
+  return results;
 }
 
 async function main() {
-  console.log('\n=== SEO content generation (quality-gated) ===\n');
+  if (statsOnly) { printStats(await generateStatistics()); return 0; }
 
-  if (statsOnly) {
-    printStats(await generateStatistics());
-    console.log('Statistics only — no changes made.\n');
+  if (allLanguages) {
+    const results = [];
+    for (const lang of SECONDARY_LANGUAGES) results.push(await runLocalized(lang));
+    return results.some((r) => r.failed > 0) ? 1 : 0;
+  }
+
+  if (language !== PRIMARY_LANGUAGE) {
+    await runLocalized(language);
     return 0;
   }
 
   if (routeId) {
-    console.log(`Processing single route ${routeId} (${PRIMARY_LANGUAGE})${dryRun ? ' [dry-run]' : ''}...\n`);
     const res = await processSingleRoute(routeId, PRIMARY_LANGUAGE, { dryRun, force: true });
-    if (res.skipped) {
-      console.log(`SKIPPED — ${res.reasons.join('; ')}\n`);
-      return 0;
-    }
-    console.log('Generated content:');
-    console.log(`  Angle:    ${res.angle}`);
-    console.log(`  Sections: ${res.content.sections.length}`);
-    console.log(`  Title:    ${res.content.title}`);
-    console.log(`  Meta:     ${res.content.metaDescription}`);
-    console.log(`  FAQ:      ${res.content.faq.length} questions`);
-    console.log(dryRun ? '\n[dry-run] Nothing written.\n' : `\n${res.updated ? 'Written to seo_* columns.' : 'No change.'}\n`);
+    if (res.skipped) { console.log(`SKIPPED — ${res.reasons.join('; ')}`); return 0; }
+    console.log(`Generated ${res.content.sections.length} sections and ${res.content.faq.length} FAQ entries.`);
     return 0;
   }
 
-  console.log(`Batch generation${dryRun ? ' [dry-run]' : ''}${force ? ' [force-refresh]' : ''}${limit ? ` [limit=${limit}]` : ''} — language ${PRIMARY_LANGUAGE}\n`);
-  let last = 0;
-  const results = await processRoutes((p) => {
-    const now = Date.now();
-    if (now - last > 1500 || p.processed === p.total) {
-      const pct = p.total ? Math.round((p.processed / p.total) * 100) : 100;
-      const filled = Math.floor(pct / 2);
-      const bar = '#'.repeat(filled) + '-'.repeat(50 - filled);
-      console.log(`[${bar}] ${p.processed}/${p.total} (${pct}%)  updated:${p.updated} skipped:${p.skipped} failed:${p.failed}`);
-      last = now;
-    }
-  }, { dryRun, force, limit });
-
-  console.log('\n=== Summary ===');
-  console.log(`  Selected routes:   ${results.total}`);
-  if (results.availableTotal !== undefined) console.log(`  Available routes:  ${results.availableTotal}`);
-  console.log(`  Updated:           ${results.updated}${dryRun ? ' (dry-run, not written)' : ''}`);
-  console.log(`  Skipped:           ${results.skipped}`);
-  console.log(`  Failed:            ${results.failed}`);
-  const angles = Object.entries(results.angleCounts || {});
-  if (angles.length) {
-    console.log('\n  Opening angles used:');
-    angles.sort((a, b) => b[1] - a[1]).forEach(([a, n]) => console.log(`    ${n.toString().padStart(5)}  ${a}`));
-  }
-  const reasons = Object.entries(results.skipReasons || {});
-  if (reasons.length) {
-    console.log('\n  Skip reasons:');
-    reasons.sort((a, b) => b[1] - a[1]).forEach(([r, n]) => console.log(`    ${n.toString().padStart(5)}  ${r}`));
-  }
-  console.log('');
+  const results = await processRoutes(null, { dryRun, force, limit });
+  console.log(JSON.stringify(results, null, 2));
   return results.failed > 0 ? 1 : 0;
 }
 
-main()
-  .then((code) => process.exit(code))
-  .catch((err) => {
-    console.error('\nFatal error:', err.message);
-    process.exit(1);
-  });
+main().then((code) => process.exit(code)).catch((err) => { console.error('\nFatal error:', err.message); process.exit(1); });
