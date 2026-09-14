@@ -1,10 +1,11 @@
 // Route SEO engine: evidence-first, deterministic assembly, locale-aware packs.
 const { makeRng, pick, buildContext } = require('./compose');
 const { makePack } = require('./blocks.secondary');
+const { makeArabicPack } = require('./blocks.ar');
 const de = require('./blocks.de');
 
-const SECONDARY = ['en', 'fr', 'es', 'it', 'nl', 'pl', 'tr'];
-const PACKS = { de, ...Object.fromEntries(SECONDARY.map((lang) => [lang, makePack(lang)])) };
+const SECONDARY = ['en', 'fr', 'es', 'it', 'nl', 'tr', 'ar'];
+const PACKS = { de, ...Object.fromEntries(SECONDARY.filter((lang) => lang !== 'ar').map((lang) => [lang, makePack(lang)])), ar: makeArabicPack() };
 
 function tidy(s) {
   return String(s || '').replace(/\s+/g, ' ').replace(/\.\s*\./g, '.').replace(/\s+([.,;:!?])/g, '$1').trim();
