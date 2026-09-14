@@ -48,7 +48,9 @@ process.on('uncaughtException', (err) => {
 // ─── [3] التحقق من متغيرات البيئة ──────────────────────────
 (function validateEnv() {
   const missing = [];
-  if (!env.DUFFEL_TOKEN) missing.push('DUFFEL_TOKEN');
+  if (!env.DUFFEL_TOKEN) {
+    missing.push('DUFFEL_TOKEN');
+  }
   if (missing.length) {
     log('fatal', 'Missing required environment variables', { missing });
     console.error('❌ FATAL: Missing required env vars: ' + missing.join(', '));
@@ -104,6 +106,7 @@ require('./src/routes/reviews.routes')(app);
 require('./src/routes/sitemap.routes')(app);
 require('./src/routes/tracking.routes')(app);
 require('./src/routes/admin.routes')(app);
+require('./src/routes/route-airline-backfill.routes')(app);
 require('./src/routes/admin-staff.routes')(app);
 require('./src/routes/admin-customers.routes')(app);
 require('./src/routes/admin-geo.routes')(app);
