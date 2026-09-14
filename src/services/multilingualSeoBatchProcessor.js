@@ -5,7 +5,7 @@ const { validateGeneratedSeo } = require('./seo/quality');
 const { sortRoutesForSeo } = require('./seo/routePriority');
 
 const SECONDARY_LANGUAGES = supportedLanguages().filter((language) => language !== 'de');
-const BATCH_SIZE = 25;
+const BATCH_SIZE = 100;
 
 async function fetchRoutes() {
   if (!supa) throw new Error('Database not available');
