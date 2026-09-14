@@ -39,22 +39,8 @@ function makePack(lang){
     {id:'direct',applicable:c=>c.facts.has('directness'),q:()=>l.faq[2],a:c=>c.directB==='all-direct'?'Yes. The observed options are direct.':c.directB==='connections-only'?'No direct option is currently represented.':'Direct options are represented alongside connecting flights.'},
     {id:'airlines',applicable:c=>c.facts.has('airlines'),q:()=>l.faq[3],a:c=>`${c.airlineCount||'Several'} ${l.air} are represented in the available route data.`}
   ];
-  const compact={
-    en:c=>`${c.o}–${c.d} flights: price & duration | Airpiv`,
-    fr:c=>`Vols ${c.o} → ${c.d} : prix et durée | Airpiv`,
-    es:c=>`Vuelos ${c.o} → ${c.d}: precio y duración | Airpiv`,
-    it:c=>`Voli ${c.o} → ${c.d}: prezzo e durata | Airpiv`,
-    nl:c=>`${c.o}–${c.d} vluchten: prijs & duur | Airpiv`,
-    tr:c=>`${c.o} - ${c.d}: fiyat ve süre | Airpiv`
-  }[lang];
-  const suffix={
-    en:'Review the available route data before booking.',
-    fr:'Vérifiez les données disponibles avant de réserver.',
-    es:'Revisa los datos disponibles antes de reservar.',
-    it:'Controlla i dati disponibili prima di prenotare.',
-    nl:'Controleer de beschikbare routegegevens voor vertrek.',
-    tr:'Rezervasyondan önce mevcut rota verilerini kontrol edin.'
-  }[lang];
+  const compact={en:c=>`${c.o}–${c.d} flights: price & duration | Airpiv`,fr:c=>`Vols ${c.o} → ${c.d} : prix et durée | Airpiv`,es:c=>`Vuelos ${c.o} → ${c.d}: precio y duración | Airpiv`,it:c=>`Voli ${c.o} → ${c.d}: prezzo e durata | Airpiv`,nl:c=>`${c.o}–${c.d} vluchten: prijs & duur | Airpiv`,tr:c=>`${c.o} - ${c.d}: fiyat ve süre | Airpiv`}[lang];
+  const suffix={en:'Review the available route data before booking.',fr:'Vérifiez les données disponibles avant de réserver.',es:'Revisa los datos disponibles antes de reservar.',it:'Controlla i dati disponibili prima di prenotare.',nl:'Controleer de beschikbare routegegevens voor vertrek.',tr:'Rezervasyondan önce mevcut rota verilerini kontrol edin.'}[lang];
   return {INTRO_ANGLES:{traveler:[c=>l.intro],price:[c=>l.intro],duration:[c=>l.intro],airline:[c=>l.intro],business:[c=>l.intro],destination:[c=>l.intro],seasonal:[c=>l.intro],weekend:[c=>l.intro],family:[c=>l.intro],airport:[c=>l.intro]},BLOCKS:[
     {id:'overview',weight:()=>100,applicable:()=>true,render:c=>({heading:l.h[0],body:overview(c)})},
     {id:'price-analysis',weight:c=>c.facts.has('price')?8:0,applicable:c=>c.facts.has('price'),render:c=>({heading:l.h[1],body:price(c)})},
