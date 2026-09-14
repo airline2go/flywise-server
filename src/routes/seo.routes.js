@@ -1,26 +1,19 @@
 // ═══════════════════════════════════════════════════════════════
 // src/routes/seo.routes.js
 // /robots.txt — يمنع كل الزواحف من الزحف على نطاق الـ API
-// (api.airpiv.com). الـ API بيرجّع JSON مش صفحات HTML، فمفيش أي قيمة
-// فهرسة منه، والزحف عليه بيستهلك ميزانية زحف Google ويضغط على السيرفر
-// (شوفنا 5xx تحت ضغط الزحف) بدون أي فايدة. ده بيأثر على الزواحف بس —
-// طلبات fetch() اللي الموقع بيعملها (من السيرفر أثناء ISR أو من متصفح
-// الزائر) بتتجاهل robots.txt تمامًا، فمفيش أي تأثير على جلب البيانات.
-//
-// يُسجَّل قبل الـ globalMiddleware في server.js عشان يُخدَم دايمًا —
-// حتى أثناء وضع الصيانة — ومن غير رؤوس CORS/الأمان (مش محتاجها).
-// ملاحظة: Googlebot دايمًا بيجيب /robots.txt نفسه بشكل خاص، فمنع "/"
-// مابيمنعش قراءة الملف ده.
+// (api.airpiv.com). الـ API بيرجّع JSON مش صفحات، فمفيش قيمة فهرسة منه.
 // ═══════════════════════════════════════════════════════════════
 
 const registerLocalizedRouteSeo = require('./localized-route-seo.routes');
+const registerLocalizedSitemap = require('./localized-sitemap.routes');
 
 module.exports = (app) => {
   app.get('/robots.txt', (req, res) => {
     res.type('text/plain').send('User-agent: *\nDisallow: /\n');
   });
 
-  // Register before content.routes so /route-pages/:slug/localized and
-  // /route-pages/:slug/hreflang are handled by the localized SEO surface.
+  // Registered before content.routes so localized SEO endpoints are available
+  // without changing the existing route-pages contract.
   registerLocalizedRouteSeo(app);
+  registerLocalizedSitemap(app);
 };
