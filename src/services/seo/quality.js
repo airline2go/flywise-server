@@ -1,8 +1,11 @@
 // Deterministic post-generation quality checks for route SEO.
+const { hasVerifiedFlightEvidence } = require('../indexability');
+
 function text(value) {
   return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
 }
-function validateGeneratedSeo(route, content) {
+
+function validateGeneratedSeo(route, content, { requireEvidence = true } = {}) {
   const title = text(content && content.title);
   const meta = text(content && content.metaDescription);
   const intro = text(content && (content.introPlain || content.intro));
@@ -13,6 +16,8 @@ function validateGeneratedSeo(route, content) {
   const titleLower = title.toLowerCase();
   const metaLower = meta.toLowerCase();
   const reasons = [];
+
+  if (requireEvidence && !hasVerifiedFlightEvidence(route)) reasons.push('no verified flight evidence');
   if (title.length < 30 || title.length > 70) reasons.push('title length outside 30-70');
   if (meta.length < 90 || meta.length > 170) reasons.push('meta length outside 90-170');
   if (!origin || !titleLower.includes(origin)) reasons.push('title missing origin city');
@@ -23,6 +28,22 @@ function validateGeneratedSeo(route, content) {
   if (sections.length < 2) reasons.push('fewer than 2 sections');
   if (faq.length < 2) reasons.push('fewer than 2 FAQ entries');
   if (!faq.every((f) => text(f && f.question) && text(f && f.answer))) reasons.push('FAQ contains empty question/answer');
-  return { valid: reasons.length === 0, reasons, metrics: { titleLength: title.length, metaLength: meta.length, introLength: intro.length, sectionCount: sections.length, faqCount: faq.length } };
+
+  const faqQuestions = faq.map((f) => text(f && f.question).toLowerCase()).filter(Boolean);
+  if (new Set(faqQuestions).size !== faqQuestions.length) reasons.push('duplicate FAQ questions');
+
+  return {
+    valid: reasons.length === 0,
+    reasons,
+    metrics: {
+      titleLength: title.length,
+      metaLength: meta.length,
+      introLength: intro.length,
+      sectionCount: sections.length,
+      faqCount: faq.length,
+      evidencePresent: hasVerifiedFlightEvidence(route),
+    },
+  };
 }
+
 module.exports = { validateGeneratedSeo };
