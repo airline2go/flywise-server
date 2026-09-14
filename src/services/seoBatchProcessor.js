@@ -4,18 +4,6 @@
 // engine (src/services/seo/engine.js) into the DEDICATED generated columns
 // (seo_* — see sql/seo_generated_content.sql), never the manual override
 // columns.
-//
-// Guarantees:
-//   • Manual override content is never touched. It always wins at render time
-//     (see effectiveRouteSeo) — the generator writes only to seo_* columns.
-//   • Routes without enough real data are skipped, not filled with filler.
-//   • Generated content is refreshable: because it lives in its own columns,
-//     re-running after the route's data changes simply overwrites the seo_*
-//     columns and never collides with a human edit.
-//   • Every page is data-composed and seed-varied — corpus similarity is kept
-//     well under the 40% rule (verified in test/seoEngine.test.js).
-//   • Generated content is written only after the deterministic SEO quality
-//     gate passes; rejected content is never persisted.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const supa = require('../clients/supabase');
@@ -25,7 +13,6 @@ const { validateGeneratedSeo } = require('./seo/quality');
 const { sortRoutesForSeo } = require('./seo/routePriority');
 
 const BATCH_SIZE = 50;
-// route_pages base row content is German (platform's primary market).
 const PRIMARY_LANGUAGE = 'de';
 
 async function fetchRoutePagesForUpdate() {
@@ -39,9 +26,6 @@ async function fetchRoutePagesForUpdate() {
   return sortRoutesForSeo(data || []);
 }
 
-// Writes generated content to the seo_* columns. `force` re-generates even when
-// content already exists (used to refresh after data changes); otherwise a
-// route already carrying generated content for the same language is left alone.
 async function writeGenerated(route, gen, language, { dryRun = false, force = false } = {}) {
   if (!force && route.seo_generated_at && route.seo_lang === language) {
     return { updated: false, reason: 'already generated' };
@@ -72,15 +56,23 @@ function recordQualityRejection(qualityReasons, reasons) {
   }
 }
 
-async function processRoutes(progressCallback, { dryRun = false, force = false, language = PRIMARY_LANGUAGE } = {}) {
-  const routes = await fetchRoutePagesForUpdate();
+async function processRoutes(progressCallback, { dryRun = false, force = false, language = PRIMARY_LANGUAGE, limit = null } = {}) {
+  let routes = await fetchRoutePagesForUpdate();
+  const availableTotal = routes.length;
+  if (limit !== null && limit !== undefined) {
+    const parsedLimit = Number(limit);
+    if (!Number.isInteger(parsedLimit) || parsedLimit <= 0) {
+      throw new Error('limit must be a positive integer');
+    }
+    routes = routes.slice(0, parsedLimit);
+  }
   const total = routes.length;
   let processed = 0, updated = 0, skipped = 0, failed = 0, qualityRejected = 0;
   const skipReasons = {};
   const qualityReasons = {};
   const angleCounts = {};
 
-  log('info', 'seo_batch_start', { total, dryRun, force, language });
+  log('info', 'seo_batch_start', { total, availableTotal, limit, dryRun, force, language });
 
   for (let i = 0; i < routes.length; i += BATCH_SIZE) {
     const batch = routes.slice(i, i + BATCH_SIZE);
@@ -114,14 +106,14 @@ async function processRoutes(progressCallback, { dryRun = false, force = false, 
         log('warn', 'route_processing_error', { route: route.id, error: err.message });
       }
       if (progressCallback) {
-        progressCallback({ processed, total, updated, skipped, failed, qualityRejected,
+        progressCallback({ processed, total, availableTotal, updated, skipped, failed, qualityRejected,
           current: `${route.origin_city} → ${route.destination_city}` });
       }
     }
     if (!dryRun) await new Promise((r) => setTimeout(r, 100));
   }
 
-  const summary = { total, processed, updated, skipped, failed, qualityRejected, skipReasons, qualityReasons, angleCounts, dryRun, force, language };
+  const summary = { total, availableTotal, processed, updated, skipped, failed, qualityRejected, skipReasons, qualityReasons, angleCounts, dryRun, force, language, limit };
   log('info', 'seo_batch_complete', summary);
   return summary;
 }
@@ -131,31 +123,21 @@ async function processSingleRoute(routeId, language = PRIMARY_LANGUAGE, { dryRun
   const { data: route, error } = await supa.from('route_pages').select('*').eq('id', routeId).maybeSingle();
   if (error) throw new Error(error.message);
   if (!route) throw new Error(`Route ${routeId} not found`);
-
   const gen = generateRoutePage(route, language);
   if (gen.skipped) {
     log('info', 'single_route_skipped', { route_id: routeId, reasons: gen.reasons });
     return { skipped: true, reasons: gen.reasons };
   }
-
   const quality = validateGeneratedSeo(route, gen.content);
   if (!quality.valid) {
-    log('info', 'single_route_quality_rejected', {
-      route_id: routeId,
-      language,
-      reasons: quality.reasons,
-      metrics: quality.metrics,
-    });
+    log('info', 'single_route_quality_rejected', { route_id: routeId, language, reasons: quality.reasons, metrics: quality.metrics });
     return { skipped: true, qualityRejected: true, reasons: quality.reasons, metrics: quality.metrics };
   }
-
   const w = await writeGenerated(route, gen, language, { dryRun, force });
   log('info', 'single_route_seo_generated', { route_id: routeId, language, angle: gen.angle, dryRun, updated: w.updated });
   return { skipped: false, angle: gen.angle, content: gen.content, ...w };
 }
 
-// Readiness report: eligible vs. skipped, with reason + haul + data-coverage
-// breakdowns so an operator can see WHY routes are (or aren't) generatable.
 async function generateStatistics() {
   const routes = await fetchRoutePagesForUpdate();
   let eligible = 0, manual = 0, insufficient = 0, alreadyGenerated = 0;
@@ -185,12 +167,4 @@ async function generateStatistics() {
   };
 }
 
-module.exports = {
-  processRoutes,
-  processSingleRoute,
-  generateStatistics,
-  fetchRoutePagesForUpdate,
-  writeGenerated,
-  BATCH_SIZE,
-  PRIMARY_LANGUAGE,
-};
+module.exports = { processRoutes, processSingleRoute, generateStatistics, fetchRoutePagesForUpdate, writeGenerated, BATCH_SIZE, PRIMARY_LANGUAGE };
