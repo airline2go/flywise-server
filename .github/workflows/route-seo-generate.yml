@@ -1,0 +1,41 @@
+name: Route SEO Generate
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Regenerate existing generated SEO content too"
+        required: false
+        default: "false"
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Start SEO batch
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ADMIN_TOKEN:-}" ]; then exit 1; fi
+          if [ "$FORCE" = "true" ]; then BODY='{"dry_run":false,"force":true}'; else BODY='{"dry_run":false,"force":false}'; fi
+          curl --fail-with-body --silent --show-error --request POST --header "Authorization: Bearer $ADMIN_TOKEN" --header "Accept: application/json" --header "Content-Type: application/json" --data "$BODY" https://api.airpiv.com/admin/seo/batch-generate
+          echo
+      - name: Wait for completion
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 180); do
+            status=$(curl --fail-with-body --silent --show-error --header "Authorization: Bearer $ADMIN_TOKEN" --header "Accept: application/json" https://api.airpiv.com/admin/seo/batch-status)
+            echo "$status"
+            if [ "$(printf '%s' "$status" | jq -r '.running // false')" = "false" ]; then exit 0; fi
+            sleep 10
+          done
+          exit 1
