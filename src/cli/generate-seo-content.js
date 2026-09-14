@@ -7,6 +7,7 @@
 //   node src/cli/generate-seo-content.js --stats            # readiness report
 //   node src/cli/generate-seo-content.js --route-id=<id>    # one route
 //   node src/cli/generate-seo-content.js --dry-run          # preview, no writes
+//   node src/cli/generate-seo-content.js --limit=50         # process top 50
 //   node src/cli/generate-seo-content.js                    # generate all
 //
 // The engine SKIPS routes with manual content or insufficient data — skips are
@@ -26,6 +27,15 @@ const dryRun = args.includes('--dry-run');
 const force = args.includes('--force');
 const routeId = args.find((a) => a.startsWith('--route-id='))?.split('=')[1];
 const statsOnly = args.includes('--stats');
+const limitArg = args.find((a) => a.startsWith('--limit='))?.split('=')[1];
+let limit = null;
+if (limitArg !== undefined) {
+  limit = Number(limitArg);
+  if (!Number.isInteger(limit) || limit <= 0) {
+    console.error('--limit must be a positive integer');
+    process.exit(1);
+  }
+}
 
 if (args.includes('--help')) {
   console.log(`
@@ -35,6 +45,7 @@ Usage: node src/cli/generate-seo-content.js [options]
   --route-id=<id>    Generate for a single route
   --dry-run          Preview generated fields without writing to the database
   --force            Refresh routes that already have generated content
+  --limit=<n>        Process only the top n routes by SEO priority
   --help             Show this help
 
 Generated content is written to the dedicated seo_* columns; the manual
@@ -44,6 +55,8 @@ at render time. Routes with insufficient real data are skipped, not filled.
 Examples:
   node src/cli/generate-seo-content.js --stats
   node src/cli/generate-seo-content.js --route-id=abc123 --dry-run
+  node src/cli/generate-seo-content.js --limit=50
+  node src/cli/generate-seo-content.js --limit=100 --dry-run
   node src/cli/generate-seo-content.js            # fill routes not yet generated
   node src/cli/generate-seo-content.js --force    # refresh all after data changes
 `);
@@ -97,7 +110,7 @@ async function main() {
     return 0;
   }
 
-  console.log(`Batch generation${dryRun ? ' [dry-run]' : ''}${force ? ' [force-refresh]' : ''} — language ${PRIMARY_LANGUAGE}\n`);
+  console.log(`Batch generation${dryRun ? ' [dry-run]' : ''}${force ? ' [force-refresh]' : ''}${limit !== null ? ` [limit=${limit}]` : ''} — language ${PRIMARY_LANGUAGE}\n`);
   let last = 0;
   const results = await processRoutes((p) => {
     const now = Date.now();
@@ -108,13 +121,14 @@ async function main() {
       console.log(`[${bar}] ${p.processed}/${p.total} (${pct}%)  updated:${p.updated} skipped:${p.skipped} failed:${p.failed}`);
       last = now;
     }
-  }, { dryRun, force });
+  }, { dryRun, force, limit });
 
   console.log('\n=== Summary ===');
-  console.log(`  Total published:  ${results.total}`);
-  console.log(`  Updated:          ${results.updated}${dryRun ? ' (dry-run, not written)' : ''}`);
-  console.log(`  Skipped:          ${results.skipped}`);
-  console.log(`  Failed:           ${results.failed}`);
+  console.log(`  Selected routes:   ${results.total}`);
+  console.log(`  Available routes:  ${results.availableTotal}`);
+  console.log(`  Updated:           ${results.updated}${dryRun ? ' (dry-run, not written)' : ''}`);
+  console.log(`  Skipped:           ${results.skipped}`);
+  console.log(`  Failed:            ${results.failed}`);
   const angles = Object.entries(results.angleCounts || {});
   if (angles.length) {
     console.log('\n  Opening angles used:');
