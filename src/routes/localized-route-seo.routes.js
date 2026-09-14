@@ -1,7 +1,7 @@
 const supa = require('../clients/supabase');
 const rateLimit = require('../middleware/rateLimit');
 const { effectiveLocalizedRouteSeo } = require('../services/seo/localizedEffective');
-const { getRouteSeoLocales, isSupportedRouteSeoLocale } = require('../services/seo/multilingual');
+const { getRouteSeoLocales, isSupportedRouteSeoLocale } = require('../services/seo/routeLocales');
 const SITE = String(process.env.PUBLIC_SITE_URL || process.env.SITE_URL || 'https://airpiv.com').replace(/\/+$/, '');
 const pathFor = (lang, slug) => lang === 'de' ? `/flights/${slug}` : `/${lang}/flights/${slug}`;
 async function alternates(id, slug) {
