@@ -22,6 +22,7 @@ const supa = require('../clients/supabase');
 const log = require('../utils/log');
 const { generateRoutePage, assessEligibility, supportedLanguages } = require('./seo/engine');
 const { validateGeneratedSeo } = require('./seo/quality');
+const { sortRoutesForSeo } = require('./seo/routePriority');
 
 const BATCH_SIZE = 50;
 // route_pages base row content is German (platform's primary market).
@@ -35,7 +36,7 @@ async function fetchRoutePagesForUpdate() {
     .eq('status', 'published')
     .order('created_at', { ascending: false });
   if (error) throw new Error(error.message);
-  return data || [];
+  return sortRoutesForSeo(data || []);
 }
 
 // Writes generated content to the seo_* columns. `force` re-generates even when
