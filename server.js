@@ -1,36 +1,10 @@
-/**
- * ╔══════════════════════════════════════════════════════════╗
- * ║        Airpiv — Render.com Server (Duffel Proxy)         ║
- * ║              Node.js / Express — نسخة مُقسّمة             ║
- * ╚══════════════════════════════════════════════════════════╝
- *
- * [BACKEND-REFACTOR] هذا الملف كان قبل كده server.js واحد بحجم
- * ~288 كيلوبايت و5488 سطر. اتقسّم لـ 31 ملف منظّم في src/ —
- * كل ملف اتفحص syntax وبطلبات HTTP حقيقية أثناء التقسيم. السلوك
- * الفعلي (المسارات، الترتيب، المنطق) واحد بالظبط زي قبل، ده تقسيم
- * تنظيمي بحت، مش إعادة كتابة.
- *
- * الترتيب هنا حرج ومقصود:
- * 1. Sentry الأول (قبل أي require تاني، عشان يراقب كل حاجة بعده)
- * 2. حماية الكراش (uncaughtException/unhandledRejection)
- * 3. التحقق من متغيرات البيئة (فشل سريع لو حاجة أساسية ناقصة)
- * 4. الـ webhooks (لازم تتسجل قبل express.json() — محتاجة الجسم
- *    الخام raw للتحقق من التوقيع)
- * 5. express.json() + الـ middleware العام (بترتيبه الحرج الخاص)
- * 6. باقي كل الروتات
- * 7. معالج الأخطاء الموحّد (آخر حاجة قبل app.listen)
- */
-
-// ─── [1] Sentry — أول حاجة تتحمّل ─────────────────────────
 const Sentry = require('./src/clients/sentry');
-
 const express = require('express');
 const app = express();
 const env = require('./src/config/env');
 const log = require('./src/utils/log');
 const supa = require('./src/clients/supabase');
 
-// ─── [2] حماية الكراش ──────────────────────────────────────
 process.on('unhandledRejection', (reason) => {
   const err = reason instanceof Error ? reason : new Error(String(reason));
   log('error', 'unhandled_rejection', { message: err.message, stack: err.stack });
@@ -41,16 +15,13 @@ process.on('uncaughtException', (err) => {
   if (env.SENTRY_DSN) Sentry.captureException(err, { tags: { critical: 'uncaught_exception' } });
   try {
     if (typeof gracefulShutdown === 'function') return gracefulShutdown('uncaughtException');
-  } catch (e) { /* الإغلاق الآمن قد لا يكون جاهزاً بعد — نكمل للخروج */ }
+  } catch (e) {}
   process.exit(1);
 });
 
-// ─── [3] التحقق من متغيرات البيئة ──────────────────────────
 (function validateEnv() {
   const missing = [];
-  if (!env.DUFFEL_TOKEN) {
-    missing.push('DUFFEL_TOKEN');
-  }
+  if (!env.DUFFEL_TOKEN) missing.push('DUFFEL_TOKEN');
   if (missing.length) {
     log('fatal', 'Missing required environment variables', { missing });
     console.error('❌ FATAL: Missing required env vars: ' + missing.join(', '));
@@ -63,36 +34,18 @@ process.on('uncaughtException', (err) => {
   if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_KEY) log('warn', 'Supabase not set — using in-memory fallback');
   log('info', 'Environment validated', {
     duffel: !!env.DUFFEL_TOKEN, stripe: !!env.STRIPE_SECRET_KEY, supabase: !!supa,
-    webhook: !!env.STRIPE_WEBHOOK_SECRET,
-    email: !!env.BREVO_API_KEY,
+    webhook: !!env.STRIPE_WEBHOOK_SECRET, email: !!env.BREVO_API_KEY,
     sentry: !!env.SENTRY_DSN,
     tokenType: (env.DUFFEL_TOKEN || '').indexOf('live') !== -1 ? 'live' : 'test',
   });
 })();
 
-// ─── [4] Webhooks — لازم قبل express.json() ────────────────
 require('./src/routes/webhooks.routes')(app);
-
-// ─── [4b] robots.txt — يُخدَم دايمًا (قبل الصيانة/الميدلوير العام) ──
-// نطاق الـ API (api.airpiv.com) مالهوش يتفهرس — بيرجّع JSON مش صفحات.
-// يُسجَّل هنا بدري عشان يُخدَم حتى أثناء وضع الصيانة، من غير رؤوس
-// CORS/الأمان (مش محتاجها). مافيش body فمش متأثر بترتيب express.json().
 require('./src/routes/seo.routes')(app);
-
-// ─── [5] express.json() + الـ middleware العام ─────────────
-// [LONG-ARTICLE-FIX] كان 256kb — كافي لمعظم الطلبات، بس مقال طويل جدًا
-// (+5000 كلمة مع روابط وHTML كتير) ممكن يقرب منه، والسيرفر وقتها كان
-// هيرفض الحفظ بالكامل برسالة 413 بدل ما يحفظ. 2 ميجابايت هامش أمان
-// واسع جدًا لأطول مقال ممكن يُكتب، من غير ما يفتح الباب لطلبات ضخمة
-// غير منطقية (باقي الروتات الحساسة كحجم زي الدفع مش متأثرة، بتستخدم
-// نفس الميدلوير العام ده بس بأجسام صغيرة جدًا أصلاً).
 app.use(express.json({ limit: '2mb' }));
 require('./src/middleware/globalMiddleware')(app);
 
-// ─── [6] باقي كل الروتات ────────────────────────────────────
 require('./src/routes/health.routes')(app);
-// Route-page indicative pricing is user-visit driven only.
-// Background/timer Duffel warming is intentionally disabled here.
 env.DUFFEL_BACKGROUND_SEARCH_ENABLED = false;
 require('./src/middleware/routePriceVisitRefresh')(app);
 require('./src/routes/search.routes')(app);
@@ -110,6 +63,7 @@ require('./src/routes/reviews.routes')(app);
 require('./src/routes/sitemap.routes')(app);
 require('./src/routes/tracking.routes')(app);
 require('./src/routes/admin.routes')(app);
+require('./src/routes/admin-duffel.routes')(app);
 require('./src/routes/route-airline-backfill.routes')(app);
 require('./src/routes/admin-staff.routes')(app);
 require('./src/routes/admin-customers.routes')(app);
@@ -120,23 +74,14 @@ require('./src/routes/admin-seo.routes')(app);
 require('./src/routes/admin-gsc.routes')(app);
 require('./src/routes/admin-finance.routes')(app);
 
-// [ROUTE-SCORE-4A] Not route registrars — each of these self-starts its
-// own background timer the moment it's required (same pattern as
-// warmRoutePricesOnce() inside search.routes.js), so a plain require is
-// all that's needed here.
 require('./src/services/routeTraffic');
 require('./src/services/routeScore');
 require('./src/services/routeIntelligenceRefresh');
 require('./src/services/routePriceHistoryRefresh');
 require('./src/services/socialAutoGenerate');
-// [F-PHASE4] Finance sync cron — DISABLED unless FINANCE_CRON_ENABLED=true, so
-// requiring it here never starts syncing production data on its own.
 require('./src/services/finance/financeCron').start();
 
-// ─── [7] معالج الأخطاء الموحّد ───────────────────────────────
-if (env.SENTRY_DSN) {
-  Sentry.setupExpressErrorHandler(app);
-}
+if (env.SENTRY_DSN) Sentry.setupExpressErrorHandler(app);
 app.use((err, req, res, next) => {
   log('error', 'unhandled_route_error', { message: err?.message, stack: err?.stack, path: req.path, reqId: req.id });
   if (res.headersSent) return next(err);
@@ -147,7 +92,6 @@ app.use((err, req, res, next) => {
   });
 });
 
-// ─── التشغيل + الإغلاق الآمن ─────────────────────────────────
 function gracefulShutdown(signal) {
   log('info', 'shutdown_initiated', { signal });
   server.close(() => {
@@ -165,8 +109,4 @@ if (require.main === module) {
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 }
-
-// [TEST-SUITE] Exported so tests can drive the app via supertest without
-// binding a real port — has zero effect on production, which always runs
-// via `node server.js` (require.main === module) and listens exactly as before.
 module.exports = app;
