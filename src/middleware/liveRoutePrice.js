@@ -3,7 +3,7 @@ const { clientIp, logSearchAccess } = require('./searchGuard');
 const duffel = require('../services/duffel');
 const { isPublishedRoute } = require('../routes/search.routes');
 const { getAdminConfig, setAdminConfig } = require('../services/adminConfig');
-const { buildPriceSnapshot } = require('../config/price');
+const { PRICE_FRESHNESS_MS, buildPriceSnapshot } = require('../config/price');
 
 const BOT_UA = /bot|crawler|spider|slurp|bingpreview|google-extended|googleother|adsbot|mediapartners-google|facebookexternalhit|facebot|twitterbot|linkedinbot|slackbot|discordbot|telegrambot|whatsapp|gptbot|chatgpt-user|oai-searchbot|anthropic|claude|perplexity|semrush|ahrefs|petalbot|bytespider|yandex|baiduspider|duckduckbot|applebot|curl|wget|python-requests|python-httpx|node-fetch|axios|okhttp|headlesschrome|puppeteer|playwright|lighthouse|pagespeed|pingdom|uptimerobot|statuscake/i;
 const inFlight = new Map();
@@ -77,6 +77,9 @@ async function fetchLiveRoutePrice(from, to, daysAhead, cacheKey) {
 async function cachedLivePrice(cacheKey) {
   const cached = await getAdminConfig(cacheKey, null);
   if (!cached) return null;
+  const isFresh = cached.fetchedAt
+    && Number.isFinite(new Date(cached.fetchedAt).getTime())
+    && Date.now() - new Date(cached.fetchedAt).getTime() < PRICE_FRESHNESS_MS;
   return {
     ok: true,
     price: cached.price,
@@ -85,9 +88,10 @@ async function cachedLivePrice(cacheKey) {
     insights: cached.insights || null,
     offers: cached.offers || null,
     cached: true,
+    stale: !isFresh,
     checkedAt: cached.fetchedAt,
     offersCount: cached.offersCount ?? null,
-    snapshot: buildPriceSnapshot({ price: cached.price, currency: cached.currency, checkedAt: cached.fetchedAt, source: 'cache', offersCount: cached.offersCount }),
+    snapshot: buildPriceSnapshot({ price: cached.price, currency: cached.currency, checkedAt: cached.fetchedAt, source: isFresh ? 'cache' : 'stale-cache', offersCount: cached.offersCount }),
   };
 }
 
@@ -99,8 +103,17 @@ async function handle(req, res, next) {
   if (!(await isPublishedRoute(from, to))) return next();
 
   const daysAhead = req.query.days_ahead ? Math.max(1, Math.min(90, parseInt(req.query.days_ahead, 10) || 21)) : 21;
-  const cacheKey = 'route_price_live_' + from + '_' + to + (daysAhead !== 21 ? '_d' + daysAhead : '');
+  const cacheKey = 'route_price_' + from + '_' + to + (daysAhead !== 21 ? '_d' + daysAhead : '');
   const pairKey = from + '_' + to + '_' + daysAhead;
+
+  const cached = await cachedLivePrice(cacheKey).catch(() => null);
+  const cachedTime = cached?.checkedAt ? new Date(cached.checkedAt).getTime() : NaN;
+  const fresh = cached && Number.isFinite(cachedTime) && Date.now() - cachedTime < PRICE_FRESHNESS_MS;
+  if (fresh) {
+    logSearchAccess({ endpoint: '/route-price', source: 'route_price_user_visit', ip: clientIp(req), route: from + '-' + to, allowed: true, reason: 'fresh_24h_cache' });
+    return res.json(cached);
+  }
+
   let pending = inFlight.get(pairKey);
   if (!pending) {
     pending = fetchLiveRoutePrice(from, to, daysAhead, cacheKey).finally(() => inFlight.delete(pairKey));
@@ -109,10 +122,9 @@ async function handle(req, res, next) {
 
   try {
     const result = await pending;
-    logSearchAccess({ endpoint: '/route-price', source: 'route_price_user_visit', ip: clientIp(req), route: from + '-' + to, allowed: true, reason: 'live_user_visit' });
+    logSearchAccess({ endpoint: '/route-price', source: 'route_price_user_visit', ip: clientIp(req), route: from + '-' + to, allowed: true, reason: 'live_user_visit_after_expiry' });
     return res.json(result);
   } catch (err) {
-    const cached = await cachedLivePrice(cacheKey).catch(() => null);
     if (cached) return res.json(cached);
     logSearchAccess({ endpoint: '/route-price', source: 'route_price_user_visit', ip: clientIp(req), route: from + '-' + to, allowed: false, reason: 'live_price_failed' });
     return res.json({ ok: true, price: null, currency: null, departure_date: null, snapshot: buildPriceSnapshot({ source: 'none' }) });
