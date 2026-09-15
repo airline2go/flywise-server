@@ -13,17 +13,9 @@ module.exports = {
   DUFFEL_BASE: 'https://api.duffel.com',
   DUFFEL_VERSION: 'v2',
 
-  // Signed Search Session HMAC key. Independent of user login JWTs.
-  // If unset, searchGuard derives a stable key from DUFFEL_TOKEN so
-  // existing deploys keep working; set this explicitly in production.
   SEARCH_SESSION_SECRET: process.env.SEARCH_SESSION_SECRET || '',
-
-  // Cloudflare Turnstile secret (server-side). If unset, session issue
-  // skips Turnstile verification (dev/test). Production should set this.
   TURNSTILE_SECRET_KEY: process.env.TURNSTILE_SECRET_KEY || '',
 
-  // Background Duffel search warming (warmRoutePricesOnce). OFF unless
-  // explicitly enabled — production must not search Duffel on a timer.
   DUFFEL_BACKGROUND_SEARCH_ENABLED: String(process.env.DUFFEL_BACKGROUND_SEARCH_ENABLED || '').toLowerCase() === 'true',
 
   PRICE_PREVIEW_DEADLINE_MS: Number(process.env.PRICE_PREVIEW_DEADLINE_MS) || 15000,
