@@ -48,6 +48,7 @@ require('./src/middleware/globalMiddleware')(app);
 require('./src/routes/health.routes')(app);
 env.DUFFEL_BACKGROUND_SEARCH_ENABLED = false;
 require('./src/middleware/routePriceVisitRefresh')(app);
+require('./src/middleware/blockAutomatedDuffelProbes')(app);
 require('./src/routes/search.routes')(app);
 require('./src/routes/booking.routes')(app);
 require('./src/routes/cancel.routes')(app);
