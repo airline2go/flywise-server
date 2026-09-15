@@ -100,10 +100,20 @@ describe('route-price user-visit refresh', () => {
       'sec-fetch-dest': 'empty',
       accept: 'application/json',
     };
-    const first = request(app).get('/route-price?from=DUS&to=BER').set(headers);
+
+    // Calling .then() starts each SuperTest request immediately. Merely creating
+    // the Test object does not execute it, which made the previous test wait forever.
+    const first = request(app)
+      .get('/route-price?from=DUS&to=BER')
+      .set(headers)
+      .then((res) => res);
     await waitFor(() => mockFetchAndCacheRoutePrice.mock.calls.length === 1);
-    const second = request(app).get('/route-price?from=DUS&to=BER').set(headers);
-    await waitFor(() => mockFetchAndCacheRoutePrice.mock.calls.length === 1 && typeof resolveRefresh === 'function');
+
+    const second = request(app)
+      .get('/route-price?from=DUS&to=BER')
+      .set(headers)
+      .then((res) => res);
+    await waitFor(() => mockFetchAndCacheRoutePrice.mock.calls.length === 1);
 
     expect(mockFetchAndCacheRoutePrice).toHaveBeenCalledTimes(1);
 
