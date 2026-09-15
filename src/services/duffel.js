@@ -4,6 +4,7 @@ const Sentry = require('../clients/sentry');
 const { recordApiLog } = require('./apiLogs');
 const { logSearchAccess } = require('../middleware/searchGuard');
 const { createAttempt, finishAttempt } = require('./duffelApiAudit');
+const { recordDuffelAttemptAlert } = require('./duffelUsageAlert');
 const { randomUUID } = require('crypto');
 
 const DUFFEL_TIMEOUT_MS = 20000;
@@ -28,6 +29,7 @@ async function duffelAttempt(method, path, body, extraHeaders, timeoutMs, extern
   const opts = { method, headers: Object.assign({ Authorization: `Bearer ${env.DUFFEL_TOKEN}`, 'Content-Type': 'application/json', 'Duffel-Version': env.DUFFEL_VERSION, Accept: 'application/json' }, extraHeaders || {}) };
   if (body) opts.body = JSON.stringify(body);
   const requestId = await createAttempt({ ...auditContext, method, endpoint: path, attemptNo: auditContext.attemptNo });
+  recordDuffelAttemptAlert({ source: auditContext.source, trigger: auditContext.trigger, endpoint: path }).catch((e) => log('error', 'duffel_usage_alert_error', { error: e.message }));
   opts.headers['x-client-correlation-id'] = requestId;
   const startedAt = Date.now();
   const ctrl = new AbortController();
