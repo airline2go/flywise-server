@@ -8,11 +8,14 @@ const { randomUUID } = require('crypto');
  * write failure therefore blocks the outbound Duffel request (fail closed).
  */
 async function createAttempt({
+  operationId,
   method,
   endpoint,
   source,
   trigger,
   actorUserId,
+  actorIp,
+  actorUserAgent,
   searchSessionId,
   routeOrigin,
   routeDestination,
@@ -26,6 +29,7 @@ async function createAttempt({
   }
 
   const row = {
+    operation_id: operationId || null,
     request_id: requestId,
     attempt_no: attemptNo,
     method,
@@ -33,6 +37,8 @@ async function createAttempt({
     source: source || 'unspecified',
     trigger: trigger || source || 'unspecified',
     actor_user_id: actorUserId || null,
+    actor_ip: actorIp || null,
+    actor_user_agent: actorUserAgent || null,
     search_session_id: searchSessionId || null,
     route_origin: routeOrigin || null,
     route_destination: routeDestination || null,
