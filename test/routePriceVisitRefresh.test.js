@@ -2,6 +2,7 @@ process.env.DUFFEL_TOKEN = 'test-token';
 
 const mockFetchAndCacheRoutePrice = jest.fn();
 const mockIsPublishedRoute = jest.fn().mockResolvedValue(true);
+const mockLogSearchAccess = jest.fn();
 
 jest.mock('../src/routes/search.routes', () => ({
   fetchAndCacheRoutePrice: (...args) => mockFetchAndCacheRoutePrice(...args),
@@ -10,6 +11,18 @@ jest.mock('../src/routes/search.routes', () => ({
 
 jest.mock('../src/services/adminConfig', () => ({
   getAdminConfig: jest.fn().mockResolvedValue(null),
+}));
+
+jest.mock('../src/middleware/rateLimit', () => () => (req, res, next) => next());
+
+jest.mock('../src/middleware/searchGuard', () => ({
+  clientIp: () => '127.0.0.1',
+  logSearchAccess: (...args) => mockLogSearchAccess(...args),
+}));
+
+jest.mock('../src/config/price', () => ({
+  PRICE_FRESHNESS_MS: 24 * 60 * 60 * 1000,
+  buildPriceSnapshot: (value) => value,
 }));
 
 const express = require('express');
@@ -24,9 +37,19 @@ function buildApp() {
   return app;
 }
 
+async function waitFor(predicate, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for condition');
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
 beforeEach(() => {
   mockFetchAndCacheRoutePrice.mockReset();
   mockIsPublishedRoute.mockClear();
+  mockLogSearchAccess.mockClear();
+  mockIsPublishedRoute.mockResolvedValue(true);
   mockFetchAndCacheRoutePrice.mockResolvedValue({
     ok: true,
     price: 99,
@@ -78,9 +101,10 @@ describe('route-price user-visit refresh', () => {
       accept: 'application/json',
     };
     const first = request(app).get('/route-price?from=DUS&to=BER').set(headers);
+    await waitFor(() => mockFetchAndCacheRoutePrice.mock.calls.length === 1);
     const second = request(app).get('/route-price?from=DUS&to=BER').set(headers);
+    await waitFor(() => mockFetchAndCacheRoutePrice.mock.calls.length === 1 && typeof resolveRefresh === 'function');
 
-    await new Promise((r) => setImmediate(r));
     expect(mockFetchAndCacheRoutePrice).toHaveBeenCalledTimes(1);
 
     resolveRefresh({ ok: true, price: 88, currency: 'EUR', cached: false, snapshot: { source: 'live' } });
