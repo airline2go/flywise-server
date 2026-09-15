@@ -1,4 +1,5 @@
 const { generateRoutePage, supportedLanguages } = require('../src/services/seo/engine');
+const { buildTitleDisambiguationMap, qualifySeoText } = require('../src/services/multilingualSeoBatchProcessor');
 
 const route = {
   id: '00000000-0000-0000-0000-000000000001', slug: 'berlin-paris', status: 'published',
@@ -31,5 +32,21 @@ describe('multilingual route SEO', () => {
     const manual = { ...route, custom_title: 'Human editorial title' };
     expect(generateRoutePage(manual, 'de').skipped).toBe(true);
     expect(generateRoutePage(manual, 'en').skipped).toBe(false);
+  });
+
+  test('qualifies only genuinely colliding city-pair routes', () => {
+    const a = { ...route, slug: 'fra-ham', origin_city: 'Frankfurt', origin_iata: 'FRA', destination_city: 'Hamburg', destination_iata: 'HAM' };
+    const b = { ...route, slug: 'fra-xfw', origin_city: 'Frankfurt', origin_iata: 'FRA', destination_city: 'Hamburg', destination_iata: 'XFW' };
+    const c = { ...route, slug: 'ber-par', origin_city: 'Berlin', origin_iata: 'BER', destination_city: 'Paris', destination_iata: 'CDG' };
+    const map = buildTitleDisambiguationMap([a, b, c]);
+
+    expect(map.get('fra-ham')).toEqual({ origin: false, destination: true });
+    expect(map.get('fra-xfw')).toEqual({ origin: false, destination: true });
+    expect(map.has('ber-par')).toBe(false);
+
+    expect(qualifySeoText('Flights from Frankfurt to Hamburg for cheap fares', a, map.get('fra-ham')))
+      .toBe('Flights from Frankfurt to Hamburg (HAM) for cheap fares');
+    expect(qualifySeoText('Flights from Berlin to Paris', c, { origin: false, destination: false }))
+      .toBe('Flights from Berlin to Paris');
   });
 });
