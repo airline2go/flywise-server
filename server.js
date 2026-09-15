@@ -91,6 +91,10 @@ require('./src/middleware/globalMiddleware')(app);
 
 // ─── [6] باقي كل الروتات ────────────────────────────────────
 require('./src/routes/health.routes')(app);
+// Route-page indicative pricing is user-visit driven only.
+// Background/timer Duffel warming is intentionally disabled here.
+env.DUFFEL_BACKGROUND_SEARCH_ENABLED = false;
+require('./src/middleware/routePriceVisitRefresh')(app);
 require('./src/routes/search.routes')(app);
 require('./src/routes/booking.routes')(app);
 require('./src/routes/cancel.routes')(app);
@@ -107,7 +111,7 @@ require('./src/routes/sitemap.routes')(app);
 require('./src/routes/tracking.routes')(app);
 require('./src/routes/admin.routes')(app);
 require('./src/routes/route-airline-backfill.routes')(app);
-require('./src/routes/admin-staff.routes')(app);
+require('./src/middleware/admin-staff')(app);
 require('./src/routes/admin-customers.routes')(app);
 require('./src/routes/admin-geo.routes')(app);
 require('./src/routes/admin-airlines.routes')(app);
