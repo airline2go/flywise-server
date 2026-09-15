@@ -4,8 +4,8 @@ const {
   fetchAndCacheRoutePrice,
   isPublishedRoute,
 } = require('../routes/search.routes');
-const { getAdminConfig, getDailyPriceCheckCount } = require('../services/adminConfig');
-const { buildPriceSnapshot } = require('../config/price');
+const { getAdminConfig } = require('../services/adminConfig');
+const { PRICE_FRESHNESS_MS, buildPriceSnapshot } = require('../config/price');
 
 // Route-page price is indicative. A real browser visit may refresh it once;
 // crawlers, SSR fetchers, monitoring agents and HTTP clients must never trigger
@@ -30,34 +30,32 @@ function isLikelyBot(req) {
 
 const inFlight = new Map();
 
-function cacheResponse(cached) {
-  const checksTodayPromise = getDailyPriceCheckCount();
-  return checksTodayPromise.then((checksToday) => {
-    const stale = cached && cached.fetchedAt
-      ? Date.now() - new Date(cached.fetchedAt).getTime() >= require('../config/price').PRICE_FRESHNESS_MS
-      : false;
-    const snapshot = buildPriceSnapshot({
-      price: cached && cached.price,
-      currency: cached && cached.currency,
-      checkedAt: cached && cached.fetchedAt,
+async function getCachedRouteResponse(cacheKey) {
+  const cached = await getAdminConfig(cacheKey, null);
+  if (!cached) return null;
+  const stale = cached.fetchedAt
+    ? Date.now() - new Date(cached.fetchedAt).getTime() >= PRICE_FRESHNESS_MS
+    : false;
+  return {
+    ok: true,
+    price: cached.price,
+    currency: cached.currency,
+    departure_date: cached.departure_date,
+    insights: cached.insights || null,
+    offers: cached.offers || null,
+    cached: true,
+    stale: stale || undefined,
+    checksToday: null,
+    checkedAt: cached.fetchedAt,
+    offersCount: cached.offersCount ?? null,
+    snapshot: buildPriceSnapshot({
+      price: cached.price,
+      currency: cached.currency,
+      checkedAt: cached.fetchedAt,
       source: stale ? 'stale-cache' : 'cache',
-      offersCount: cached && cached.offersCount,
-    });
-    return {
-      ok: true,
-      price: cached && cached.price,
-      currency: cached && cached.currency,
-      departure_date: cached && cached.departure_date,
-      insights: (cached && cached.insights) || null,
-      offers: (cached && cached.offers) || null,
-      cached: true,
-      stale: stale || undefined,
-      checksToday,
-      checkedAt: cached && cached.fetchedAt,
-      offersCount: cached && cached.offersCount != null ? cached.offersCount : null,
-      snapshot,
-    };
-  });
+      offersCount: cached.offersCount,
+    }),
+  };
 }
 
 module.exports = (app) => {
@@ -109,8 +107,8 @@ module.exports = (app) => {
         : null;
       if (cacheKey) {
         try {
-          const cached = await getAdminConfig(cacheKey, null);
-          if (cached) return res.json(await cacheResponse(cached));
+          const cached = await getCachedRouteResponse(cacheKey);
+          if (cached) return res.json(cached);
         } catch (_) { /* fall through */ }
       }
       return next();
