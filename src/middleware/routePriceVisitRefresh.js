@@ -13,12 +13,15 @@ function isLikelyBot(req) {
   const ua = String(req.get('user-agent') || '');
   if (!ua) return true;
   if (BOT_UA.test(ua)) return true;
+
+  // A route-price refresh is allowed only when it comes from a real browser
+  // fetch/navigation context. Do not treat a generic JSON client (curl,
+  // scripts, server-to-server callers, etc.) as a human visit merely because
+  // it sends Accept: application/json. This is the hard gate before Duffel.
   const fetchMode = String(req.get('sec-fetch-mode') || '').toLowerCase();
   const fetchDest = String(req.get('sec-fetch-dest') || '').toLowerCase();
-  const accept = String(req.get('accept') || '').toLowerCase();
   const browserFetch = fetchMode === 'cors' || fetchMode === 'same-origin' || fetchDest === 'empty';
-  const jsonClient = accept.includes('application/json') && !accept.includes('text/html');
-  return !browserFetch && !jsonClient;
+  return !browserFetch;
 }
 
 const inFlight = new Map();

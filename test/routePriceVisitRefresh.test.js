@@ -89,6 +89,18 @@ describe('route-price user-visit refresh', () => {
     expect(mockFetchAndCacheRoutePrice).not.toHaveBeenCalled();
   });
 
+  test('generic JSON clients never trigger a live Duffel refresh', async () => {
+    const app = buildApp();
+    const res = await request(app)
+      .get('/route-price?from=DUS&to=BER')
+      .set('user-agent', 'Mozilla/5.0')
+      .set('accept', 'application/json');
+
+    expect(res.status).toBe(200);
+    expect(res.body.cacheOnly).toBe(true);
+    expect(mockFetchAndCacheRoutePrice).not.toHaveBeenCalled();
+  });
+
   test('normal browser fetch triggers one live refresh and returns its result', async () => {
     const app = buildApp();
     const res = await request(app)
