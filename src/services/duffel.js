@@ -3,6 +3,7 @@ const log = require('../utils/log');
 const Sentry = require('../clients/sentry');
 const { recordApiLog } = require('./apiLogs');
 const { logSearchAccess } = require('../middleware/searchGuard');
+const { createAttempt, finishAttempt } = require('./duffelApiAudit');
 
 const DUFFEL_TIMEOUT_MS = 20000;
 const SEARCH_PATH_RE = /\/air\/offer_requests|\/places\/suggestions/;
@@ -53,7 +54,7 @@ function classifyUpstreamStatus(status) {
   return 'UPSTREAM_5XX';
 }
 
-async function duffelAttempt(method, path, body, extraHeaders, timeoutMs, externalSignal) {
+async function duffelAttempt(method, path, body, extraHeaders, timeoutMs, externalSignal, auditContext) {
   if (!env.DUFFEL_TOKEN) throw new Error('DUFFEL_TOKEN غير موجود في Environment Variables');
   const opts = {
     method,
@@ -65,6 +66,11 @@ async function duffelAttempt(method, path, body, extraHeaders, timeoutMs, extern
     }, extraHeaders || {}),
   };
   if (body) opts.body = JSON.stringify(body);
+
+  const requestId = await createAttempt({ ...auditContext, method, endpoint: path, attemptNo: auditContext.attemptNo });
+  opts.headers['x-client-correlation-id'] = requestId;
+
+  const startedAt = Date.now();
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs || DUFFEL_TIMEOUT_MS);
   let onExternalAbort = null;
@@ -77,30 +83,41 @@ async function duffelAttempt(method, path, body, extraHeaders, timeoutMs, extern
   try {
     res = await fetch(`${env.DUFFEL_BASE}${path}`, opts);
   } catch (e) {
-    if (e.name === 'AbortError') {
-      const deadlineHit = !!(externalSignal && externalSignal.aborted);
-      const err = new Error(deadlineHit
-        ? 'Zeitlimit für die Preisberechnung überschritten'
-        : 'Duffel antwortet nicht — bitte erneut versuchen');
-      err.status = 504;
-      err.code = deadlineHit ? 'UPSTREAM_DEADLINE' : 'UPSTREAM_TIMEOUT';
-      throw err;
-    }
-    if (e && !e.code) e.code = 'UPSTREAM_NETWORK';
-    throw e;
+    const deadlineHit = !!(externalSignal && externalSignal.aborted);
+    const err = e.name === 'AbortError'
+      ? Object.assign(new Error(deadlineHit ? 'Zeitlimit für die Preisberechnung überschritten' : 'Duffel antwortet nicht — bitte erneut versuchen'), { status: 504, code: deadlineHit ? 'UPSTREAM_DEADLINE' : 'UPSTREAM_TIMEOUT' })
+      : e;
+    if (e.name !== 'AbortError' && !e.code) e.code = 'UPSTREAM_NETWORK';
+    await finishAttempt(requestId, { status: e.name === 'AbortError' ? 'timeout' : 'network_error', http_status: err.status || null, success: false, duration_ms: Date.now() - startedAt, duffel_client_correlation_id: requestId, error_code: err.code || 'UPSTREAM_NETWORK', error_message: err.message });
+    throw err;
   } finally {
     clearTimeout(timer);
     if (externalSignal && onExternalAbort) externalSignal.removeEventListener('abort', onExternalAbort);
   }
-  const json = await res.json();
+
+  const header = (name) => res.headers && typeof res.headers.get === 'function' ? res.headers.get(name) : null;
+  const duffelRequestId = header('x-request-id');
+  const clientCorrelationId = header('x-client-correlation-id') || requestId;
+  let json;
+  try {
+    json = await res.json();
+  } catch (e) {
+    const err = new Error('Invalid JSON response from Duffel');
+    err.status = res.status;
+    err.code = 'UPSTREAM_NETWORK';
+    await finishAttempt(requestId, { status: 'failed', http_status: res.status, success: false, duration_ms: Date.now() - startedAt, duffel_request_id: duffelRequestId, duffel_client_correlation_id: clientCorrelationId, error_code: err.code, error_message: err.message });
+    throw err;
+  }
   if (!res.ok) {
     const msg = json?.errors?.[0]?.message || 'Duffel API Error';
     const err = new Error(msg);
     err.status = res.status;
     err.code = classifyUpstreamStatus(res.status);
     err.details = json?.errors;
+    await finishAttempt(requestId, { status: 'failed', http_status: res.status, success: false, duration_ms: Date.now() - startedAt, duffel_request_id: duffelRequestId, duffel_client_correlation_id: clientCorrelationId, error_code: err.code, error_message: msg });
     throw err;
   }
+  await finishAttempt(requestId, { status: 'completed', http_status: res.status, success: true, duration_ms: Date.now() - startedAt, duffel_request_id: duffelRequestId, duffel_client_correlation_id: clientCorrelationId });
   return json;
 }
 
@@ -147,28 +164,13 @@ async function duffel(method, path, body = null, extraHeaders = null, options = 
     source = assertDuffelSearchContext(method, path, options);
   } catch (guardErr) {
     const ctx = options && options.searchContext;
-    logSearchAccess({
-      endpoint: path,
-      source: (options && options.source) || 'unspecified',
-      sid: ctx && ctx.sid,
-      userId: ctx && ctx.userId,
-      ip: ctx && ctx.ip,
-      allowed: false,
-      reason: guardErr.denyReason || 'missing_source',
-    });
+    logSearchAccess({ endpoint: path, source: (options && options.source) || 'unspecified', sid: ctx && ctx.sid, userId: ctx && ctx.userId, ip: ctx && ctx.ip, allowed: false, reason: guardErr.denyReason || 'missing_source' });
     recordApiLog({ method, path, statusCode: 403, success: false, durationMs: Date.now() - startedAt, logContext });
     throw guardErr;
   }
   if (isSearchPath(path)) {
     const ctx = options && options.searchContext;
-    logSearchAccess({
-      endpoint: path,
-      source,
-      sid: ctx && ctx.sid,
-      userId: ctx && ctx.userId,
-      ip: ctx && ctx.ip,
-      allowed: true,
-    });
+    logSearchAccess({ endpoint: path, source, sid: ctx && ctx.sid, userId: ctx && ctx.userId, ip: ctx && ctx.ip, allowed: true });
   }
   if (!duffelCircuitAllow()) {
     const err = new Error('Duffel ist vorübergehend nicht erreichbar — bitte in Kürze erneut versuchen');
@@ -177,10 +179,22 @@ async function duffel(method, path, body = null, extraHeaders = null, options = 
     recordApiLog({ method, path, statusCode: 503, success: false, durationMs: Date.now() - startedAt, logContext });
     throw err;
   }
+
   const timeoutMs = (options && options.timeoutMs) || DUFFEL_TIMEOUT_MS;
   const externalSignal = (options && options.signal) || null;
   const deadlineError = () => { const err = new Error('Zeitlimit für die Preisberechnung überschritten'); err.status = 504; err.code = 'UPSTREAM_DEADLINE'; return err; };
   const maxAttempts = 2;
+  const ctx = (options && options.searchContext) || {};
+  const auditContext = {
+    source,
+    trigger: (options && options.trigger) || (logContext && logContext.trigger) || source,
+    actorUserId: (options && options.actorUserId) || ctx.userId || null,
+    searchSessionId: ctx.sid || null,
+    routeOrigin: (logContext && logContext.route_origin) || null,
+    routeDestination: (logContext && logContext.route_destination) || null,
+    metadata: (options && options.auditMetadata) || null,
+  };
+
   let lastErr;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     if (externalSignal && externalSignal.aborted) {
@@ -189,7 +203,7 @@ async function duffel(method, path, body = null, extraHeaders = null, options = 
       throw err;
     }
     try {
-      const result = await duffelAttempt(method, path, body, extraHeaders, timeoutMs, externalSignal);
+      const result = await duffelAttempt(method, path, body, extraHeaders, timeoutMs, externalSignal, { ...auditContext, attemptNo: attempt });
       duffelCircuitRecordSuccess();
       recordApiLog({ method, path, statusCode: 200, success: true, durationMs: Date.now() - startedAt, logContext });
       return result;
