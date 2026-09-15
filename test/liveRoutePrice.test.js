@@ -46,6 +46,10 @@ function res() {
   };
 }
 
+function flushAsync() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockIsPublishedRoute.mockResolvedValue(true);
@@ -97,7 +101,7 @@ describe('live route price visitor refresh policy', () => {
     expect(response.json).toHaveBeenCalledWith(expect.objectContaining({ price: 99, cached: true, stale: false }));
   });
 
-  test('expired price is not refreshed until a real visitor arrives, then only one refresh is shared', async () => {
+  test('expired price is refreshed by a real visitor and concurrent visitors share one refresh', async () => {
     mockGetAdminConfig.mockResolvedValue({
       price: 99,
       currency: 'EUR',
@@ -115,7 +119,7 @@ describe('live route price visitor refresh policy', () => {
     const p1 = handle(req(), response1, jest.fn());
     const p2 = handle(req(), response2, jest.fn());
 
-    await Promise.resolve();
+    await flushAsync();
     expect(mockDuffel).toHaveBeenCalledTimes(1);
 
     release({ data: {
@@ -135,7 +139,7 @@ describe('live route price visitor refresh policy', () => {
     const next = jest.fn();
 
     await handle(req({
-      get: (name) => String(name).toLowerCase() === 'user-agent' ? 'Googlebot/2.1' : (String(name).toLowerCase() === 'sec-fetch-mode' ? '' : ''),
+      get: (name) => String(name).toLowerCase() === 'user-agent' ? 'Googlebot/2.1' : '',
     }), response, next);
 
     expect(mockDuffel).not.toHaveBeenCalled();
