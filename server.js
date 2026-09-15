@@ -91,6 +91,10 @@ require('./src/middleware/globalMiddleware')(app);
 
 // ─── [6] باقي كل الروتات ────────────────────────────────────
 require('./src/routes/health.routes')(app);
+// Route-page indicative pricing is user-visit driven only.
+// Background/timer Duffel warming is intentionally disabled here.
+env.DUFFEL_BACKGROUND_SEARCH_ENABLED = false;
+require('./src/middleware/routePriceVisitRefresh')(app);
 require('./src/routes/search.routes')(app);
 require('./src/routes/booking.routes')(app);
 require('./src/routes/cancel.routes')(app);
