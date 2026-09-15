@@ -22,7 +22,7 @@ if (!['de', ...SECONDARY_LANGUAGES].includes(language)) {
 }
 
 if (args.includes('--help')) {
-  console.log(`\nUsage: node src/cli/generate-seo-content.js [options]\n\n  --stats                 Show readiness report and exit\n  --route-id=<id>         Generate one German route\n  --language=<lang>       Generate a secondary locale (en/fr/es/it/nl/pl/tr)\n  --all-languages         Generate all seven secondary locales\n  --limit=<n>             Process only the top N routes\n  --dry-run               Preview without database writes\n  --force                 Refresh already generated localized rows\n  --help                  Show this help\n`);
+  console.log(`\nUsage: node src/cli/generate-seo-content.js [options]\n\n  --stats                 Show readiness report and exit\n  --route-id=<id>         Generate one German route\n  --language=<lang>       Generate a secondary locale (en/fr/es/it/nl/tr/ar)\n  --all-languages         Generate all seven secondary locales\n  --limit=<n>             Process only the top N routes\n  --dry-run               Preview without database writes\n  --force                 Refresh already generated localized rows\n  --help                  Show this help\n`);
   process.exit(0);
 }
 
