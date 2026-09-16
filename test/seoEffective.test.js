@@ -42,6 +42,21 @@ describe('effectiveRouteSeo — manual always wins over generated', () => {
     expect(seo.source.title).toBe('none');
   });
 
+  test('effective values are also exposed through the legacy flat renderer contract', () => {
+    const route = {
+      custom_title: 'Human title', seo_title: 'Generated title',
+      custom_meta_description: '', seo_meta_description: 'Generated meta',
+      intro_text: null, seo_intro_html: '<p>Generated intro</p>',
+      custom_faq: [], seo_faq: [{ question: 'gq', answer: 'ga' }],
+    };
+    const seo = effectiveRouteSeo(route);
+    expect(route.seo_title).toBe('Human title');
+    expect(route.seo_meta_description).toBe('Generated meta');
+    expect(route.seo_intro_html).toBe('<p>Generated intro</p>');
+    expect(route.seo_faq[0].question).toBe('gq');
+    expect(seo.title).toBe(route.seo_title);
+  });
+
   test('nonEmpty helper', () => {
     expect(nonEmpty('x')).toBe(true);
     expect(nonEmpty('  ')).toBe(false);
