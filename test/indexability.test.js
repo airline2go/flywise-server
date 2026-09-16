@@ -43,9 +43,10 @@ describe('getRouteIndexabilityDecision — enforced vs legacy (shared fixture)',
       expect(getRouteIndexabilityDecision(c.route, { enforce: false }).indexable).toBe(c.legacy);
     });
   }
-  test('default (flag off) preserves legacy behaviour — no accidental flip', () => {
+  test('default enforces verified-evidence policy when no flag is set', () => {
     delete process.env.SEO_EVIDENCE_POLICY_ENFORCED;
-    expect(routeIndexable({ distance_km: 500 })).toBe(true); // distance-only stays indexable
+    expect(routeIndexable({ distance_km: 500 })).toBe(false);
+    expect(routeIndexable({ airline_count: 1 })).toBe(true);
   });
   test('reason strings explain the verdict', () => {
     expect(getRouteIndexabilityDecision({ distance_km: 500 }, { enforce: true }).reason).toBe('NO VERIFIED FLIGHT EVIDENCE');
@@ -77,8 +78,8 @@ describe('routeIndexable', () => {
     expect(routeIndexable({ airline_count: 0, stop_distribution: {} })).toBe(false);
     expect(routeIndexable({ custom_faq: [] })).toBe(false);
   });
-  test('any single real data point makes it indexable', () => {
-    expect(routeIndexable({ distance_km: 500 })).toBe(true);
+  test('verified flight evidence makes it indexable', () => {
+    expect(routeIndexable({ distance_km: 500 })).toBe(false);
     expect(routeIndexable({ avg_duration_min: 90 })).toBe(true);
     expect(routeIndexable({ airline_count: 1 })).toBe(true);
     expect(routeIndexable({ stop_distribution: { '0': 3 } })).toBe(true);
@@ -131,36 +132,33 @@ describe('airlineIndexable', () => {
 describe('buildConnectivity', () => {
   const routes = [
     // Berlin reaches Munich and Paris (2 distinct) → indexable city.
-    { origin_iata: 'BER', destination_iata: 'MUC', origin_city_slug: 'berlin', destination_city_slug: 'muenchen', origin_country: 'DE', destination_country: 'DE' },
-    { origin_iata: 'BER', destination_iata: 'CDG', origin_city_slug: 'berlin', destination_city_slug: 'paris', origin_country: 'DE', destination_country: 'FR' },
+    { origin_iata: 'BER', destination_iata: 'MUC', origin_city_slug: 'berlin', destination_city_slug: 'muenchen', origin_country: 'DE', destination_country: 'DE', airline_count: 1 },
+    { origin_iata: 'BER', destination_iata: 'CDG', origin_city_slug: 'berlin', destination_city_slug: 'paris', origin_country: 'DE', destination_country: 'FR', airline_count: 1 },
     // Reverse direction of an existing pair collapses (still 2 for Berlin).
-    { origin_iata: 'MUC', destination_iata: 'BER', origin_city_slug: 'muenchen', destination_city_slug: 'berlin', origin_country: 'DE', destination_country: 'DE' },
+    { origin_iata: 'MUC', destination_iata: 'BER', origin_city_slug: 'muenchen', destination_city_slug: 'berlin', origin_country: 'DE', destination_country: 'DE', airline_count: 1 },
     // Lonely city: Cologne only reaches Munich (1 distinct) → thin.
-    { origin_iata: 'CGN', destination_iata: 'MUC', origin_city_slug: 'koeln', destination_city_slug: 'muenchen', origin_country: 'DE', destination_country: 'DE' },
+    { origin_iata: 'CGN', destination_iata: 'MUC', origin_city_slug: 'koeln', destination_city_slug: 'muenchen', origin_country: 'DE', destination_country: 'DE', airline_count: 1 },
   ];
   const c = buildConnectivity(routes);
 
   test('city distinct-destination counts collapse both directions', () => {
-    expect(cityDestinationCount(c, 'berlin')).toBe(2); // muenchen + paris
-    expect(cityDestinationCount(c, 'koeln')).toBe(1);  // muenchen only
+    expect(cityDestinationCount(c, 'berlin')).toBe(2);
+    expect(cityDestinationCount(c, 'koeln')).toBe(1);
   });
 
   test('airport distinct-destination counts key on the other end city', () => {
-    expect(airportDestinationCount(c, 'BER')).toBe(2); // muenchen + paris
+    expect(airportDestinationCount(c, 'BER')).toBe(2);
     expect(airportDestinationCount(c, 'CGN')).toBe(1);
   });
 
   test('country score = distinct external destinations + domestic route count', () => {
-    // DE domestic routes: BER-MUC, MUC-BER, CGN-MUC = 3 domestic.
-    // DE external destinations: paris (1 distinct). Score = 1 + 3 = 4.
     expect(countryConnectivityScore(c, 'DE')).toBe(4);
-    // FR: one external destination (berlin), no domestic. Score = 1.
     expect(countryConnectivityScore(c, 'FR')).toBe(1);
   });
 
   test('missing other-end slug is skipped, not counted as a destination', () => {
     const c2 = buildConnectivity([
-      { origin_iata: 'AAA', destination_iata: 'BBB', origin_city_slug: 'aa', destination_city_slug: null, origin_country: 'XX', destination_country: 'YY' },
+      { origin_iata: 'AAA', destination_iata: 'BBB', origin_city_slug: 'aa', destination_city_slug: null, origin_country: 'XX', destination_country: 'YY', airline_count: 1 },
     ]);
     expect(cityDestinationCount(c2, 'aa')).toBe(0);
   });
@@ -176,12 +174,12 @@ describe('airlineRouteCounts', () => {
     const observed = [
       { airline_id: 1, route_origin_iata: 'BER', route_destination_iata: 'MUC' },
       { airline_id: 1, route_origin_iata: 'BER', route_destination_iata: 'CDG' },
-      { airline_id: 1, route_origin_iata: 'BER', route_destination_iata: 'CDG' }, // dup
+      { airline_id: 1, route_origin_iata: 'BER', route_destination_iata: 'CDG' },
       { airline_id: 2, route_origin_iata: 'BER', route_destination_iata: 'MUC' },
-      { airline_id: 2, route_origin_iata: 'ZZZ', route_destination_iata: 'YYY' }, // not published
+      { airline_id: 2, route_origin_iata: 'ZZZ', route_destination_iata: 'YYY' },
     ];
     const counts = airlineRouteCounts(observed, published);
-    expect(counts.get(1)).toBe(2); // BER-MUC, BER-CDG
-    expect(counts.get(2)).toBe(1); // only BER-MUC published
+    expect(counts.get(1)).toBe(2);
+    expect(counts.get(2)).toBe(1);
   });
 });
