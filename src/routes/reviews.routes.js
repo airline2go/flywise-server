@@ -67,7 +67,7 @@ module.exports = (app) => {
   // Public list of published reviews + live aggregate. `?route=<slug>`
   // scopes to one published route (resolved server-side); omit it for the
   // central /reviews page. Pagination via limit/offset (§15).
-  app.get('/reviews', rateLimit('reviews_read', 120, 60000), async (req, res) => {
+  app.get('/reviews', rateLimit('reviews_read', 30, 60000), async (req, res) => {
     try {
       let routeId = null;
       if (req.query.route) {
@@ -88,7 +88,7 @@ module.exports = (app) => {
   });
 
   // A single published review.
-  app.get('/reviews/:id', rateLimit('reviews_read', 120, 60000), async (req, res) => {
+  app.get('/reviews/:id', rateLimit('reviews_read', 30, 60000), async (req, res) => {
     try {
       const review = await reviews.getPublishedReviewById(req.params.id);
       if (!review) return res.status(404).json({ ok: false, error: 'Bewertung nicht gefunden' });
