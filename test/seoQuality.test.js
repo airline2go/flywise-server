@@ -1,7 +1,10 @@
 const { validateGeneratedSeo } = require('../src/services/seo/quality');
 
 describe('validateGeneratedSeo', () => {
-  const route = { origin_city: 'Berlin', destination_city: 'Paris', airline_count: 2 };
+  const route = {
+    origin_city: 'Berlin', destination_city: 'Paris', airline_count: 2,
+    avg_duration_min: 105, price_min: 41, price_currency: 'EUR',
+  };
   const good = {
     title: 'Flüge von Berlin nach Paris: Flugzeit, Preise und Tipps',
     metaDescription: 'Flüge von Berlin nach Paris vergleichen: Flugzeit, Airlines, Preise und praktische Tipps für die Reiseplanung.',
@@ -15,7 +18,7 @@ describe('validateGeneratedSeo', () => {
   });
 
   test('rejects a route without verified evidence by default', () => {
-    const result = validateGeneratedSeo({ ...route, airline_count: 0, distance_km: 500 }, good);
+    const result = validateGeneratedSeo({ ...route, airline_count: 0, avg_duration_min: 0, distance_km: 500 }, good);
     expect(result.valid).toBe(false);
     expect(result.reasons).toContain('no verified flight evidence');
   });
@@ -27,6 +30,7 @@ describe('validateGeneratedSeo', () => {
   });
 
   test('can run without evidence requirement for report-only callers', () => {
-    expect(validateGeneratedSeo({ origin_city: 'Berlin', destination_city: 'Paris' }, good, { requireEvidence: false }).valid).toBe(true);
+    const reportOnlyRoute = { origin_city: 'Berlin', destination_city: 'Paris', airline_count: 2, avg_duration_min: 105, price_min: 41, price_currency: 'EUR' };
+    expect(validateGeneratedSeo(reportOnlyRoute, good, { requireEvidence: false }).valid).toBe(true);
   });
 });
