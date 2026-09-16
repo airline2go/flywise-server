@@ -70,3 +70,48 @@ require('./src/routes/tracking.routes')(app);
 require('./src/routes/admin.routes')(app);
 require('./src/routes/admin-duffel.routes')(app);
 require('./src/routes/route-airline-backfill.routes')(app);
+require('./src/routes/admin-staff.routes')(app);
+require('./src/routes/admin-customers.routes')(app);
+require('./src/routes/admin-geo.routes')(app);
+require('./src/routes/admin-airlines.routes')(app);
+require('./src/routes/admin-fare-rules.routes')(app);
+require('./src/routes/admin-seo.routes')(app);
+require('./src/routes/admin-gsc.routes')(app);
+require('./src/routes/admin-finance.routes')(app);
+
+require('./src/services/routeTraffic');
+require('./src/services/routeScore');
+require('./src/services/routeIntelligenceRefresh');
+require('./src/services/routePriceHistoryRefresh');
+require('./src/services/socialAutoGenerate');
+require('./src/services/finance/financeCron').start();
+
+if (env.SENTRY_DSN) Sentry.setupExpressErrorHandler(app);
+app.use((err, req, res, next) => {
+  log('error', 'unhandled_route_error', { message: err?.message, stack: err?.stack, path: req.path, reqId: req.id });
+  if (res.headersSent) return next(err);
+  res.status(err?.status || 500).json({
+    ok: false,
+    error: err?.status && err.status < 500 ? err.message : 'Ein unerwarteter Fehler ist aufgetreten.',
+    requestId: req.id,
+  });
+});
+
+function gracefulShutdown(signal) {
+  log('info', 'shutdown_initiated', { signal });
+  server.close(() => {
+    log('info', 'shutdown_complete', {});
+    process.exit(0);
+  });
+  setTimeout(() => {
+    log('warn', 'shutdown_forced', {});
+    process.exit(1);
+  }, 25000).unref();
+}
+let server;
+if (require.main === module) {
+  server = app.listen(env.PORT, () => console.log(`✅ Airpiv Server running on port ${env.PORT}`));
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+}
+module.exports = app;
