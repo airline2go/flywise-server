@@ -20,8 +20,7 @@ const UNSUPPORTED = [
   /\b(?:can save time|can widen schedule choice|can make the trip easier)\b/i,
   /\b(?:kann\s+zeit\s+sparen|auswahl\s+erweitern|reise\s+leichter\s+machen)\b/i,
   /\b(?:echtzeit|in\s+real[- ]?time)\b[^.]{0,80}\b(?:hunderte|hundreds|600\+?)\b[^.]{0,40}\b(?:airlines?|fluggesellschaften)\b/i,
-  /\b(?:direktflüge?|direct\s+flights?|vols?\s+directs?|vuelos\s+directos|voli\s+diretti|directe\s+vluchten|direktflug|direktflüge|رحلات\s+مباشرة)\b/i,
-  /\b(?:andere|alternative|other|alternate|alternativen?)\b[^.]{0,80}\b(?:flughäfen?|airports?|aéroports?|aeropuertos?|aeroporti|havaalanları)\b/i,
+  /\b(?:andere|anderen|alternative|other|alternate|alternativen?)\b[^.]{0,80}\b(?:flughäfen?|airports?|aéroports?|aeropuertos?|aeroporti|havaalanları)\b/i,
 ];
 
 function text(value) {
