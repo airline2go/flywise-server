@@ -13,9 +13,10 @@ describe('route evidence policy', () => {
     else process.env.SEO_EVIDENCE_POLICY_ENFORCED = previous;
   });
 
-  test('invalid fractional airline count is not flight evidence', () => {
+  test('airline count alone is not flight evidence', () => {
     expect(hasVerifiedFlightEvidence({ airline_count: 1.5 })).toBe(false);
-    expect(hasVerifiedFlightEvidence({ airline_count: 2 })).toBe(true);
+    expect(hasVerifiedFlightEvidence({ airline_count: 2 })).toBe(false);
+    expect(hasVerifiedFlightEvidence({ airline_count: 2, avg_duration_min: 90 })).toBe(true);
   });
 
   test('malformed stop distribution is not flight evidence', () => {
@@ -27,7 +28,7 @@ describe('route evidence policy', () => {
     const connectivity = buildConnectivity([
       { origin_city_slug: 'a', destination_city_slug: 'b', origin_iata: 'AAA', destination_iata: 'BBB', distance_km: 1000 },
       { origin_city_slug: 'a', destination_city_slug: 'c', origin_iata: 'AAA', destination_iata: 'CCC', avg_duration_min: 120 },
-    ]);
+    ], { enforce: true });
     expect(connectivity.cityDest.get('a')).toEqual(new Set(['c']));
   });
 });
