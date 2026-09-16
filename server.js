@@ -44,6 +44,7 @@ require('./src/routes/webhooks.routes')(app);
 require('./src/routes/seo.routes')(app);
 app.use(express.json({ limit: '2mb' }));
 require('./src/middleware/globalMiddleware')(app);
+require('./src/middleware/apiBotShield')(app);
 
 require('./src/routes/health.routes')(app);
 env.DUFFEL_BACKGROUND_SEARCH_ENABLED = false;
