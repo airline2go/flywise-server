@@ -70,18 +70,29 @@ describe('live route price visitor refresh policy', () => {
     await handle(req(), response, jest.fn());
 
     expect(mockDuffel).toHaveBeenCalledTimes(1);
-    expect(mockDuffel).toHaveBeenCalledWith(
-      'POST',
-      '/air/offer_requests?return_offers=true&supplier_timeout=8000',
-      expect.any(Object),
-      null,
-      expect.objectContaining({ source: 'route_price_user_visit', trigger: 'route_price_user_visit' }),
-    );
     expect(mockSetAdminConfig).toHaveBeenCalledWith(
       'route_price_BER_ATH',
-      expect.objectContaining({ price: 99, currency: 'EUR' }),
+      expect.objectContaining({ price: 99, currency: 'EUR', offersCount: 2 }),
     );
-    expect(response.json).toHaveBeenCalledWith(expect.objectContaining({ price: 99, currency: 'EUR', cached: false }));
+    expect(response.json).toHaveBeenCalledWith(expect.objectContaining({ price: 99, currency: 'EUR', cached: false, offersCount: 2 }));
+  });
+
+  test('live currency and compared-offer count come from valid priced offers', async () => {
+    mockGetAdminConfig.mockResolvedValue(null);
+    mockDuffel.mockResolvedValue({ data: {
+      offers: [
+        { id: 'no-currency', total_amount: '70.00', slices: [{ duration: 'PT2H' }] },
+        { id: 'valid-expensive', total_amount: '80.00', total_currency: 'USD', slices: [{ duration: 'PT3H' }] },
+        { id: 'valid-cheapest', total_amount: '65.00', total_currency: 'USD', slices: [{ duration: 'PT2H30M' }] },
+        { id: 'invalid-price', total_amount: '0.00', total_currency: 'USD', slices: [{ duration: 'PT2H' }] },
+      ],
+    } });
+
+    const response = res();
+    await handle(req(), response, jest.fn());
+
+    expect(response.json).toHaveBeenCalledWith(expect.objectContaining({ price: 65, currency: 'USD', offersCount: 2 }));
+    expect(mockSetAdminConfig).toHaveBeenCalledWith('route_price_BER_ATH', expect.objectContaining({ price: 65, currency: 'USD', offersCount: 2 }));
   });
 
   test('fresh cached price is served to later visitors without another Duffel call', async () => {

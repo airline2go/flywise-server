@@ -44,15 +44,15 @@ async function fetchLiveRoutePrice(from, to, daysAhead, cacheKey) {
     const slice = o.slices?.[0];
     const durationMin = slice ? durationMinutes(slice.duration) : null;
     const stops = Math.max(0, (slice?.segments || []).length - 1);
-    return { id: o.id, price, durationMin, stops };
-  }).filter((o) => Number.isFinite(o.price) && o.price > 0);
+    return { id: o.id, price, currency: o.total_currency || null, durationMin, stops };
+  }).filter((o) => Number.isFinite(o.price) && o.price > 0 && /^[A-Z]{3}$/.test(String(o.currency || '')));
 
   if (!priced.length) return { ok: true, price: null, currency: null, departure_date: null, offersCount: 0, snapshot: buildPriceSnapshot({ source: 'none' }) };
 
   const cheapest = priced.reduce((a, b) => b.price < a.price ? b : a);
   const durations = priced.map((o) => o.durationMin).filter((v) => v != null);
   const stopCounts = priced.map((o) => o.stops);
-  const currency = offers.find((o) => o.total_currency)?.total_currency || 'EUR';
+  const currency = cheapest.currency;
   const fetchedAt = new Date().toISOString();
   const insights = {
     avgDurationMin: durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : null,
@@ -61,17 +61,17 @@ async function fetchLiveRoutePrice(from, to, daysAhead, cacheKey) {
     allDirect: stopCounts.length > 0 && stopCounts.every((s) => s === 0),
     airlines: [],
   };
-  const snapshot = buildPriceSnapshot({ price: cheapest.price, currency, checkedAt: fetchedAt, source: 'live', offersCount: offers.length });
+  const snapshot = buildPriceSnapshot({ price: cheapest.price, currency, checkedAt: fetchedAt, source: 'live', offersCount: priced.length });
   await setAdminConfig(cacheKey, {
     price: cheapest.price,
     currency,
     departure_date,
     insights,
     offers: { cheapest },
-    offersCount: offers.length,
+    offersCount: priced.length,
     fetchedAt,
   });
-  return { ok: true, price: cheapest.price, currency, departure_date, insights, offers: { cheapest }, cached: false, checkedAt: fetchedAt, offersCount: offers.length, snapshot };
+  return { ok: true, price: cheapest.price, currency, departure_date, insights, offers: { cheapest }, cached: false, checkedAt: fetchedAt, offersCount: priced.length, snapshot };
 }
 
 async function cachedLivePrice(cacheKey) {

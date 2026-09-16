@@ -1,209 +1,120 @@
-// ═══════════════════════════════════════════════════════════════════════
-// src/services/indexability.js
-// ─────────────────────────────────────────────────────────────────────────
-// SINGLE SOURCE OF TRUTH for whether an entity's public page is INDEXABLE.
-//
-// The public content list endpoints (content.routes.js) attach an `indexable`
-// boolean to every record using the rules below, and the frontend sitemap
-// generator (flywise-app) includes ONLY records whose `indexable` is not
-// false. The sitemap NEVER re-derives indexability and never issues per-page
-// detail requests to figure it out — so any future SEO rule change lives here,
-// in one place, and the sitemap layer needs no change.
-//
-// The rules mirror, byte-for-byte in intent, the [THIN-CONTENT-NOINDEX] guards
-// the frontend renderers apply when they emit `<meta name="robots">`:
-//
-//   • flight route  render-flight-route.js : has real intelligence data OR admin content
-//   • city          render-city.js         : reaches ≥2 distinct destinations OR has intro_text
-//   • airport       render-airport.js       : reaches ≥2 distinct destinations OR has admin content
-//   • country       render-country.js       : (distinct external + domestic) ≥2 OR has intro_text
-//   • airline       render-airline.js       : operates ≥2 published routes OR has intro_text
-//
-// A page that is `noindex` must never appear in a sitemap (Google treats a
-// sitemap URL as a "please index this" signal; listing noindex/thin pages
-// wastes crawl budget and dilutes the index), which is exactly what filtering
-// on `indexable` downstream guarantees.
-// ═══════════════════════════════════════════════════════════════════════
-
-// ─── Pure per-record rules ───────────────────────────────────────────────
-
-// [SEO-EVIDENCE-POLICY] Whether the strict "verified flight evidence" policy
-// is enforced at runtime. When OFF (default), the legacy rule applies and
-// distance_km alone still counts as data — so NO page changes its indexability
-// the moment this module ships. When ON, distance alone is NOT evidence and a
-// route is indexable only with a genuine flight-data signal (or approved
-// manual editorial content). The flip from legacy → enforced is a deliberate,
-// reviewed step (see the 182-route report), never an accident of deploy.
 function evidencePolicyEnforced() {
+  if (process.env.SEO_EVIDENCE_POLICY_ENFORCED == null) return true;
   return process.env.SEO_EVIDENCE_POLICY_ENFORCED === '1'
     || process.env.SEO_EVIDENCE_POLICY_ENFORCED === 'true';
 }
 
-// A jsonb map/array is "real" only when it is a non-empty object/array.
-function hasRealStopDistribution(sd) {
-  if (!sd || typeof sd !== 'object') return false;
-  return Object.keys(sd).length > 0;
+function validPositiveInteger(value) {
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0;
 }
 
-// ─── CANONICAL POLICY: verified flight evidence ───────────────────────────
-// A route page carries VERIFIED FLIGHT EVIDENCE when at least one trustworthy
-// signal proves real flights exist on the pair. distance_km is NEVER evidence
-// (a great-circle distance exists for any two coordinates whether or not a
-// flight is ever sold). airline_count = 0 is NEVER evidence. Nothing about the
-// mere existence of slug / origin / destination / country / city counts.
-//
-// This is the ONE definition every layer must use (backend indexable flag,
-// sitemap eligibility, connectivity, audits, and — mirrored byte-for-byte —
-// the frontend route renderer's <meta robots>). Do not fork it.
+function validPositiveNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0;
+}
+
+function hasRealStopDistribution(sd) {
+  if (!sd || typeof sd !== 'object' || Array.isArray(sd)) return false;
+  const entries = Object.entries(sd);
+  if (!entries.length) return false;
+  return entries.every(([key, value]) => /^\d+$/.test(String(key)) && Number.isInteger(Number(value)) && Number(value) >= 0)
+    && entries.some(([, value]) => Number(value) > 0);
+}
+
 function hasVerifiedFlightEvidence(r) {
   if (!r) return false;
-  // 1. Observed carriers on the route (backfilled from real flight data).
-  if (r.airline_count != null && r.airline_count > 0) return true;
-  // 2. A real average duration — only exists once itineraries were observed.
-  if (r.avg_duration_min != null && r.avg_duration_min > 0) return true;
-  // 3. A real stop distribution — populated from observed itineraries.
+  if (validPositiveInteger(r.airline_count)) return true;
+  if (validPositiveNumber(r.avg_duration_min)) return true;
   if (hasRealStopDistribution(r.stop_distribution)) return true;
-  // 4. Verified price sampling from actual offers.
-  if (r.price_sample_count != null && r.price_sample_count > 0) return true;
-  // 5. Observed itineraries/offers.
-  if (r.itinerary_count != null && r.itinerary_count > 0) return true;
+  if (validPositiveInteger(r.price_sample_count)) return true;
+  if (validPositiveInteger(r.itinerary_count)) return true;
   return false;
 }
 
-// Approved manual/editorial content authored for the page (intro / FAQ).
 function hasManualEditorialContent(r) {
   return !!(r && (r.intro_text || (r.custom_faq && r.custom_faq.length)));
 }
 
-// Legacy rule (pre-policy): distance_km alone still counts as data.
 function hasLegacyRouteData(r) {
-  return r.distance_km != null
-    || r.avg_duration_min != null
-    || (r.airline_count != null && r.airline_count > 0)
-    || hasRealStopDistribution(r.stop_distribution);
+  return validPositiveNumber(r && r.distance_km)
+    || validPositiveNumber(r && r.avg_duration_min)
+    || validPositiveInteger(r && r.airline_count)
+    || hasRealStopDistribution(r && r.stop_distribution);
 }
 
-// Structured decision + rationale. Report-only callers use this to explain
-// exactly which signal (or its absence) drove the verdict, without depending
-// on the runtime flag: pass { enforce: true } to force the strict policy.
 function getRouteIndexabilityDecision(r, opts = {}) {
   const enforce = opts.enforce != null ? opts.enforce : evidencePolicyEnforced();
   const evidence = hasVerifiedFlightEvidence(r);
   const manual = hasManualEditorialContent(r);
-  const signals = {
-    airline_count: r ? r.airline_count : null,
-    avg_duration_min: r ? r.avg_duration_min : null,
-    has_stop_distribution: hasRealStopDistribution(r && r.stop_distribution),
-    price_sample_count: r ? r.price_sample_count : null,
-    itinerary_count: r ? r.itinerary_count : null,
-    distance_km: r ? r.distance_km : null,
+  const indexable = enforce ? (evidence || manual) : (hasLegacyRouteData(r) || manual);
+  const reason = enforce
+    ? (evidence ? 'VERIFIED FLIGHT EVIDENCE' : (manual ? 'MANUAL EDITORIAL CONTENT' : 'NO VERIFIED FLIGHT EVIDENCE'))
+    : (indexable ? 'LEGACY DATA/CONTENT' : 'NO DATA (legacy)');
+  return {
+    indexable,
+    verifiedEvidence: evidence,
+    manualContent: manual,
+    enforce,
+    reason,
+    signals: {
+      airline_count: r ? r.airline_count : null,
+      avg_duration_min: r ? r.avg_duration_min : null,
+      has_stop_distribution: hasRealStopDistribution(r && r.stop_distribution),
+      price_sample_count: r ? r.price_sample_count : null,
+      itinerary_count: r ? r.itinerary_count : null,
+      distance_km: r ? r.distance_km : null,
+    },
   };
-  let indexable;
-  let reason;
-  if (enforce) {
-    indexable = evidence || manual;
-    reason = evidence
-      ? 'VERIFIED FLIGHT EVIDENCE'
-      : (manual ? 'MANUAL EDITORIAL CONTENT' : 'NO VERIFIED FLIGHT EVIDENCE');
-  } else {
-    indexable = hasLegacyRouteData(r) || manual;
-    reason = indexable ? 'LEGACY DATA/CONTENT' : 'NO DATA (legacy)';
-  }
-  return { indexable, verifiedEvidence: evidence, manualContent: manual, enforce, reason, signals };
 }
 
-// A flight-route page's indexability. Delegates to the canonical decision so
-// there is exactly one implementation. Behaviour is unchanged from the legacy
-// rule until SEO_EVIDENCE_POLICY_ENFORCED is turned on.
 function routeIndexable(r) {
   return getRouteIndexabilityDecision(r).indexable;
 }
 
-// A city reaching ≤1 distinct destination with no hand-written intro is thin.
 function cityIndexable(city, distinctDestinations) {
   return distinctDestinations >= 2 || !!city.intro_text;
 }
-
-// An airport reaching ≤1 distinct destination with no admin traveler content
-// (terminal / transit / tips) is thin.
 function airportIndexable(airport, distinctDestinations) {
-  return distinctDestinations >= 2
-    || !!(airport.terminal_info || airport.transit_options || airport.traveler_tips);
+  return distinctDestinations >= 2 || !!(airport.terminal_info || airport.transit_options || airport.traveler_tips);
 }
-
-// A country whose (distinct external destinations + domestic route count) is
-// ≤1 with no hand-written intro is thin. `connectivityScore` is that sum —
-// matching render-country.js's `facts.destinationCount + facts.domesticCount`.
 function countryIndexable(country, connectivityScore) {
   return connectivityScore >= 2 || !!country.intro_text;
 }
-
-// An airline operating ≤1 published route with no hand-written intro is thin.
 function airlineIndexable(airline, publishedRouteCount) {
   return publishedRouteCount >= 2 || !!airline.intro_text;
 }
 
-// ─── Connectivity derived from the published route_pages set ──────────────
-// One O(routes) pass builds every connectivity structure the city / airport /
-// country rules need, so a list endpoint scans the route set once rather than
-// per entity. Each route row needs only:
-//   origin_iata, destination_iata, origin_city_slug, destination_city_slug,
-//   origin_country, destination_country
-//
-// Distinct-destination counting matches the frontend's summarizeConnections()
-// (connection-facts.js): both directions of a pair collapse to one, keyed by
-// the OTHER end's CITY slug (so two airports in the same city count once), and
-// a route with a missing other-end slug is skipped.
-// [P0-2] Connectivity must only be raised by routes that themselves carry
-// verified flight evidence. A zero-flight / distance-only route must NOT make a
-// city/airport/country look better connected than its real data supports.
-// Gated by the same policy flag so nothing changes until the reviewed flip:
-// when the policy is enforced (or opts.enforce is set) routes without verified
-// evidence are skipped; otherwise every published route contributes as before.
 function buildConnectivity(routes, opts = {}) {
   const enforce = opts.enforce != null ? opts.enforce : evidencePolicyEnforced();
-  const cityDest = new Map();       // city_slug -> Set(other city_slug)
-  const airportDest = new Map();    // iata      -> Set(other city_slug)
-  const countryExt = new Map();     // country   -> Set(external destination key)
-  const countryDomestic = new Map(); // country  -> domestic route count
-
+  const cityDest = new Map();
+  const airportDest = new Map();
+  const countryExt = new Map();
+  const countryDomestic = new Map();
   const addTo = (map, key, val) => {
     if (!key || !val) return;
     let set = map.get(key);
     if (!set) { set = new Set(); map.set(key, set); }
     set.add(val);
   };
-
   for (const r of routes || []) {
-    // Skip routes that do not clear the evidence bar (or carry manual content)
-    // when the policy is enforced — they must not inflate entity connectivity.
     if (enforce && !hasVerifiedFlightEvidence(r) && !hasManualEditorialContent(r)) continue;
-    // City connectivity — keyed by each end's city slug, "other" = opposite city.
     addTo(cityDest, r.origin_city_slug, r.destination_city_slug);
     addTo(cityDest, r.destination_city_slug, r.origin_city_slug);
-
-    // Airport connectivity — keyed by IATA, "other" = opposite end's city slug.
     addTo(airportDest, r.origin_iata, r.destination_city_slug);
     addTo(airportDest, r.destination_iata, r.origin_city_slug);
-
-    // Country connectivity.
     const oc = r.origin_country;
     const dc = r.destination_country;
     if (oc && dc && oc === dc) {
-      // Domestic FOR THAT COUNTRY — counted once per route (matches domesticCount++).
       countryDomestic.set(oc, (countryDomestic.get(oc) || 0) + 1);
     } else {
-      // International: each end's country sees the OTHER end as an external
-      // destination (keyed by the far end's city slug, IATA as fallback).
       if (oc) addTo(countryExt, oc, r.destination_city_slug || r.destination_iata);
       if (dc) addTo(countryExt, dc, r.origin_city_slug || r.origin_iata);
     }
   }
-
   return { cityDest, airportDest, countryExt, countryDomestic };
 }
 
-// Convenience: distinct-destination count for a city slug / airport code.
 function cityDestinationCount(connectivity, citySlug) {
   const s = connectivity.cityDest.get(citySlug);
   return s ? s.size : 0;
@@ -212,33 +123,28 @@ function airportDestinationCount(connectivity, iata) {
   const s = connectivity.airportDest.get(iata);
   return s ? s.size : 0;
 }
-// Country connectivity score = distinct external destinations + domestic routes.
 function countryConnectivityScore(connectivity, code) {
   const ext = connectivity.countryExt.get(code);
   const dom = connectivity.countryDomestic.get(code) || 0;
   return (ext ? ext.size : 0) + dom;
 }
 
-// Distinct published-route count per airline, from the route_airlines join
-// rows (airline_id, route_origin_iata, route_destination_iata) intersected
-// with the set of published route O→D pairs. Returns Map(airline_id -> count).
-// The count is capped at 2 per airline: the only question the rule asks is
-// "≥2?", so there is no need to grow an unbounded set for a mega-carrier.
 function airlineRouteCounts(observedRows, publishedRoutes) {
+  const separator = String.fromCharCode(0);
   const publishedPairs = new Set();
   for (const r of publishedRoutes || []) {
-    if (r.origin_iata && r.destination_iata) publishedPairs.add(`${r.origin_iata} ${r.destination_iata}`);
+    if (r.origin_iata && r.destination_iata) publishedPairs.add(`${r.origin_iata}${separator}${r.destination_iata}`);
   }
-  const seenPairsByAirline = new Map(); // id -> Set(pair) capped at 2
+  const seenPairsByAirline = new Map();
   const counts = new Map();
   for (const o of observedRows || []) {
     const id = o.airline_id;
     if (id == null) continue;
-    const pair = `${o.route_origin_iata} ${o.route_destination_iata}`;
+    const pair = `${o.route_origin_iata}${separator}${o.route_destination_iata}`;
     if (!publishedPairs.has(pair)) continue;
     let seen = seenPairsByAirline.get(id);
     if (!seen) { seen = new Set(); seenPairsByAirline.set(id, seen); }
-    if (seen.size >= 2) continue; // already indexable; stop growing
+    if (seen.size >= 2) continue;
     if (!seen.has(pair)) {
       seen.add(pair);
       counts.set(id, seen.size);
