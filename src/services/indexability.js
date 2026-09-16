@@ -22,9 +22,15 @@ function hasRealStopDistribution(sd) {
     && entries.some(([, value]) => Number(value) > 0);
 }
 
+// [SEO-GSC-COMPOUND-EVIDENCE] GSC shows a long tail of route URLs receiving
+// impressions without meaningful ranking. A carrier count by itself is a
+// weak freshness/route-quality signal and can survive after richer route
+// evidence has gone stale. Keep duration, stops, verified price sampling and
+// observed itineraries independently sufficient, but do not index a route
+// whose only flight signal is airline_count. This is a fail-closed quality gate
+// for thin route pages, not a ranking manipulation.
 function hasVerifiedFlightEvidence(r) {
   if (!r) return false;
-  if (validPositiveInteger(r.airline_count)) return true;
   if (validPositiveNumber(r.avg_duration_min)) return true;
   if (hasRealStopDistribution(r.stop_distribution)) return true;
   if (validPositiveInteger(r.price_sample_count)) return true;
@@ -71,7 +77,6 @@ function getRouteIndexabilityDecision(r, opts = {}) {
 function routeIndexable(r) {
   return getRouteIndexabilityDecision(r).indexable;
 }
-
 function cityIndexable(city, distinctDestinations) {
   return distinctDestinations >= 2 || !!city.intro_text;
 }
@@ -84,7 +89,6 @@ function countryIndexable(country, connectivityScore) {
 function airlineIndexable(airline, publishedRouteCount) {
   return publishedRouteCount >= 2 || !!airline.intro_text;
 }
-
 function buildConnectivity(routes, opts = {}) {
   const enforce = opts.enforce != null ? opts.enforce : evidencePolicyEnforced();
   const cityDest = new Map();
@@ -114,7 +118,6 @@ function buildConnectivity(routes, opts = {}) {
   }
   return { cityDest, airportDest, countryExt, countryDomestic };
 }
-
 function cityDestinationCount(connectivity, citySlug) {
   const s = connectivity.cityDest.get(citySlug);
   return s ? s.size : 0;
@@ -128,7 +131,6 @@ function countryConnectivityScore(connectivity, code) {
   const dom = connectivity.countryDomestic.get(code) || 0;
   return (ext ? ext.size : 0) + dom;
 }
-
 function airlineRouteCounts(observedRows, publishedRoutes) {
   const separator = String.fromCharCode(0);
   const publishedPairs = new Set();
@@ -152,7 +154,6 @@ function airlineRouteCounts(observedRows, publishedRoutes) {
   }
   return counts;
 }
-
 module.exports = {
   hasVerifiedFlightEvidence,
   hasManualEditorialContent,
