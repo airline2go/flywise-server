@@ -1,13 +1,11 @@
 // ═══════════════════════════════════════════════════════════════
 // src/routes/reviews.routes.js
 // [REVIEWS-P0] Public reviews API. Writes require a verified Supabase
-// auth token and always act on req.userId — verified/route/status/
-// booking linkage are decided server-side (see services/reviews.js),
-// never trusted from the body (§35). Same IDOR-safe pattern as
-// referral.routes.js. Reads only ever return published reviews.
+// auth token and always act on req.userId. Reads only return published reviews.
 // ═══════════════════════════════════════════════════════════════
 
 const rateLimit = require('../middleware/rateLimit');
+const reviewsBotShield = require('../middleware/reviewsBotShield');
 const redis = require('../clients/redis');
 const { attachUserIfPresent } = require('../middleware/auth');
 const { validate } = require('../utils/validate');
@@ -37,9 +35,6 @@ const SUBMIT_ERRORS = {
   insert_failed: { status: 500, msg: 'Bewertung konnte nicht gespeichert werden' },
 };
 
-// Public review lists are immutable between writes and can safely be cached
-// for a short period. This protects Supabase from distributed bot floods:
-// thousands of different IPs still converge on one Redis result per query.
 const PUBLIC_CACHE_TTL_SEC = 30;
 const localCache = new Map();
 
@@ -84,7 +79,6 @@ module.exports = (app) => {
       if (!req.userId) return res.status(401).json({ ok: false, error: 'Nicht angemeldet' });
       const err = validate(req.body || {}, SUBMIT_SCHEMA);
       if (err) return res.status(400).json({ ok: false, error: err });
-
       const result = await reviews.submitReview(req.userId, req.body || {});
       if (!result.ok) {
         const e = SUBMIT_ERRORS[result.reason] || { status: 400, msg: 'Ungültige Bewertung' };
@@ -96,10 +90,8 @@ module.exports = (app) => {
     }
   });
 
-  // Public list: stricter per-IP limit + bounded pagination + short shared
-  // cache. Cache is deliberately server-side so distributed bots cannot
-  // multiply identical Supabase reads by rotating IP addresses.
-  app.get('/reviews', rateLimit('reviews_read', 10, 60000), async (req, res) => {
+  // Bot gate runs before cache/database work. Real browser traffic remains public.
+  app.get('/reviews', reviewsBotShield(), rateLimit('reviews_read', 10, 60000), async (req, res) => {
     try {
       const { route, limit, offset } = normalizeReadQuery(req);
       const key = cacheKey({ route, limit, offset });
@@ -131,7 +123,7 @@ module.exports = (app) => {
     }
   });
 
-  app.get('/reviews/:id', rateLimit('reviews_read', 10, 60000), async (req, res) => {
+  app.get('/reviews/:id', reviewsBotShield(), rateLimit('reviews_read', 10, 60000), async (req, res) => {
     try {
       const id = String(req.params.id || '').trim().slice(0, 128);
       if (!id || !/^[A-Za-z0-9_-]+$/.test(id)) return res.status(404).json({ ok: false, error: 'Bewertung nicht gefunden' });
