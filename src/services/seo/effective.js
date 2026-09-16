@@ -29,7 +29,8 @@ function effectiveRouteSeo(route) {
   const generatedMeta = safeGenerated(route, route.seo_meta_description);
   const generatedIntro = safeGenerated(route, route.seo_intro_html);
   const generatedFaq = safeGeneratedFaq(route, route.seo_faq);
-  return {
+
+  const effective = {
     title: nonEmpty(route.custom_title) ? route.custom_title : generatedTitle,
     metaDescription: nonEmpty(route.custom_meta_description) ? route.custom_meta_description : generatedMeta,
     introHtml: nonEmpty(route.intro_text) ? route.intro_text : generatedIntro,
@@ -43,6 +44,22 @@ function effectiveRouteSeo(route) {
     angle: route.seo_angle || null,
     generatedAt: route.seo_generated_at || null,
   };
+
+  // [LEGACY-RENDER-CONTRACT] The public route response already exposes the
+  // resolved object as `route.seo`, but the legacy SSR renderer still consumes
+  // the historical flat `seo_*` fields. Keep those two representations in lock
+  // step at the server boundary. This is deliberately derived-only: manual
+  // overrides remain authoritative and rejected generated values become null;
+  // we never write to the database and never invent fallback copy.
+  //
+  // The renderer receives a shallow copy of `data` in content.routes.js, so
+  // mutating this request-local object here cannot persist anything to Supabase.
+  route.seo_title = effective.title;
+  route.seo_meta_description = effective.metaDescription;
+  route.seo_intro_html = effective.introHtml;
+  route.seo_faq = effective.faq;
+
+  return effective;
 }
 
 module.exports = { effectiveRouteSeo, nonEmpty };
