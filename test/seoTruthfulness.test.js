@@ -7,6 +7,7 @@ describe('generated route SEO truthfulness', () => {
     origin_city: 'London', destination_city: 'Zürich', distance_km: 800,
     avg_duration_min: 105, airline_count: 8,
     price_min: 41, price_avg: 65, price_currency: 'EUR',
+    direct_flight_available: true,
   };
 
   test('rejects unsupported booking-window and weekday-price claims', () => {
@@ -15,15 +16,24 @@ describe('generated route SEO truthfulness', () => {
     expect(hasUnsupportedClaim('Early booking is better.')).toBe(true);
   });
 
-  test('rejects unsupported airline-density causality and weekend judgement', () => {
+  test('rejects unsupported airline-density, realtime-volume and weekend claims', () => {
     expect(hasUnsupportedClaim('Diese Dichte drückt die Preise.')).toBe(true);
+    expect(hasUnsupportedClaim('Airpiv vergleicht in Echtzeit hunderte Airlines für diese Strecke.')).toBe(true);
     expect(hasUnsupportedClaim('Die Strecke eignet sich sehr gut für einen Wochenendtrip.')).toBe(true);
+  });
+
+  test('rejects direct-flight and alternate-airport claims when no route signal exists', () => {
+    const unverified = { avg_duration_min: 105, airline_count: 2 };
+    expect(hasUnsupportedClaim('Direktflüge sind verfügbar.')).toBe(true);
+    expect(hasUnbackedFact(unverified, 'Direktflüge sind verfügbar.')).toBe(true);
+    expect(hasUnsupportedClaim('Madrid wird auch von einem anderen Flughafen bedient.')).toBe(true);
   });
 
   test('allows factual route observations', () => {
     expect(hasUnsupportedClaim('Die beobachtete Flugzeit liegt bei rund 105 Minuten.')).toBe(false);
     expect(generatedFieldIsSafe(route, '8 Airlines sind im Routendatensatz vertreten.')).toBe(true);
     expect(generatedFieldIsSafe(route, 'Beobachtete Tarife beginnen bei etwa 41 EUR.')).toBe(true);
+    expect(generatedFieldIsSafe(route, 'Direktflüge sind im beobachteten Datensatz vertreten.')).toBe(true);
   });
 
   test('rejects price claims when currency is missing', () => {
