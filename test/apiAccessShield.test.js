@@ -46,9 +46,9 @@ describe('apiAccessShield', () => {
     expect(res.status).toBe(200);
   });
 
-  test('allows Next.js/Vercel server-side GETs without browser origin', async () => {
+  test.each(['next.js/16.2.10', 'node/22.0.0', 'undici'])('allows trusted server GETs with supported UA: %s', async (userAgent) => {
     const res = await request(buildApp()).get('/protected')
-      .set('User-Agent', 'next.js/16.2.10')
+      .set('User-Agent', userAgent)
       .set('Accept', 'application/json');
     expect(res.status).toBe(200);
   });
@@ -57,7 +57,7 @@ describe('apiAccessShield', () => {
     const app = express();
     apiAccessShield(app);
     app.post('/protected', (req, res) => res.json({ ok: true }));
-    const res = await request(app).post('/protected').set('User-Agent', 'next.js/16.2.10');
+    const res = await request(app).post('/protected').set('User-Agent', 'node/22.0.0');
     expect(res.status).toBe(403);
   });
 
