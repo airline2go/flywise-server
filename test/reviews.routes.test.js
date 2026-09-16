@@ -30,6 +30,10 @@ const supa = require('../src/clients/supabase');
 function buildApp() {
   const app = express();
   app.use(express.json());
+  app.use((req, _res, next) => {
+    if (!req.headers['user-agent']) req.headers['user-agent'] = 'Mozilla/5.0';
+    next();
+  });
   require('../src/routes/reviews.routes')(app);
   return app;
 }
