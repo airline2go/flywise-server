@@ -27,7 +27,7 @@ describe('route evidence policy', () => {
     const connectivity = buildConnectivity([
       { origin_city_slug: 'a', destination_city_slug: 'b', origin_iata: 'AAA', destination_iata: 'BBB', distance_km: 1000 },
       { origin_city_slug: 'a', destination_city_slug: 'c', origin_iata: 'AAA', destination_iata: 'CCC', avg_duration_min: 120 },
-    ]);
+    ], { enforce: true });
     expect(connectivity.cityDest.get('a')).toEqual(new Set(['c']));
   });
 });
