@@ -40,9 +40,11 @@ process.on('uncaughtException', (err) => {
   });
 })();
 
-// Must be first: reject known crawler traffic before JSON parsing, maintenance
-// checks, logging, webhooks, SEO endpoints, or any expensive route middleware.
+// Layer 1: deny known crawler/AI/SEO bots before any route work.
 require('./src/middleware/apiBotShield')(app);
+// Layer 2: require Airpiv browser provenance or explicit Bearer auth, then
+// apply distributed global burst/sustained limits before JSON parsing and routes.
+require('./src/middleware/apiAccessShield')(app);
 require('./src/routes/webhooks.routes')(app);
 require('./src/routes/seo.routes')(app);
 app.use(express.json({ limit: '2mb' }));
