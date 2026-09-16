@@ -1,1 +1,1 @@
-Temporary CI trigger for PR #167; safe to remove after validation.
+CI rerun marker for PR #167 — verify latest head after SEO test fixes.
