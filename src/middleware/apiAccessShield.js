@@ -13,7 +13,7 @@ const EXEMPT_PATHS = new Set([
 ]);
 const EXEMPT_PREFIXES = ['/webhooks/'];
 const AUTOMATION_RE = /(?:curl|wget|python|urllib|aiohttp|scrapy|httpclient|okhttp|go-http-client|libwww|headless|phantom|selenium|playwright|puppeteer|postman|insomnia|axios)/i;
-const TRUSTED_SERVER_UA_RE = /(?:next(?:\.js)?|vercel-build)/i;
+const TRUSTED_SERVER_UA_RE = /(?:next(?:\.js)?|vercel-build|node(?:\.js)?|undici)/i;
 
 function allowedOrigin(req) {
   const origin = String(req.headers.origin || '').replace(/\/+$/, '');
@@ -50,7 +50,7 @@ function shield(app) {
     // Browser traffic from Airpiv carries an allowed Origin/Referer. Authenticated
     // admin/service calls are allowed without browser provenance and remain protected
     // by their own authorization middleware. Next.js/Vercel server-side fetches are
-    // a narrow third case: they have no browser headers, but carry the framework UA.
+    // a narrow third case: they have no browser headers, but carry the framework/Node UA.
     if (!allowedOrigin(req) && !hasTrustedAuth(req) && !hasTrustedServerProvenance(req)) {
       return res.status(403).json({ ok: false, error: 'API access is restricted.' });
     }
