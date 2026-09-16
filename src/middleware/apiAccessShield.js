@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const rateLimit = require('./rateLimit');
 const env = require('../config/env');
 
@@ -6,6 +7,7 @@ const env = require('../config/env');
 // - requests without browser provenance are denied unless they carry API auth
 // - trusted server-side Next.js/Vercel GET fetches are allowed through a narrow
 //   user-agent marker so SEO prerender/build jobs do not get mistaken for bots
+// - an optional Cloudflare edge secret can close direct-to-Render origin bypass
 // - a distributed burst limiter throttles scripted clients before route code
 // This does not replace endpoint-specific auth/rate limits.
 const EXEMPT_PATHS = new Set([
@@ -37,6 +39,17 @@ function hasTrustedServerProvenance(req) {
     && TRUSTED_SERVER_UA_RE.test(ua);
 }
 
+function hasValidEdgeSecret(req) {
+  const expected = String(env.EDGE_SHARED_SECRET || '');
+  if (!expected) return true;
+
+  const supplied = String(req.headers['x-airpiv-edge-secret'] || '');
+  const expectedBuf = Buffer.from(expected, 'utf8');
+  const suppliedBuf = Buffer.from(supplied, 'utf8');
+  if (expectedBuf.length !== suppliedBuf.length) return false;
+  return crypto.timingSafeEqual(expectedBuf, suppliedBuf);
+}
+
 function shield(app) {
   const burst = rateLimit('api-edge-burst', 45, 10000);
   const sustained = rateLimit('api-edge-sustained', 240, 60000);
@@ -48,6 +61,14 @@ function shield(app) {
     if (!ua || AUTOMATION_RE.test(ua)) {
       res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
       return res.status(403).json({ ok: false, error: 'Direct automated API access is not permitted.' });
+    }
+
+    // When configured, only Cloudflare-originated requests carrying the shared
+    // secret may reach protected API routes. This blocks direct-to-Render bypass,
+    // including requests that otherwise have valid browser provenance or Bearer auth.
+    if (!hasValidEdgeSecret(req)) {
+      res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
+      return res.status(403).json({ ok: false, error: 'API origin access is restricted.' });
     }
 
     // Browser traffic from Airpiv carries an allowed Origin/Referer. Authenticated
@@ -71,4 +92,5 @@ module.exports = shield;
 module.exports.allowedOrigin = allowedOrigin;
 module.exports.hasTrustedAuth = hasTrustedAuth;
 module.exports.hasTrustedServerProvenance = hasTrustedServerProvenance;
+module.exports.hasValidEdgeSecret = hasValidEdgeSecret;
 module.exports.EXEMPT_PATHS = EXEMPT_PATHS;
