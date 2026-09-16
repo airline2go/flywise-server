@@ -19,6 +19,9 @@ const UNSUPPORTED = [
   /\bzieht\s+reisende\b[^.]{0,100}\b(?:das\s+ganze\s+jahr|ganzjährig)\b/i,
   /\b(?:can save time|can widen schedule choice|can make the trip easier)\b/i,
   /\b(?:kann\s+zeit\s+sparen|auswahl\s+erweitern|reise\s+leichter\s+machen)\b/i,
+  /\b(?:echtzeit|in\s+real[- ]?time)\b[^.]{0,80}\b(?:hunderte|hundreds|600\+?)\b[^.]{0,40}\b(?:airlines?|fluggesellschaften)\b/i,
+  /\b(?:direktflüge?|direct\s+flights?|vols?\s+directs?|vuelos\s+directos|voli\s+diretti|directe\s+vluchten|direktflug|direktflüge|رحلات\s+مباشرة)\b/i,
+  /\b(?:andere|alternative|other|alternate|alternativen?)\b[^.]{0,80}\b(?:flughäfen?|airports?|aéroports?|aeropuertos?|aeroporti|havaalanları)\b/i,
 ];
 
 function text(value) {
@@ -36,6 +39,16 @@ function hasPriceEvidence(route) {
     .some((v) => validPositivePrice(v) != null);
 }
 
+function hasDirectEvidence(route) {
+  if (route && typeof route.direct_flight_available === 'boolean') return true;
+  const sd = route && route.stop_distribution;
+  if (!sd || typeof sd !== 'object' || Array.isArray(sd)) return false;
+  const entries = Object.entries(sd);
+  if (!entries.length) return false;
+  return entries.every(([k, v]) => /^\d+$/.test(String(k)) && Number.isInteger(Number(v)) && Number(v) >= 0)
+    && entries.some(([, v]) => Number(v) > 0);
+}
+
 function hasUnbackedFact(route, value) {
   const t = text(value).toLowerCase();
   if (!t) return false;
@@ -46,6 +59,8 @@ function hasUnbackedFact(route, value) {
       && !(Number(route && route.airline_count) > 0)) return true;
   if (/\b(?:km|kilometer|kilometre|distanz|distance|entfernung)\b/i.test(t)
       && !(Number(route && route.distance_km) > 0)) return true;
+  if (/\b(?:direktflüge?|direct\s+flights?|vols?\s+directs?|vuelos\s+directos|voli\s+diretti|directe\s+vluchten|direktflug|direktflüge|رحلات\s+مباشرة)\b/i.test(t)
+      && !hasDirectEvidence(route)) return true;
   return false;
 }
 
@@ -53,4 +68,4 @@ function generatedFieldIsSafe(route, value) {
   return !hasUnsupportedClaim(value) && !hasUnbackedFact(route, value);
 }
 
-module.exports = { text, hasUnsupportedClaim, hasUnbackedFact, generatedFieldIsSafe, hasPriceEvidence };
+module.exports = { text, hasUnsupportedClaim, hasUnbackedFact, generatedFieldIsSafe, hasPriceEvidence, hasDirectEvidence };
