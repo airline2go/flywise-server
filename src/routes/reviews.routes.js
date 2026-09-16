@@ -8,13 +8,11 @@
 // ═══════════════════════════════════════════════════════════════
 
 const rateLimit = require('../middleware/rateLimit');
+const redis = require('../clients/redis');
 const { attachUserIfPresent } = require('../middleware/auth');
 const { validate } = require('../utils/validate');
 const reviews = require('../services/reviews');
 
-// Shape validation only — the service still re-derives every trust-
-// sensitive field itself. `comment` is encouraged but optional (§8);
-// when present it must be substantive (>= 3 chars) and bounded.
 const SUBMIT_SCHEMA = {
   rating: { type: 'number', required: true, min: 1, max: 5 },
   comment: { type: 'string', required: false, min: 3, max: 2000 },
@@ -39,12 +37,48 @@ const SUBMIT_ERRORS = {
   insert_failed: { status: 500, msg: 'Bewertung konnte nicht gespeichert werden' },
 };
 
-module.exports = (app) => {
+// Public review lists are immutable between writes and can safely be cached
+// for a short period. This protects Supabase from distributed bot floods:
+// thousands of different IPs still converge on one Redis result per query.
+const PUBLIC_CACHE_TTL_SEC = 30;
+const localCache = new Map();
 
-  // Submit a review. Auth required (author-only, per the table's RLS and
-  // the plan's "logged-in + general" policy). Tight rate-limit on top of
-  // the DB's one-per-booking unique index, to bound general/spam
-  // submissions (§5/§9).
+function normalizeReadQuery(req) {
+  const route = req.query.route ? String(req.query.route).trim().slice(0, 120) : '';
+  const rawLimit = req.query.limit == null ? 10 : Number(req.query.limit);
+  const rawOffset = req.query.offset == null ? 0 : Number(req.query.offset);
+  const limit = Number.isFinite(rawLimit) ? Math.min(20, Math.max(1, Math.floor(rawLimit))) : 10;
+  const offset = Number.isFinite(rawOffset) ? Math.min(1000, Math.max(0, Math.floor(rawOffset))) : 0;
+  return { route, limit, offset };
+}
+
+function cacheKey({ route, limit, offset }) {
+  return `reviews:v2:${route || 'all'}:${limit}:${offset}`;
+}
+
+async function readCache(key) {
+  if (redis && redis.status === 'ready') {
+    try {
+      const value = await redis.get(key);
+      return value ? JSON.parse(value) : null;
+    } catch (_) {}
+  }
+  const entry = localCache.get(key);
+  if (!entry || entry.expiresAt <= Date.now()) {
+    if (entry) localCache.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+
+async function writeCache(key, value) {
+  if (redis && redis.status === 'ready') {
+    try { await redis.set(key, JSON.stringify(value), 'EX', PUBLIC_CACHE_TTL_SEC); } catch (_) {}
+  }
+  localCache.set(key, { value, expiresAt: Date.now() + PUBLIC_CACHE_TTL_SEC * 1000 });
+}
+
+module.exports = (app) => {
   app.post('/reviews', attachUserIfPresent, rateLimit('reviews_submit', 5, 3600000), async (req, res) => {
     try {
       if (!req.userId) return res.status(401).json({ ok: false, error: 'Nicht angemeldet' });
@@ -56,43 +90,63 @@ module.exports = (app) => {
         const e = SUBMIT_ERRORS[result.reason] || { status: 400, msg: 'Ungültige Bewertung' };
         return res.status(e.status).json({ ok: false, error: e.msg });
       }
-      // Always 'pending' — tell the client so it can show "under review"
-      // instead of pretending the review is already live.
       return res.status(201).json({ ok: true, id: result.id, status: result.status, verified: result.verified });
     } catch (e) {
       res.status(500).json({ ok: false, error: e.message });
     }
   });
 
-  // Public list of published reviews + live aggregate. `?route=<slug>`
-  // scopes to one published route (resolved server-side); omit it for the
-  // central /reviews page. Pagination via limit/offset (§15).
-  app.get('/reviews', rateLimit('reviews_read', 30, 60000), async (req, res) => {
+  // Public list: stricter per-IP limit + bounded pagination + short shared
+  // cache. Cache is deliberately server-side so distributed bots cannot
+  // multiply identical Supabase reads by rotating IP addresses.
+  app.get('/reviews', rateLimit('reviews_read', 10, 60000), async (req, res) => {
     try {
-      let routeId = null;
-      if (req.query.route) {
-        routeId = await reviews.resolveRouteIdBySlug(String(req.query.route));
-        // Unknown/non-published route → empty, never an error (§24).
-        if (!routeId) return res.json({ ok: true, reviews: [], total: 0, aggregate: { average: null, count: 0, distribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 } } });
+      const { route, limit, offset } = normalizeReadQuery(req);
+      const key = cacheKey({ route, limit, offset });
+      const cached = await readCache(key);
+      if (cached) {
+        res.set('Cache-Control', `public, max-age=${PUBLIC_CACHE_TTL_SEC}, stale-while-revalidate=60`);
+        return res.json(cached);
       }
-      const limit = req.query.limit ? Number(req.query.limit) : 10;
-      const offset = req.query.offset ? Number(req.query.offset) : 0;
+
+      let routeId = null;
+      if (route) {
+        routeId = await reviews.resolveRouteIdBySlug(route);
+        if (!routeId) {
+          const empty = { ok: true, reviews: [], total: 0, aggregate: { average: null, count: 0, distribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 } } };
+          await writeCache(key, empty);
+          return res.json(empty);
+        }
+      }
       const [{ reviews: list, total }, aggregate] = await Promise.all([
         reviews.listPublishedReviews({ routeId, limit, offset }),
         reviews.computeAggregate({ routeId }),
       ]);
-      res.json({ ok: true, reviews: list, total, aggregate });
+      const payload = { ok: true, reviews: list, total, aggregate };
+      await writeCache(key, payload);
+      res.set('Cache-Control', `public, max-age=${PUBLIC_CACHE_TTL_SEC}, stale-while-revalidate=60`);
+      return res.json(payload);
     } catch (e) {
       res.status(500).json({ ok: false, error: e.message });
     }
   });
 
-  // A single published review.
-  app.get('/reviews/:id', rateLimit('reviews_read', 30, 60000), async (req, res) => {
+  app.get('/reviews/:id', rateLimit('reviews_read', 10, 60000), async (req, res) => {
     try {
-      const review = await reviews.getPublishedReviewById(req.params.id);
+      const id = String(req.params.id || '').trim().slice(0, 128);
+      if (!id || !/^[A-Za-z0-9_-]+$/.test(id)) return res.status(404).json({ ok: false, error: 'Bewertung nicht gefunden' });
+      const key = `reviews:v2:id:${id}`;
+      const cached = await readCache(key);
+      if (cached) {
+        res.set('Cache-Control', `public, max-age=${PUBLIC_CACHE_TTL_SEC}, stale-while-revalidate=60`);
+        return res.json(cached);
+      }
+      const review = await reviews.getPublishedReviewById(id);
       if (!review) return res.status(404).json({ ok: false, error: 'Bewertung nicht gefunden' });
-      res.json({ ok: true, review });
+      const payload = { ok: true, review };
+      await writeCache(key, payload);
+      res.set('Cache-Control', `public, max-age=${PUBLIC_CACHE_TTL_SEC}, stale-while-revalidate=60`);
+      return res.json(payload);
     } catch (e) {
       res.status(500).json({ ok: false, error: e.message });
     }
