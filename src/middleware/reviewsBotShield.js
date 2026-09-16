@@ -1,9 +1,6 @@
 const log = require('../utils/log');
 const rateLimit = require('./rateLimit');
 
-// Cheap gate before any Supabase work. This is intentionally conservative:
-// only clearly automated clients are rejected; ordinary browsers remain
-// available. Rate limiting is still the primary control.
 const AUTOMATION_RE = /(curl|wget|python-requests|python-urllib|aiohttp|scrapy|httpclient|okhttp|go-http-client|libwww-perl|headlesschrome|phantomjs|selenium|playwright|puppeteer)/i;
 
 function reviewsBotShield() {
