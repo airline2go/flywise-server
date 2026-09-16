@@ -26,6 +26,9 @@
   },
   "jest": {
     "testEnvironment": "node",
+    "setupFilesAfterEnv": [
+      "<rootDir>/test/indexability-policy-fixtures.setup.js"
+    ],
     "testPathIgnorePatterns": [
       "/node_modules/"
     ]
