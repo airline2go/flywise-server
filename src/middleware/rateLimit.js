@@ -1,15 +1,6 @@
 // ═════════════════════════════════════════════════════════════
 // src/middleware/rateLimit.js
-// [#9] العدادات بتتخزن في Redis عشان تعيش بعد أي إعادة تشغيل
-// للسيرفر، بدل ما ترجع لصفر كل مرة Render يعيد تشغيل الخدمة. لو
-// REDIS_URL مش موجود، أو Redis مش متاح لحظياً، كل طلب بيرجع
-// تلقائي لنفس منطق الذاكرة المحلية القديم — الموقع أبدا معتمدش
-// على شغل Redis عشان يفضل شغال.
-//
-// نفس التوقيع بالظبط زي القديم: rateLimit('bucket', max, windowMs)
-// — عشان كل استخدام موجود في ملفات الراوتات يشتغل من غير أي تعديل.
-// consumeRateLimit(bucket, key, max, windowMs) is the shared counter
-// used by both IP middleware and Search Session rate limits.
+// Redis-backed distributed rate limiter with safe local fallback.
 // ═════════════════════════════════════════════════════════════
 
 const redis = require('../clients/redis');
@@ -49,13 +40,24 @@ async function consumeRateLimit(bucket, key, max, windowMs) {
   return rateLimitMemory(bucket, key, max, windowMs);
 }
 
+function getClientKey(req) {
+  // Render terminates the public proxy. Do not trust an arbitrary
+  // comma-separated client-supplied chain; use the left-most forwarded IP
+  // only when it is present, otherwise fall back to the socket address.
+  const forwarded = req.headers['x-forwarded-for'];
+  const forwardedIp = typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : '';
+  const socketIp = req.socket?.remoteAddress || '';
+  const ip = forwardedIp || socketIp || 'unknown';
+  return ip.slice(0, 64);
+}
+
 function rateLimit(bucket, max, windowMs) {
   return async function (req, res, next) {
-    const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
-    const result = await consumeRateLimit(bucket, ip, max, windowMs);
+    const key = getClientKey(req);
+    const result = await consumeRateLimit(bucket, key, max, windowMs);
     if (result.limited) {
       res.set('Retry-After', String(result.retryAfterSec));
-      log('warn', 'rate_limited', { bucket, ip });
+      log('warn', 'rate_limited', { bucket, ip: key });
       return res.status(429).json({ ok: false, error: 'Zu viele Anfragen, bitte später erneut versuchen.' });
     }
     next();
