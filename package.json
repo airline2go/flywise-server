@@ -26,6 +26,9 @@
   },
   "jest": {
     "testEnvironment": "node",
+    "setupFiles": [
+      "<rootDir>/test/setup.js"
+    ],
     "testPathIgnorePatterns": [
       "/node_modules/"
     ]
