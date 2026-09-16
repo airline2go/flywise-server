@@ -22,6 +22,10 @@ module.exports = {
   // skips Turnstile verification (dev/test). Production should set this.
   TURNSTILE_SECRET_KEY: process.env.TURNSTILE_SECRET_KEY || '',
 
+  // Shared secret injected by the trusted Cloudflare edge. Enforcement in
+  // apiAccessShield activates only when this is configured on Render.
+  EDGE_SHARED_SECRET: process.env.EDGE_SHARED_SECRET || '',
+
   // Background Duffel search warming (warmRoutePricesOnce). OFF unless
   // explicitly enabled — production must not search Duffel on a timer.
   DUFFEL_BACKGROUND_SEARCH_ENABLED: String(process.env.DUFFEL_BACKGROUND_SEARCH_ENABLED || '').toLowerCase() === 'true',

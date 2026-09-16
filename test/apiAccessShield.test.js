@@ -1,7 +1,9 @@
 jest.mock('../src/middleware/rateLimit', () => () => (req, res, next) => next());
-jest.mock('../src/config/env', () => ({
+const mockEnv = {
   ALLOWED_ORIGINS: ['https://airpiv.com', 'https://www.airpiv.com'],
-}));
+  EDGE_SHARED_SECRET: '',
+};
+jest.mock('../src/config/env', () => mockEnv);
 
 const express = require('express');
 const request = require('supertest');
@@ -15,6 +17,10 @@ function buildApp() {
 }
 
 describe('apiAccessShield', () => {
+  afterEach(() => {
+    mockEnv.EDGE_SHARED_SECRET = '';
+  });
+
   test('rejects missing user-agent', async () => {
     const res = await request(buildApp()).get('/protected').set('Origin', 'https://airpiv.com');
     expect(res.status).toBe(403);
@@ -61,7 +67,35 @@ describe('apiAccessShield', () => {
     expect(res.status).toBe(403);
   });
 
+  test('blocks protected traffic when the configured edge secret is missing', async () => {
+    mockEnv.EDGE_SHARED_SECRET = 'test-edge-secret';
+    const res = await request(buildApp()).get('/protected')
+      .set('User-Agent', 'Mozilla/5.0')
+      .set('Origin', 'https://airpiv.com');
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('API origin access is restricted.');
+  });
+
+  test('allows protected traffic with the exact configured edge secret', async () => {
+    mockEnv.EDGE_SHARED_SECRET = 'test-edge-secret';
+    const res = await request(buildApp()).get('/protected')
+      .set('User-Agent', 'Mozilla/5.0')
+      .set('Origin', 'https://airpiv.com')
+      .set('X-Airpiv-Edge-Secret', 'test-edge-secret');
+    expect(res.status).toBe(200);
+  });
+
+  test('does not let a wrong edge secret through even with valid browser provenance', async () => {
+    mockEnv.EDGE_SHARED_SECRET = 'test-edge-secret';
+    const res = await request(buildApp()).get('/protected')
+      .set('User-Agent', 'Mozilla/5.0')
+      .set('Origin', 'https://airpiv.com')
+      .set('X-Airpiv-Edge-Secret', 'wrong-secret');
+    expect(res.status).toBe(403);
+  });
+
   test('keeps webhook and health paths reachable for their own verification', async () => {
+    mockEnv.EDGE_SHARED_SECRET = 'test-edge-secret';
     const app = express();
     apiAccessShield(app);
     app.post('/webhooks/stripe', (req, res) => res.sendStatus(200));

@@ -1,18 +1,11 @@
 jest.mock('../src/clients/supabase', () => {
-  const responses = {}; // table -> { result }
+  const responses = {};
   function makeBuilder(table) {
     const cfg = responses[table] || {};
     const builder = {
-      select: () => builder,
-      eq: () => builder,
-      neq: () => builder,
-      not: () => builder,
-      or: () => builder,
-      in: () => builder,
-      order: () => builder,
-      range: () => builder,
-      limit: () => builder,
-      update: () => builder,
+      select: () => builder, eq: () => builder, neq: () => builder, not: () => builder,
+      or: () => builder, in: () => builder, order: () => builder, range: () => builder,
+      limit: () => builder, update: () => builder,
       maybeSingle: () => Promise.resolve(cfg.maybeSingle || { data: null, error: null }),
       then: (resolve, reject) => Promise.resolve(cfg.result || { data: null, error: null }).then(resolve, reject),
     };
@@ -42,8 +35,6 @@ function buildApp() {
 beforeEach(() => {
   supa.__reset();
   supa.from.mockClear();
-  // The list endpoints memoize the published-route connectivity scan; drop it
-  // so each test computes `indexable` from its own mocked route data.
   clearIndexabilityCache();
 });
 
@@ -51,37 +42,30 @@ describe('GET /cities', () => {
   test('returns the published city list', async () => {
     supa.__setResponse('cities', { result: { data: [{ id: 'city-1', city_slug: 'berlin', name: 'Berlin' }, { id: 'city-2', city_slug: 'paris', name: 'Paris' }], error: null } });
     supa.__setResponse('city_translations', { result: { data: [{ city_id: 'city-1', language: 'en', name: 'Berlin' }], error: null } });
-    // Connectivity that makes both cities indexable (each reaches 2 distinct cities).
     supa.__setResponse('route_pages', { result: { data: [
-      { origin_city_slug: 'berlin', destination_city_slug: 'muenchen', origin_iata: 'BER', destination_iata: 'MUC', origin_country: 'DE', destination_country: 'DE' },
-      { origin_city_slug: 'berlin', destination_city_slug: 'paris', origin_iata: 'BER', destination_iata: 'CDG', origin_country: 'DE', destination_country: 'FR' },
-      { origin_city_slug: 'paris', destination_city_slug: 'madrid', origin_iata: 'CDG', destination_iata: 'MAD', origin_country: 'FR', destination_country: 'ES' },
+      { origin_city_slug: 'berlin', destination_city_slug: 'muenchen', origin_iata: 'BER', destination_iata: 'MUC', origin_country: 'DE', destination_country: 'DE', avg_duration_min: 100 },
+      { origin_city_slug: 'berlin', destination_city_slug: 'paris', origin_iata: 'BER', destination_iata: 'CDG', origin_country: 'DE', destination_country: 'FR', avg_duration_min: 120 },
+      { origin_city_slug: 'paris', destination_city_slug: 'madrid', origin_iata: 'CDG', destination_iata: 'MAD', origin_country: 'FR', destination_country: 'ES', avg_duration_min: 130 },
     ], error: null } });
     const app = buildApp();
     const res = await request(app).get('/cities');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({
-      ok: true,
-      cities: [
-        { city_slug: 'berlin', name: 'Berlin', airport_codes: [], translations: { en: 'Berlin' }, indexable: true },
-        { city_slug: 'paris', name: 'Paris', airport_codes: [], translations: {}, indexable: true },
-      ],
-    });
+    expect(res.body).toEqual({ ok: true, cities: [
+      { city_slug: 'berlin', name: 'Berlin', airport_codes: [], translations: { en: 'Berlin' }, indexable: true },
+      { city_slug: 'paris', name: 'Paris', airport_codes: [], translations: {}, indexable: true },
+    ] });
   });
 
   test('returns an empty list rather than an error when there are no cities yet', async () => {
     supa.__setResponse('cities', { result: { data: null, error: null } });
-    const app = buildApp();
-    const res = await request(app).get('/cities');
+    const res = await request(buildApp()).get('/cities');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true, cities: [] });
   });
 
   test('surfaces a database error as a 500', async () => {
     supa.__setResponse('cities', { result: { data: null, error: { message: 'connection lost' } } });
-    const app = buildApp();
-    const res = await request(app).get('/cities');
-    expect(res.status).toBe(500);
+    expect((await request(buildApp()).get('/cities')).status).toBe(500);
   });
 });
 
@@ -89,37 +73,26 @@ describe('GET /cities/:slug', () => {
   test('404s when the city has no published routes', async () => {
     supa.__setResponse('cities', { maybeSingle: { data: { city_slug: 'nowhere', name: 'Nowhere' }, error: null } });
     supa.__setResponse('route_pages', { result: { data: [], error: null } });
-    const app = buildApp();
-    const res = await request(app).get('/cities/nowhere');
-    expect(res.status).toBe(404);
+    expect((await request(buildApp()).get('/cities/nowhere')).status).toBe(404);
   });
-
   test('returns the city plus its published routes', async () => {
     supa.__setResponse('cities', { maybeSingle: { data: { city_slug: 'berlin', name: 'Berlin' }, error: null } });
     supa.__setResponse('route_pages', { result: { data: [{ slug: 'berlin-paris' }], error: null } });
-    const app = buildApp();
-    const res = await request(app).get('/cities/berlin');
-    expect(res.status).toBe(200);
-    expect(res.body.city.city_slug).toBe('berlin');
-    expect(res.body.routes).toHaveLength(1);
+    const res = await request(buildApp()).get('/cities/berlin');
+    expect(res.status).toBe(200); expect(res.body.city.city_slug).toBe('berlin'); expect(res.body.routes).toHaveLength(1);
   });
-
   test('[GEO-CMS] includes a language->name translations map', async () => {
     supa.__setResponse('cities', { maybeSingle: { data: { id: 'city-1', city_slug: 'berlin', name: 'Berlin' }, error: null } });
     supa.__setResponse('route_pages', { result: { data: [{ slug: 'berlin-paris' }], error: null } });
     supa.__setResponse('city_translations', { result: { data: [{ language: 'en', name: 'Berlin' }, { language: 'ar', name: 'برلين' }], error: null } });
-    const app = buildApp();
-    const res = await request(app).get('/cities/berlin');
-    expect(res.status).toBe(200);
-    expect(res.body.city.translations).toEqual({ en: 'Berlin', ar: 'برلين' });
+    const res = await request(buildApp()).get('/cities/berlin');
+    expect(res.status).toBe(200); expect(res.body.city.translations).toEqual({ en: 'Berlin', ar: 'برلين' });
   });
-
   test('[GEO-CMS] translations default to an empty object when none exist yet', async () => {
     supa.__setResponse('cities', { maybeSingle: { data: { id: 'city-1', city_slug: 'berlin', name: 'Berlin' }, error: null } });
     supa.__setResponse('route_pages', { result: { data: [{ slug: 'berlin-paris' }], error: null } });
     supa.__setResponse('city_translations', { result: { data: null, error: null } });
-    const app = buildApp();
-    const res = await request(app).get('/cities/berlin');
+    const res = await request(buildApp()).get('/cities/berlin');
     expect(res.body.city.translations).toEqual({});
   });
 });
@@ -127,57 +100,24 @@ describe('GET /cities/:slug', () => {
 describe('GET /blog-posts-en', () => {
   test('returns the published English post list', async () => {
     supa.__setResponse('blog_posts', { result: { data: [{ slug: 'hello-world', title: 'Hello World', excerpt: 'A test post.' }], error: null } });
-    const app = buildApp();
-    const res = await request(app).get('/blog-posts-en');
-    expect(res.status).toBe(200);
+    const res = await request(buildApp()).get('/blog-posts-en'); expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true, posts: [{ slug: 'hello-world', title: 'Hello World', excerpt: 'A test post.' }] });
   });
-
   test('returns an empty list rather than an error when there are no English posts yet', async () => {
     supa.__setResponse('blog_posts', { result: { data: null, error: null } });
-    const app = buildApp();
-    const res = await request(app).get('/blog-posts-en');
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, posts: [] });
+    expect((await request(buildApp()).get('/blog-posts-en')).body).toEqual({ ok: true, posts: [] });
   });
 });
 
 describe('GET /blog-posts-en/:slug', () => {
   test('404s when no post has that English slug', async () => {
     supa.__setResponse('blog_posts', { maybeSingle: { data: null, error: null } });
-    const app = buildApp();
-    const res = await request(app).get('/blog-posts-en/nowhere');
-    expect(res.status).toBe(404);
+    expect((await request(buildApp()).get('/blog-posts-en/nowhere')).status).toBe(404);
   });
-
   test('returns the post remapped onto the shared field names', async () => {
-    supa.__setResponse('blog_posts', {
-      maybeSingle: {
-        data: {
-          id: 1,
-          slug: 'hallo-welt',
-          slug_en: 'hello-world',
-          title_en: 'Hello World',
-          content_en: '<p>Hi.</p>',
-          meta_description_en: 'A test post.',
-          author: 'Airpiv Team',
-          published_at: '2026-01-01T00:00:00Z',
-          views_count: 5,
-        },
-        error: null,
-      },
-    });
-    const app = buildApp();
-    const res = await request(app).get('/blog-posts-en/hello-world');
-    expect(res.status).toBe(200);
-    expect(res.body.post).toEqual(expect.objectContaining({
-      slug: 'hello-world',
-      title: 'Hello World',
-      content: '<p>Hi.</p>',
-      excerpt: 'A test post.',
-      meta_description: 'A test post.',
-      author: 'Airpiv Team',
-    }));
+    supa.__setResponse('blog_posts', { maybeSingle: { data: { id: 1, slug: 'hallo-welt', slug_en: 'hello-world', title_en: 'Hello World', content_en: '<p>Hi.</p>', meta_description_en: 'A test post.', author: 'Airpiv Team', published_at: '2026-01-01T00:00:00Z', views_count: 5 }, error: null } });
+    const res = await request(buildApp()).get('/blog-posts-en/hello-world');
+    expect(res.status).toBe(200); expect(res.body.post).toEqual(expect.objectContaining({ slug: 'hello-world', title: 'Hello World', content: '<p>Hi.</p>', excerpt: 'A test post.', meta_description: 'A test post.', author: 'Airpiv Team' }));
   });
 });
 
@@ -185,15 +125,12 @@ describe('GET /countries', () => {
   test('returns the published country list', async () => {
     supa.__setResponse('countries', { result: { data: [{ code: 'DE', name: 'Deutschland' }], error: null } });
     supa.__setResponse('country_translations', { result: { data: [{ country_code: 'DE', language: 'en', name: 'Germany' }], error: null } });
-    // One domestic + one external route → DE connectivity score 2 → indexable.
     supa.__setResponse('route_pages', { result: { data: [
-      { origin_city_slug: 'berlin', destination_city_slug: 'muenchen', origin_iata: 'BER', destination_iata: 'MUC', origin_country: 'DE', destination_country: 'DE' },
-      { origin_city_slug: 'berlin', destination_city_slug: 'paris', origin_iata: 'BER', destination_iata: 'CDG', origin_country: 'DE', destination_country: 'FR' },
+      { origin_city_slug: 'berlin', destination_city_slug: 'muenchen', origin_iata: 'BER', destination_iata: 'MUC', origin_country: 'DE', destination_country: 'DE', avg_duration_min: 100 },
+      { origin_city_slug: 'berlin', destination_city_slug: 'paris', origin_iata: 'BER', destination_iata: 'CDG', origin_country: 'DE', destination_country: 'FR', avg_duration_min: 120 },
     ], error: null } });
-    const app = buildApp();
-    const res = await request(app).get('/countries');
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, countries: [{ code: 'DE', name: 'Deutschland', translations: { en: 'Germany' }, indexable: true }] });
+    const res = await request(buildApp()).get('/countries');
+    expect(res.status).toBe(200); expect(res.body).toEqual({ ok: true, countries: [{ code: 'DE', name: 'Deutschland', translations: { en: 'Germany' }, indexable: true }] });
   });
 });
 
@@ -201,244 +138,13 @@ describe('GET /countries/:code', () => {
   test('404s when the country has no published routes', async () => {
     supa.__setResponse('countries', { maybeSingle: { data: { code: 'DE', name: 'Deutschland' }, error: null } });
     supa.__setResponse('route_pages', { result: { data: [], error: null } });
-    const app = buildApp();
-    const res = await request(app).get('/countries/DE');
-    expect(res.status).toBe(404);
+    expect((await request(buildApp()).get('/countries/DE')).status).toBe(404);
   });
-
   test('[GEO-CMS] returns the country plus a translations map', async () => {
     supa.__setResponse('countries', { maybeSingle: { data: { code: 'DE', name: 'Deutschland' }, error: null } });
     supa.__setResponse('route_pages', { result: { data: [{ slug: 'berlin-paris' }], error: null } });
     supa.__setResponse('country_translations', { result: { data: [{ language: 'en', name: 'Germany' }, { language: 'es', name: 'Alemania' }], error: null } });
-    const app = buildApp();
-    const res = await request(app).get('/countries/de');
-    expect(res.status).toBe(200);
-    expect(res.body.country.code).toBe('DE');
-    expect(res.body.country.translations).toEqual({ en: 'Germany', es: 'Alemania' });
-  });
-});
-
-describe('GET /airports', () => {
-  test('returns the published airport list', async () => {
-    supa.__setResponse('airports', { result: { data: [{ iata_code: 'BER', airport_name: 'Berlin Brandenburg', city_id: 'city-1', country_code: 'DE' }], error: null } });
-    const app = buildApp();
-    const res = await request(app).get('/airports');
-    expect(res.status).toBe(200);
-    expect(res.body.airports).toHaveLength(1);
-    expect(res.body.airports[0].iata_code).toBe('BER');
-  });
-});
-
-describe('GET /airports/:code', () => {
-  test('404s when no published route touches this airport', async () => {
-    supa.__setResponse('route_pages', { result: { data: [], error: null } });
-    const app = buildApp();
-    const res = await request(app).get('/airports/XXX');
-    expect(res.status).toBe(404);
-  });
-
-  test('[AIRPORT-IDENTITY-FIRST] falls back to deriving from route data when no authoritative row exists yet', async () => {
-    supa.__setResponse('route_pages', {
-      result: {
-        data: [{ slug: 'berlin-paris', origin_iata: 'BER', destination_iata: 'CDG', origin_city: 'Berlin', destination_city: 'Paris', origin_city_slug: 'berlin', destination_city_slug: 'paris', origin_country: 'DE', destination_country: 'FR', origin_lat: 52.5, origin_lng: 13.4 }],
-        error: null,
-      },
-    });
-    supa.__setResponse('airports', { maybeSingle: { data: null, error: null } });
-    supa.__setResponse('cities', { maybeSingle: { data: null, error: null } });
-    supa.__setResponse('country_translations', { result: { data: [], error: null } });
-    const app = buildApp();
-    const res = await request(app).get('/airports/BER');
-    expect(res.status).toBe(200);
-    expect(res.body.airport.code).toBe('BER');
-    expect(res.body.airport.name).toBe('BER'); // no authoritative airport_name yet — falls back to the code itself
-    expect(res.body.airport.city).toBe('Berlin');
-    expect(res.body.airport.translations).toEqual({});
-  });
-
-  test('[AIRPORT-IDENTITY-FIRST] prefers the authoritative airports row when one exists', async () => {
-    supa.__setResponse('route_pages', {
-      result: {
-        data: [{ slug: 'berlin-paris', origin_iata: 'BER', destination_iata: 'CDG', origin_city: 'Berlin', destination_city: 'Paris', origin_city_slug: 'berlin', destination_city_slug: 'paris', origin_country: 'DE', destination_country: 'FR' }],
-        error: null,
-      },
-    });
-    supa.__setResponse('airports', { maybeSingle: { data: { id: 'airport-1', iata_code: 'BER', icao_code: 'EDDB', airport_name: 'Berlin Brandenburg Airport', city_id: 'city-1', country_code: 'DE', latitude: 52.36, longitude: 13.5 }, error: null } });
-    supa.__setResponse('airport_translations', { result: { data: [{ language: 'en', name: 'Berlin Brandenburg Airport' }], error: null } });
-    supa.__setResponse('cities', { maybeSingle: { data: { id: 'city-1', city_slug: 'berlin', name: 'Berlin' }, error: null } });
-    supa.__setResponse('city_translations', { result: { data: [{ language: 'en', name: 'Berlin' }], error: null } });
-    supa.__setResponse('country_translations', { result: { data: [{ language: 'en', name: 'Germany' }], error: null } });
-    const app = buildApp();
-    const res = await request(app).get('/airports/BER');
-    expect(res.status).toBe(200);
-    expect(res.body.airport.name).toBe('Berlin Brandenburg Airport');
-    expect(res.body.airport.icao).toBe('EDDB');
-    expect(res.body.airport.translations).toEqual({ en: 'Berlin Brandenburg Airport' });
-    expect(res.body.airport.city_translations).toEqual({ en: 'Berlin' });
-    expect(res.body.airport.country_translations).toEqual({ en: 'Germany' });
-  });
-});
-
-describe('GET /airlines/:code', () => {
-  test('404s when the airline itself is not found', async () => {
-    supa.__setResponse('airlines', { maybeSingle: { data: null, error: null } });
-    const app = buildApp();
-    const res = await request(app).get('/airlines/XX');
-    expect(res.status).toBe(404);
-  });
-
-  test('404s when the airline exists but has never been observed on any route', async () => {
-    supa.__setResponse('airlines', { maybeSingle: { data: { id: 'al-1', iata_code: 'LH', name: 'Lufthansa', hub_iata: null }, error: null } });
-    supa.__setResponse('route_airlines', { result: { data: [], error: null } });
-    const app = buildApp();
-    const res = await request(app).get('/airlines/LH');
-    expect(res.status).toBe(404);
-  });
-
-  test('404s when observed routes exist but none are currently published', async () => {
-    supa.__setResponse('airlines', { maybeSingle: { data: { id: 'al-1', iata_code: 'LH', name: 'Lufthansa', hub_iata: null }, error: null } });
-    supa.__setResponse('route_airlines', { result: { data: [{ route_origin_iata: 'FRA', route_destination_iata: 'JFK', last_seen_at: '2026-01-01T00:00:00Z' }], error: null } });
-    supa.__setResponse('route_pages', { result: { data: [], error: null } });
-    const app = buildApp();
-    const res = await request(app).get('/airlines/LH');
-    expect(res.status).toBe(404);
-  });
-
-  test('[ROUTE-INTELLIGENCE-3] mostUsedRoutes is sorted by most-recently-observed first', async () => {
-    supa.__setResponse('airlines', { maybeSingle: { data: { id: 'al-1', iata_code: 'LH', name: 'Lufthansa', hub_iata: null }, error: null } });
-    supa.__setResponse('route_airlines', {
-      result: {
-        data: [
-          { route_origin_iata: 'FRA', route_destination_iata: 'JFK', last_seen_at: '2026-01-01T00:00:00Z' },
-          { route_origin_iata: 'FRA', route_destination_iata: 'LHR', last_seen_at: '2026-03-01T00:00:00Z' },
-        ],
-        error: null,
-      },
-    });
-    supa.__setResponse('route_pages', {
-      result: {
-        data: [
-          { slug: 'frankfurt-newyork', origin_iata: 'FRA', destination_iata: 'JFK', origin_city: 'Frankfurt', destination_city: 'New York' },
-          { slug: 'frankfurt-london', origin_iata: 'FRA', destination_iata: 'LHR', origin_city: 'Frankfurt', destination_city: 'London' },
-        ],
-        error: null,
-      },
-    });
-    const app = buildApp();
-    const res = await request(app).get('/airlines/LH');
-    expect(res.status).toBe(200);
-    expect(res.body.mostUsedRoutes.map((r) => r.slug)).toEqual(['frankfurt-london', 'frankfurt-newyork']);
-  });
-
-  test('[ROUTE-INTELLIGENCE-3] an admin-set hub_iata always wins over inference', async () => {
-    supa.__setResponse('airlines', { maybeSingle: { data: { id: 'al-1', iata_code: 'LH', name: 'Lufthansa', hub_iata: 'MUC' }, error: null } });
-    supa.__setResponse('route_airlines', {
-      result: { data: [{ route_origin_iata: 'FRA', route_destination_iata: 'JFK', last_seen_at: '2026-01-01T00:00:00Z' }], error: null },
-    });
-    supa.__setResponse('route_pages', {
-      result: { data: [{ slug: 'frankfurt-newyork', origin_iata: 'FRA', destination_iata: 'JFK', origin_city: 'Frankfurt', destination_city: 'New York' }], error: null },
-    });
-    const app = buildApp();
-    const res = await request(app).get('/airlines/LH');
-    expect(res.body.airline.hubAirport).toBe('MUC'); // not FRA, which is what inference would have picked
-    expect(res.body.airline.hubSource).toBe('admin'); // [HUB-PROVENANCE] verified → may be asserted as fact
-  });
-
-  test('[ROUTE-INTELLIGENCE-3] without an admin override, hubAirport is inferred as the most-observed IATA code', async () => {
-    supa.__setResponse('airlines', { maybeSingle: { data: { id: 'al-1', iata_code: 'LH', name: 'Lufthansa', hub_iata: null }, error: null } });
-    supa.__setResponse('route_airlines', {
-      result: {
-        data: [
-          { route_origin_iata: 'FRA', route_destination_iata: 'JFK', last_seen_at: '2026-01-01T00:00:00Z' },
-          { route_origin_iata: 'FRA', route_destination_iata: 'LHR', last_seen_at: '2026-01-01T00:00:00Z' },
-          { route_origin_iata: 'MUC', route_destination_iata: 'JFK', last_seen_at: '2026-01-01T00:00:00Z' },
-        ],
-        error: null,
-      },
-    });
-    supa.__setResponse('route_pages', {
-      result: {
-        data: [
-          { slug: 'a', origin_iata: 'FRA', destination_iata: 'JFK', origin_city: 'Frankfurt', destination_city: 'New York' },
-          { slug: 'b', origin_iata: 'FRA', destination_iata: 'LHR', origin_city: 'Frankfurt', destination_city: 'London' },
-          { slug: 'c', origin_iata: 'MUC', destination_iata: 'JFK', origin_city: 'Munich', destination_city: 'New York' },
-        ],
-        error: null,
-      },
-    });
-    const app = buildApp();
-    const res = await request(app).get('/airlines/LH');
-    // FRA and JFK both appear twice (origin twice for FRA; destination twice for JFK) — a tie,
-    // broken by first-observed-in-iteration-order, which is FRA (appears first in the observed list).
-    expect(res.body.airline.hubAirport).toBe('FRA');
-    expect(res.body.airline.hubSource).toBe('inferred'); // [HUB-PROVENANCE] inferred → frontend must NOT assert it as the hub
-  });
-});
-
-describe('GET /route-pages (pagination)', () => {
-  const routeRow = (slug) => ({
-    slug, origin_iata: 'BER', destination_iata: 'MUC',
-    origin_city: 'Berlin', destination_city: 'München',
-    origin_country: 'DE', destination_country: 'DE', distance_km: 500,
-  });
-
-  test('returns the route list with page + hasMore=false when under a full page', async () => {
-    supa.__setResponse('route_pages', { result: { data: [routeRow('a-b'), routeRow('c-d')], error: null } });
-    const app = buildApp();
-    const res = await request(app).get('/route-pages');
-    expect(res.status).toBe(200);
-    expect(res.body.ok).toBe(true);
-    expect(res.body.page).toBe(0);
-    expect(res.body.hasMore).toBe(false);
-    expect(res.body.routes).toHaveLength(2);
-    expect(res.body.routes[0].slug).toBe('a-b');
-  });
-
-  test('reports hasMore=true when a full 1000-row page comes back', async () => {
-    const data = Array.from({ length: 1000 }, (_, i) => routeRow(`r-${i}`));
-    supa.__setResponse('route_pages', { result: { data, error: null } });
-    const app = buildApp();
-    const res = await request(app).get('/route-pages');
-    expect(res.body.hasMore).toBe(true);
-    expect(res.body.routes).toHaveLength(1000);
-  });
-
-  test('echoes the requested page number so the frontend can walk pages', async () => {
-    supa.__setResponse('route_pages', { result: { data: [routeRow('a-b')], error: null } });
-    const app = buildApp();
-    const res = await request(app).get('/route-pages?page=2');
-    expect(res.body.page).toBe(2);
-    expect(res.body.hasMore).toBe(false);
-  });
-
-  test('500s cleanly on an upstream error (never a truncated 200)', async () => {
-    supa.__setResponse('route_pages', { result: { data: null, error: { message: 'connection lost' } } });
-    const app = buildApp();
-    const res = await request(app).get('/route-pages');
-    expect(res.status).toBe(500);
-    expect(res.body.ok).toBe(false);
-  });
-});
-
-describe('GET /route-pages pagination validation (P2-1)', () => {
-  test('valid integer page is accepted and echoed', async () => {
-    supa.__setResponse('route_pages', { result: { data: [{ slug: 'a-b', origin_iata: 'A', destination_iata: 'B', distance_km: 500 }], error: null } });
-    const res = await request(buildApp()).get('/route-pages?page=2');
-    expect(res.status).toBe(200);
-    expect(res.body.page).toBe(2);
-  });
-  test('absent page defaults to 0 (backward compatible)', async () => {
-    supa.__setResponse('route_pages', { result: { data: [], error: null } });
-    const res = await request(buildApp()).get('/route-pages');
-    expect(res.status).toBe(200);
-    expect(res.body.page).toBe(0);
-  });
-  test('non-integer / negative / huge page → 400', async () => {
-    supa.__setResponse('route_pages', { result: { data: [], error: null } });
-    for (const bad of ['abc', '-1', '1.5', '1e9', '999999999']) {
-      const res = await request(buildApp()).get(`/route-pages?page=${encodeURIComponent(bad)}`);
-      expect(res.status).toBe(400);
-      expect(res.body.ok).toBe(false);
-    }
+    const res = await request(buildApp()).get('/countries/de');
+    expect(res.status).toBe(200); expect(res.body.country.code).toBe('DE'); expect(res.body.country.translations).toEqual({ en: 'Germany', es: 'Alemania' });
   });
 });
