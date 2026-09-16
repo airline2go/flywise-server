@@ -4,7 +4,7 @@ const env = require('../config/env');
 // Second line of defense after apiBotShield:
 // - only the production web origins may call the public API from a browser
 // - requests without browser provenance are denied unless they carry API auth
-// - trusted server-side Next.js/Vercel fetches are allowed through a narrow
+// - trusted server-side Next.js/Vercel GET fetches are allowed through a narrow
 //   user-agent marker so SEO prerender/build jobs do not get mistaken for bots
 // - a distributed burst limiter throttles scripted clients before route code
 // This does not replace endpoint-specific auth/rate limits.
@@ -31,7 +31,10 @@ function hasTrustedAuth(req) {
 
 function hasTrustedServerProvenance(req) {
   const ua = String(req.headers['user-agent'] || '').trim();
-  return !req.headers.origin && !req.headers.referer && TRUSTED_SERVER_UA_RE.test(ua);
+  return req.method === 'GET'
+    && !req.headers.origin
+    && !req.headers.referer
+    && TRUSTED_SERVER_UA_RE.test(ua);
 }
 
 function shield(app) {
