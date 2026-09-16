@@ -4,6 +4,8 @@ const env = require('../config/env');
 // Second line of defense after apiBotShield:
 // - only the production web origins may call the public API from a browser
 // - requests without browser provenance are denied unless they carry API auth
+// - trusted server-side Next.js/Vercel fetches are allowed through a narrow
+//   user-agent marker so SEO prerender/build jobs do not get mistaken for bots
 // - a distributed burst limiter throttles scripted clients before route code
 // This does not replace endpoint-specific auth/rate limits.
 const EXEMPT_PATHS = new Set([
@@ -11,6 +13,7 @@ const EXEMPT_PATHS = new Set([
 ]);
 const EXEMPT_PREFIXES = ['/webhooks/'];
 const AUTOMATION_RE = /(?:curl|wget|python|urllib|aiohttp|scrapy|httpclient|okhttp|go-http-client|libwww|headless|phantom|selenium|playwright|puppeteer|postman|insomnia|axios)/i;
+const TRUSTED_SERVER_UA_RE = /(?:next(?:\.js)?|vercel-build)/i;
 
 function allowedOrigin(req) {
   const origin = String(req.headers.origin || '').replace(/\/+$/, '');
@@ -24,6 +27,11 @@ function allowedOrigin(req) {
 function hasTrustedAuth(req) {
   const auth = String(req.headers.authorization || '');
   return /^Bearer\s+\S+/i.test(auth);
+}
+
+function hasTrustedServerProvenance(req) {
+  const ua = String(req.headers['user-agent'] || '').trim();
+  return !req.headers.origin && !req.headers.referer && TRUSTED_SERVER_UA_RE.test(ua);
 }
 
 function shield(app) {
@@ -41,8 +49,9 @@ function shield(app) {
 
     // Browser traffic from Airpiv carries an allowed Origin/Referer. Authenticated
     // admin/service calls are allowed without browser provenance and remain protected
-    // by their own authorization middleware.
-    if (!allowedOrigin(req) && !hasTrustedAuth(req)) {
+    // by their own authorization middleware. Next.js/Vercel server-side fetches are
+    // a narrow third case: they have no browser headers, but carry the framework UA.
+    if (!allowedOrigin(req) && !hasTrustedAuth(req) && !hasTrustedServerProvenance(req)) {
       return res.status(403).json({ ok: false, error: 'API access is restricted.' });
     }
 
@@ -58,4 +67,5 @@ function shield(app) {
 module.exports = shield;
 module.exports.allowedOrigin = allowedOrigin;
 module.exports.hasTrustedAuth = hasTrustedAuth;
+module.exports.hasTrustedServerProvenance = hasTrustedServerProvenance;
 module.exports.EXEMPT_PATHS = EXEMPT_PATHS;
