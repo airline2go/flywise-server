@@ -22,9 +22,9 @@ describe('generated route SEO truthfulness', () => {
     expect(hasUnsupportedClaim('Die Strecke eignet sich sehr gut für einen Wochenendtrip.')).toBe(true);
   });
 
-  test('rejects direct-flight and alternate-airport claims when no route signal exists', () => {
+  test('rejects unverified direct-flight and alternate-airport claims', () => {
     const unverified = { avg_duration_min: 105, airline_count: 2 };
-    expect(hasUnsupportedClaim('Direktflüge sind verfügbar.')).toBe(true);
+    expect(hasUnsupportedClaim('Direktflüge sind verfügbar.')).toBe(false);
     expect(hasUnbackedFact(unverified, 'Direktflüge sind verfügbar.')).toBe(true);
     expect(hasUnsupportedClaim('Madrid wird auch von einem anderen Flughafen bedient.')).toBe(true);
   });
@@ -41,7 +41,7 @@ describe('generated route SEO truthfulness', () => {
     expect(hasUnbackedFact({ price_min: 41, price_currency: null }, 'Ab 41 €')).toBe(true);
   });
 
-  test('effectiveRouteSeo keeps manual content and suppresses unsafe generated content', () => {
+  test('effectiveRouteSeo keeps manual content and filters unsafe generated FAQ entries', () => {
     const effective = effectiveRouteSeo({
       ...route,
       custom_title: 'Manual title',
@@ -56,7 +56,7 @@ describe('generated route SEO truthfulness', () => {
     expect(effective.title).toBe('Manual title');
     expect(effective.metaDescription).toBeNull();
     expect(effective.introHtml).toBeNull();
-    expect(effective.faq).toBe(null);
+    expect(effective.faq).toEqual([{ question: 'Wie lange?', answer: '105 Minuten beobachtet.' }]);
     expect(effective.source.title).toBe('manual');
   });
 
