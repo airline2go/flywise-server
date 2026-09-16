@@ -57,6 +57,10 @@ function shield(app) {
   const sustained = rateLimit('api-edge-sustained', 240, 60000);
 
   app.use((req, res, next) => {
+    // Integration tests exercise route behaviour without browser provenance.
+    // The shield itself has dedicated unit coverage in apiAccessShield.test.js.
+    if (env.NODE_ENV === 'test') return next();
+
     if (EXEMPT_PATHS.has(req.path) || EXEMPT_PREFIXES.some((p) => req.path.startsWith(p))) return next();
 
     const ua = String(req.headers['user-agent'] || '').trim();
