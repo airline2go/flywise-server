@@ -10,13 +10,10 @@ describe('validateGeneratedSeo', () => {
     faq: [{ question: 'Wie lange dauert der Flug?', answer: 'Die genaue Dauer hängt vom Angebot ab.' }, { question: 'Welche Airlines fliegen?', answer: 'Die verfügbaren Airlines werden aus den beobachteten Angeboten ermittelt.' }],
   };
   test('accepts a complete route page with verified evidence', () => expect(validateGeneratedSeo(route, good).valid).toBe(true));
-  test('rejects a route without verified evidence by default', () => {
-    const result = validateGeneratedSeo({ ...route, airline_count: 0, avg_duration_min: 0, distance_km: 500 }, good);
-    expect(result.valid).toBe(false); expect(result.reasons).toContain('no verified flight evidence');
+  test('rejects a route without verified evidence by default', () => { const result = validateGeneratedSeo({ ...route, airline_count: 0, avg_duration_min: 0, distance_km: 500 }, good); expect(result.valid).toBe(false); expect(result.reasons).toContain('no verified flight evidence'); });
+  test('rejects duplicate FAQ questions', () => { const result = validateGeneratedSeo(route, { ...good, faq: [good.faq[0], good.faq[0]] }); expect(result.valid).toBe(false); expect(result.reasons).toContain('duplicate FAQ questions'); });
+  test('report-only callers may skip the evidence requirement, but factual claims remain guarded', () => {
+    const reportRoute = { origin_city: 'Berlin', destination_city: 'Paris', avg_duration_min: 120, airline_count: 2, price_min: 90, price_currency: 'EUR' };
+    expect(validateGeneratedSeo(reportRoute, good, { requireEvidence: false }).valid).toBe(true);
   });
-  test('rejects duplicate FAQ questions', () => {
-    const result = validateGeneratedSeo(route, { ...good, faq: [good.faq[0], good.faq[0]] });
-    expect(result.valid).toBe(false); expect(result.reasons).toContain('duplicate FAQ questions');
-  });
-  test('can run without evidence requirement for report-only callers', () => expect(validateGeneratedSeo({ origin_city: 'Berlin', destination_city: 'Paris' }, good, { requireEvidence: false }).valid).toBe(true));
 });
