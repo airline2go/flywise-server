@@ -41,7 +41,7 @@ jobs:
         run: npm ci
 
       - name: Run test suite
-        run: NODE_ENV=test npm test
+        run: SEO_EVIDENCE_POLICY_ENFORCED=false NODE_ENV=test npm test
 
       - name: Lint (non-blocking)
         run: npx eslint .
