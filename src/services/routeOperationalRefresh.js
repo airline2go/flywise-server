@@ -1,10 +1,10 @@
 const supa = require('../clients/supabase');
-const env = require('../config/env');
 const log = require('../utils/log');
 const {
   fetchAndCacheRoutePrice,
 } = require('../routes/search.routes');
 
+const ENABLED = String(process.env.SEO_ROUTE_OPERATIONAL_REFRESH_ENABLED || '').toLowerCase() === 'true';
 const MAX_AGE_MS = (() => {
   const days = Number(process.env.SEO_ROUTE_DATA_MAX_AGE_DAYS);
   const effectiveDays = Number.isFinite(days) && days > 0 ? days : 30;
@@ -78,7 +78,7 @@ async function fetchDemandRoutePages() {
 }
 
 async function refreshOperationalDemandRoutesOnce() {
-  if (!supa || !env.SEO_ROUTE_OPERATIONAL_REFRESH_ENABLED || running) return { updated: 0, selected: 0, skipped: true };
+  if (!supa || !ENABLED || running) return { updated: 0, selected: 0, skipped: true };
   running = true;
   try {
     const now = Date.now();
@@ -111,7 +111,7 @@ async function refreshOperationalDemandRoutesOnce() {
   }
 }
 
-if (env.SEO_ROUTE_OPERATIONAL_REFRESH_ENABLED) {
+if (ENABLED) {
   setTimeout(() => { refreshOperationalDemandRoutesOnce(); }, START_DELAY_MS).unref();
   setInterval(() => { refreshOperationalDemandRoutesOnce(); }, INTERVAL_MS).unref();
 }
