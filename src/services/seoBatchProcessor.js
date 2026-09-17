@@ -16,6 +16,8 @@
 //     well under the 40% rule (verified in test/seoEngine.test.js).
 //   • Generated content is written only after the deterministic SEO quality
 //     gate passes; rejected content is never persisted.
+//   • Recovery batches are core-only by default (70 versioned routes) so a
+//     stale-corpus refresh cannot silently expand back to the full catalogue.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const supa = require('../clients/supabase');
@@ -23,13 +25,24 @@ const log = require('../utils/log');
 const { generateRoutePage, assessEligibility, supportedLanguages } = require('./seo/engine');
 const { validateGeneratedSeo } = require('./seo/quality');
 const { sortRoutesForSeo, generatedSeoIsStale } = require('./seo/routePriority');
+const {
+  SEO_CORE_ROUTE_COUNT,
+  seoCoreOnlyEnabled,
+  isSeoCoreRoute,
+} = require('./seoRouteCore');
 
 const BATCH_SIZE = 50;
 const ROUTE_PAGE_FETCH_SIZE = 1000;
 // route_pages base row content is German (platform's primary market).
 const PRIMARY_LANGUAGE = 'de';
 
-async function fetchRoutePagesForUpdate() {
+function filterRoutesForSeoBatch(routes, coreOnly = seoCoreOnlyEnabled()) {
+  const sorted = sortRoutesForSeo(routes);
+  if (!coreOnly) return sorted;
+  return sorted.filter((route) => isSeoCoreRoute(route && route.slug));
+}
+
+async function fetchRoutePagesForUpdate({ coreOnly = false } = {}) {
   if (!supa) throw new Error('Database not available');
   const allRoutes = [];
   for (let from = 0; ; from += ROUTE_PAGE_FETCH_SIZE) {
@@ -43,7 +56,7 @@ async function fetchRoutePagesForUpdate() {
     allRoutes.push(...(data || []));
     if (!data || data.length < ROUTE_PAGE_FETCH_SIZE) break;
   }
-  return sortRoutesForSeo(allRoutes);
+  return filterRoutesForSeoBatch(allRoutes, coreOnly);
 }
 
 function shouldSkipGeneratedSeo(route, language, force) {
@@ -89,8 +102,14 @@ function recordQualityRejection(qualityReasons, reasons) {
   }
 }
 
-async function processRoutes(progressCallback, { dryRun = false, force = false, language = PRIMARY_LANGUAGE, limit = null } = {}) {
-  const allRoutes = await fetchRoutePagesForUpdate();
+async function processRoutes(progressCallback, {
+  dryRun = false,
+  force = false,
+  language = PRIMARY_LANGUAGE,
+  limit = null,
+  coreOnly = seoCoreOnlyEnabled(),
+} = {}) {
+  const allRoutes = await fetchRoutePagesForUpdate({ coreOnly });
   const routes = Number.isInteger(limit) && limit > 0 ? allRoutes.slice(0, limit) : allRoutes;
   const total = routes.length;
   let processed = 0, updated = 0, skipped = 0, failed = 0, qualityRejected = 0;
@@ -98,7 +117,16 @@ async function processRoutes(progressCallback, { dryRun = false, force = false, 
   const qualityReasons = {};
   const angleCounts = {};
 
-  log('info', 'seo_batch_start', { total, availableTotal: allRoutes.length, dryRun, force, language, limit });
+  log('info', 'seo_batch_start', {
+    total,
+    availableTotal: allRoutes.length,
+    dryRun,
+    force,
+    language,
+    limit,
+    coreOnly,
+    coreRouteCount: SEO_CORE_ROUTE_COUNT,
+  });
 
   for (let i = 0; i < routes.length; i += BATCH_SIZE) {
     const batch = routes.slice(i, i + BATCH_SIZE);
@@ -139,7 +167,24 @@ async function processRoutes(progressCallback, { dryRun = false, force = false, 
     if (!dryRun) await new Promise((r) => setTimeout(r, 100));
   }
 
-  const summary = { total, availableTotal: allRoutes.length, processed, updated, skipped, failed, qualityRejected, skipReasons, qualityReasons, angleCounts, dryRun, force, language, limit };
+  const summary = {
+    total,
+    availableTotal: allRoutes.length,
+    processed,
+    updated,
+    skipped,
+    failed,
+    qualityRejected,
+    skipReasons,
+    qualityReasons,
+    angleCounts,
+    dryRun,
+    force,
+    language,
+    limit,
+    coreOnly,
+    coreRouteCount: SEO_CORE_ROUTE_COUNT,
+  };
   log('info', 'seo_batch_complete', summary);
   return summary;
 }
@@ -172,10 +217,11 @@ async function processSingleRoute(routeId, language = PRIMARY_LANGUAGE, { dryRun
   return { skipped: false, angle: gen.angle, content: gen.content, ...w };
 }
 
-// Readiness report: eligible vs. skipped, with reason + haul + data-coverage
-// breakdowns so an operator can see WHY routes are (or aren't) generatable.
+// Readiness report intentionally remains catalogue-wide: it tells operators
+// how many published routes are eligible, while the batch writer itself is
+// fenced to the current core cohort by default.
 async function generateStatistics() {
-  const routes = await fetchRoutePagesForUpdate();
+  const routes = await fetchRoutePagesForUpdate({ coreOnly: false });
   let eligible = 0, manual = 0, insufficient = 0, alreadyGenerated = 0;
   const reasonCounts = {};
   const haulCounts = {};
@@ -208,6 +254,7 @@ module.exports = {
   processSingleRoute,
   generateStatistics,
   fetchRoutePagesForUpdate,
+  filterRoutesForSeoBatch,
   writeGenerated,
   shouldSkipGeneratedSeo,
   BATCH_SIZE,
