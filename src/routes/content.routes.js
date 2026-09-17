@@ -33,7 +33,7 @@ function parsePageParam(raw) {
 // [P0.7] Evidence columns a hub page's route list must SELECT so the canonical
 // `indexable` verdict can be computed per route, mirroring the /route-pages
 // list feed. Appended to each hub route-list SELECT.
-const HUB_ROUTE_EVIDENCE_COLS = 'airline_count,avg_duration_min,stop_distribution,price_sample_count,itinerary_count,intro_text,custom_faq,distance_km';
+const HUB_ROUTE_EVIDENCE_COLS = 'airline_count,avg_duration_min,stop_distribution,price_sample_count,itinerary_count,intro_text,custom_faq,distance_km,route_score,weekly_flights,insights_updated_at';
 // Attach `indexable` (routeIndexable, honoring SEO_EVIDENCE_POLICY_ENFORCED) to
 // each route in a hub list, then strip the heavy evidence-only columns pulled
 // solely to compute it (same set the list feed strips; distance_km/airline_count
