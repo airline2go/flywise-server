@@ -30,15 +30,18 @@ const { getIndexabilityData } = require('../services/indexabilityData');
 
 const PAGE_SIZE = 1000; // one PostgREST page; the frontend concatenates pages
 
-// First present date → 'YYYY-MM-DD', else null (an unknown date omits <lastmod>
-// rather than faking "today" — same rule as the frontend serializer).
+// Latest valid date → 'YYYY-MM-DD', else null. Never let an older `updated_at`
+// hide a newer operational/insights refresh — sitemap lastmod should describe
+// the freshest known change represented by the route page.
 function resolveLastmod(...values) {
+  let latestMs = -Infinity;
   for (const v of values) {
     if (!v) continue;
     const d = new Date(v);
-    if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+    const ms = d.getTime();
+    if (!Number.isNaN(ms) && ms > latestMs) latestMs = ms;
   }
-  return null;
+  return latestMs === -Infinity ? null : new Date(latestMs).toISOString().slice(0, 10);
 }
 
 function pageParam(req) {
