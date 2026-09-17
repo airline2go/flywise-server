@@ -60,6 +60,7 @@ const SEO_CORE_ROUTES = new Set([
   'frankfurt-berlin',
   'tenerife-berlin',
   'auh-prg',
+  'zrh-jfk',
 ]);
 
 const SEO_CORE_ROUTE_COUNT = SEO_CORE_ROUTES.size;
