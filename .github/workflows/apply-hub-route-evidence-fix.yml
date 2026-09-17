@@ -1,0 +1,49 @@
+name: Apply minimal hub route evidence fix
+
+on:
+  push:
+    branches:
+      - fix/seo-hub-route-evidence-parity
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+
+      - name: Apply exact one-line source change
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/routes/content.routes.js')
+          text = path.read_text(encoding='utf-8')
+          old = "const HUB_ROUTE_EVIDENCE_COLS = 'airline_count,avg_duration_min,stop_distribution,price_sample_count,itinerary_count,intro_text,custom_faq,distance_km';"
+          new = "const HUB_ROUTE_EVIDENCE_COLS = 'airline_count,avg_duration_min,stop_distribution,price_sample_count,itinerary_count,intro_text,custom_faq,distance_km,route_score,weekly_flights,insights_updated_at';"
+          assert text.count(old) == 1, 'expected exactly one current HUB_ROUTE_EVIDENCE_COLS declaration'
+          assert new not in text, 'target declaration already appears in source'
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+
+      - name: Verify minimal source diff
+        shell: bash
+        run: |
+          git diff --check
+          test "$(git diff --numstat -- src/routes/content.routes.js | awk '{print $1}')" = "1"
+          test "$(git diff --numstat -- src/routes/content.routes.js | awk '{print $2}')" = "1"
+          git diff --unified=0 -- src/routes/content.routes.js
+
+      - name: Commit source fix and remove temporary workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/routes/content.routes.js
+          git rm .github/workflows/apply-hub-route-evidence-fix.yml
+          git commit -m "fix(seo): complete hub route evidence selectors"
+          git push origin HEAD:fix/seo-hub-route-evidence-parity
