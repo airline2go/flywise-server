@@ -22,7 +22,7 @@ const supa = require('../clients/supabase');
 const log = require('../utils/log');
 const { generateRoutePage, assessEligibility, supportedLanguages } = require('./seo/engine');
 const { validateGeneratedSeo } = require('./seo/quality');
-const { sortRoutesForSeo } = require('./seo/routePriority');
+const { sortRoutesForSeo, generatedSeoIsStale } = require('./seo/routePriority');
 
 const BATCH_SIZE = 50;
 const ROUTE_PAGE_FETCH_SIZE = 1000;
@@ -46,12 +46,22 @@ async function fetchRoutePagesForUpdate() {
   return sortRoutesForSeo(allRoutes);
 }
 
+function shouldSkipGeneratedSeo(route, language, force) {
+  return !force
+    && route
+    && route.seo_generated_at
+    && route.seo_lang === language
+    && !generatedSeoIsStale(route);
+}
+
 // Writes generated content to the seo_* columns. `force` re-generates even when
 // content already exists (used to refresh after data changes); otherwise a
-// route already carrying generated content for the same language is left alone.
+// route already carrying current generated content for the same language is left
+// alone. Generated content that predates newer operational/pricing data is
+// intentionally refreshed without requiring `force`.
 async function writeGenerated(route, gen, language, { dryRun = false, force = false } = {}) {
-  if (!force && route.seo_generated_at && route.seo_lang === language) {
-    return { updated: false, reason: 'already generated' };
+  if (shouldSkipGeneratedSeo(route, language, force)) {
+    return { updated: false, reason: 'already generated and current' };
   }
   const patch = {
     seo_title: gen.content.title,
@@ -199,6 +209,7 @@ module.exports = {
   generateStatistics,
   fetchRoutePagesForUpdate,
   writeGenerated,
+  shouldSkipGeneratedSeo,
   BATCH_SIZE,
   PRIMARY_LANGUAGE,
 };
