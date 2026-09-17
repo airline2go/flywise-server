@@ -29,6 +29,26 @@ function routeMinScore() {
   return Number.isFinite(n) && n >= 0 ? n : 0.2;
 }
 
+// Maximum age for the operational route evidence used by an indexed page.
+// This is deliberately separate from price freshness: a page may show a fresh
+// price while its duration/stops/itinerary snapshot is stale.
+function routeDataMaxAgeMs() {
+  const days = Number(process.env.SEO_ROUTE_DATA_MAX_AGE_DAYS);
+  const effectiveDays = Number.isFinite(days) && days > 0 ? days : 30;
+  return effectiveDays * 24 * 60 * 60 * 1000;
+}
+
+function hasFreshRouteData(r, now = Date.now()) {
+  if (!r) return false;
+  const raw = r.insights_updated_at
+    || (r.intelligence && r.intelligence.operational && r.intelligence.operational.updatedAt);
+  if (!raw) return false;
+  const t = new Date(raw).getTime();
+  if (!Number.isFinite(t)) return false;
+  const age = now - t;
+  return age >= 0 && age <= routeDataMaxAgeMs();
+}
+
 // A route shows real demand when its popularity score clears the threshold or
 // it has scheduled weekly service. (Manual editorial content is handled
 // separately in the decision, since it is a quality signal in its own right.)
@@ -90,16 +110,22 @@ function getRouteIndexabilityDecision(r, opts = {}) {
   const evidence = hasVerifiedFlightEvidence(r);
   const manual = hasManualEditorialContent(r);
   const demand = hasRouteDemandSignal(r);
+  const fresh = hasFreshRouteData(r, opts.now);
   // The demand gate only ever *removes* index eligibility from an
   // evidence-passing route that shows no demand and no manual content. Manual
   // editorial routes are always kept. It never applies in legacy (non-enforced)
   // mode, so existing behaviour is preserved when evidence enforcement is off.
   const demandOk = !demandGate || manual || demand;
-  const indexable = enforce ? ((evidence || manual) && demandOk) : (hasLegacyRouteData(r) || manual);
+  const freshnessOk = !demandGate || manual || fresh;
+  const indexable = enforce
+    ? ((evidence || manual) && demandOk && freshnessOk)
+    : (hasLegacyRouteData(r) || manual);
   const reason = enforce
     ? ((evidence || manual)
       ? (demandOk
-        ? (evidence ? 'VERIFIED FLIGHT EVIDENCE' : 'MANUAL EDITORIAL CONTENT')
+        ? (freshnessOk
+          ? (evidence ? 'VERIFIED FLIGHT EVIDENCE' : 'MANUAL EDITORIAL CONTENT')
+          : 'STALE ROUTE DATA (pruned)')
         : 'NO DEMAND SIGNAL (pruned)')
       : 'NO VERIFIED FLIGHT EVIDENCE')
     : (indexable ? 'LEGACY DATA/CONTENT' : 'NO DATA (legacy)');
@@ -108,6 +134,7 @@ function getRouteIndexabilityDecision(r, opts = {}) {
     verifiedEvidence: evidence,
     manualContent: manual,
     demandSignal: demand,
+    routeDataFresh: fresh,
     demandGate,
     enforce,
     reason,
@@ -120,6 +147,7 @@ function getRouteIndexabilityDecision(r, opts = {}) {
       distance_km: r ? r.distance_km : null,
       route_score: r ? r.route_score : null,
       weekly_flights: r ? r.weekly_flights : null,
+      insights_updated_at: r ? r.insights_updated_at : null,
     },
   };
 }
@@ -161,7 +189,8 @@ function buildConnectivity(routes, opts = {}) {
       const ev = hasVerifiedFlightEvidence(r);
       const man = hasManualEditorialContent(r);
       const demandOk = !demandGate || man || hasRouteDemandSignal(r);
-      if (!((ev || man) && demandOk)) continue;
+      const freshnessOk = !demandGate || man || hasFreshRouteData(r);
+      if (!((ev || man) && demandOk && freshnessOk)) continue;
     }
     addTo(cityDest, r.origin_city_slug, r.destination_city_slug);
     addTo(cityDest, r.destination_city_slug, r.origin_city_slug);
@@ -205,7 +234,7 @@ function airlineRouteCounts(observedRows, publishedRoutes) {
     const pair = `${o.route_origin_iata}${separator}${o.route_destination_iata}`;
     if (!publishedPairs.has(pair)) continue;
     let seen = seenPairsByAirline.get(id);
-    if (!seen) { seen = new Set(); seenPairsByAirline.set(id, seen); }
+    if (!seen) { seen = new Set(); seenByAirline.set(id, seen); }
     if (seen.size >= 2) continue;
     if (!seen.has(pair)) {
       seen.add(pair);
@@ -217,6 +246,8 @@ function airlineRouteCounts(observedRows, publishedRoutes) {
 module.exports = {
   hasVerifiedFlightEvidence,
   hasManualEditorialContent,
+  hasFreshRouteData,
+  routeDataMaxAgeMs,
   getRouteIndexabilityDecision,
   evidencePolicyEnforced,
   routeDemandGateEnabled,
