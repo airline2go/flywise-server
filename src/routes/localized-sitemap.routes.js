@@ -1,6 +1,6 @@
 const supa = require('../clients/supabase');
 const rateLimit = require('../middleware/rateLimit');
-const { isSupportedRouteSeoLocale } = require('../services/seo/multilingual');
+const { isSupportedRouteSeoLocale } = require('../services/seo/routeLocales');
 const PAGE_SIZE = 200;
 function lastmod(...values){for(const v of values){if(!v)continue;const d=new Date(v);if(!Number.isNaN(d.getTime()))return d.toISOString().slice(0,10);}return null;}
 module.exports = (app) => app.get('/sitemap-data/routes-localized',rateLimit('content',2500,60000),async(req,res)=>{try{
