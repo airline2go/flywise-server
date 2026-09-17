@@ -1,6 +1,23 @@
 // SEO batch ordering: prioritize routes with the strongest real-world evidence and
 // the highest information density before weaker eligible routes. This changes
 // ordering only; the existing eligibility + quality gates remain authoritative.
+function latestRouteDataMs(route) {
+  if (!route) return 0;
+  const insightMs = new Date(route.insights_updated_at || 0).getTime();
+  const priceMs = new Date(route.price_updated_at || 0).getTime();
+  return Math.max(
+    Number.isFinite(insightMs) ? insightMs : 0,
+    Number.isFinite(priceMs) ? priceMs : 0,
+  );
+}
+
+function generatedSeoIsStale(route) {
+  if (!route || !route.seo_generated_at) return false;
+  const generatedAt = new Date(route.seo_generated_at).getTime();
+  if (!Number.isFinite(generatedAt)) return false;
+  return latestRouteDataMs(route) > generatedAt;
+}
+
 function routeSeoPriorityScore(route) {
   if (!route) return -Infinity;
   let score = 0;
@@ -16,6 +33,10 @@ function routeSeoPriorityScore(route) {
   // Prefer refreshes of existing SEO only when force is explicitly requested;
   // default batches should first cover pages that have no generated SEO.
   if (!route.seo_generated_at) score += 12;
+  // Existing generated copy can become obsolete when operational/pricing data
+  // changes. Give stale copy a stronger refresh priority without changing any
+  // eligibility or quality gate and without writing to the database here.
+  if (generatedSeoIsStale(route)) score += 24;
   return score;
 }
 
@@ -29,4 +50,4 @@ function sortRoutesForSeo(routes) {
   });
 }
 
-module.exports = { routeSeoPriorityScore, sortRoutesForSeo };
+module.exports = { routeSeoPriorityScore, sortRoutesForSeo, generatedSeoIsStale };
