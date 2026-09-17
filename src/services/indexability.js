@@ -4,6 +4,41 @@ function evidencePolicyEnforced() {
     || process.env.SEO_EVIDENCE_POLICY_ENFORCED === 'true';
 }
 
+// [SEO-ROUTE-DEMAND-GATE] Strong-prune switch. The evidence gate keeps out
+// routes with NO real flight data, but ~all published routes carry full
+// evidence (duration/stops/price/itinerary), so evidence alone still exposes
+// the entire ~1.7k templated route corpus to Google — which is what triggered
+// the sitewide "scaled/thin content" demotion. When this gate is ON, a route
+// is additionally required to show a genuine demand/quality signal (a real
+// popularity score, scheduled weekly flights, or approved manual editorial
+// content) to stay indexable; everything else becomes noindex,follow so the
+// index shrinks to a defensible core while link equity keeps flowing.
+//
+// Default OFF so shipping the mechanism changes nothing until the operator
+// flips SEO_ROUTE_DEMAND_GATE=1 — a single, instantly reversible env switch,
+// far safer than baking the prune into code.
+function routeDemandGateEnabled() {
+  return process.env.SEO_ROUTE_DEMAND_GATE === '1'
+    || process.env.SEO_ROUTE_DEMAND_GATE === 'true';
+}
+
+// Minimum route_score for a route to count as "in demand". route_score is the
+// backend's own popularity signal; the threshold is tunable without a redeploy.
+function routeMinScore() {
+  const n = Number(process.env.SEO_ROUTE_MIN_SCORE);
+  return Number.isFinite(n) && n >= 0 ? n : 0.2;
+}
+
+// A route shows real demand when its popularity score clears the threshold or
+// it has scheduled weekly service. (Manual editorial content is handled
+// separately in the decision, since it is a quality signal in its own right.)
+function hasRouteDemandSignal(r) {
+  if (!r) return false;
+  if (validPositiveNumber(r.route_score) && Number(r.route_score) >= routeMinScore()) return true;
+  if (validPositiveInteger(r.weekly_flights)) return true;
+  return false;
+}
+
 function validPositiveInteger(value) {
   const n = Number(value);
   return Number.isInteger(n) && n > 0;
@@ -51,16 +86,29 @@ function hasLegacyRouteData(r) {
 
 function getRouteIndexabilityDecision(r, opts = {}) {
   const enforce = opts.enforce != null ? opts.enforce : evidencePolicyEnforced();
+  const demandGate = opts.demandGate != null ? opts.demandGate : routeDemandGateEnabled();
   const evidence = hasVerifiedFlightEvidence(r);
   const manual = hasManualEditorialContent(r);
-  const indexable = enforce ? (evidence || manual) : (hasLegacyRouteData(r) || manual);
+  const demand = hasRouteDemandSignal(r);
+  // The demand gate only ever *removes* index eligibility from an
+  // evidence-passing route that shows no demand and no manual content. Manual
+  // editorial routes are always kept. It never applies in legacy (non-enforced)
+  // mode, so existing behaviour is preserved when evidence enforcement is off.
+  const demandOk = !demandGate || manual || demand;
+  const indexable = enforce ? ((evidence || manual) && demandOk) : (hasLegacyRouteData(r) || manual);
   const reason = enforce
-    ? (evidence ? 'VERIFIED FLIGHT EVIDENCE' : (manual ? 'MANUAL EDITORIAL CONTENT' : 'NO VERIFIED FLIGHT EVIDENCE'))
+    ? ((evidence || manual)
+      ? (demandOk
+        ? (evidence ? 'VERIFIED FLIGHT EVIDENCE' : 'MANUAL EDITORIAL CONTENT')
+        : 'NO DEMAND SIGNAL (pruned)')
+      : 'NO VERIFIED FLIGHT EVIDENCE')
     : (indexable ? 'LEGACY DATA/CONTENT' : 'NO DATA (legacy)');
   return {
     indexable,
     verifiedEvidence: evidence,
     manualContent: manual,
+    demandSignal: demand,
+    demandGate,
     enforce,
     reason,
     signals: {
@@ -70,6 +118,8 @@ function getRouteIndexabilityDecision(r, opts = {}) {
       price_sample_count: r ? r.price_sample_count : null,
       itinerary_count: r ? r.itinerary_count : null,
       distance_km: r ? r.distance_km : null,
+      route_score: r ? r.route_score : null,
+      weekly_flights: r ? r.weekly_flights : null,
     },
   };
 }
@@ -91,6 +141,7 @@ function airlineIndexable(airline, publishedRouteCount) {
 }
 function buildConnectivity(routes, opts = {}) {
   const enforce = opts.enforce != null ? opts.enforce : evidencePolicyEnforced();
+  const demandGate = opts.demandGate != null ? opts.demandGate : routeDemandGateEnabled();
   const cityDest = new Map();
   const airportDest = new Map();
   const countryExt = new Map();
@@ -102,7 +153,16 @@ function buildConnectivity(routes, opts = {}) {
     set.add(val);
   };
   for (const r of routes || []) {
-    if (enforce && !hasVerifiedFlightEvidence(r) && !hasManualEditorialContent(r)) continue;
+    // Only routes that are themselves indexable contribute to hub connectivity,
+    // so a city/airport/country/airline hub never counts — or links to — a route
+    // that is noindex (P0.7). This mirrors getRouteIndexabilityDecision, incl.
+    // the demand gate when it is enabled.
+    if (enforce) {
+      const ev = hasVerifiedFlightEvidence(r);
+      const man = hasManualEditorialContent(r);
+      const demandOk = !demandGate || man || hasRouteDemandSignal(r);
+      if (!((ev || man) && demandOk)) continue;
+    }
     addTo(cityDest, r.origin_city_slug, r.destination_city_slug);
     addTo(cityDest, r.destination_city_slug, r.origin_city_slug);
     addTo(airportDest, r.origin_iata, r.destination_city_slug);
@@ -159,6 +219,9 @@ module.exports = {
   hasManualEditorialContent,
   getRouteIndexabilityDecision,
   evidencePolicyEnforced,
+  routeDemandGateEnabled,
+  routeMinScore,
+  hasRouteDemandSignal,
   routeIndexable,
   cityIndexable,
   airportIndexable,
