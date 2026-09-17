@@ -12,6 +12,9 @@
 
 const supa = require('../clients/supabase');
 const log = require('../utils/log');
+// Loaded here because this service is already required by server.js.
+// The operational refresher is separately opt-in via environment config.
+require('./routeOperationalRefresh');
 
 const COMPUTE_INTERVAL_MS = 60 * 60 * 1000; // hourly — same cadence as the other refreshers
 const WINDOW_DAYS = 90;                      // trailing window the aggregates describe
