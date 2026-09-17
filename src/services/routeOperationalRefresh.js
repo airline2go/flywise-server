@@ -11,8 +11,8 @@ const MAX_AGE_MS = (() => {
   return effectiveDays * 24 * 60 * 60 * 1000;
 })();
 
-const BATCH_SIZE = 25;
-const DELAY_MS = 2000;
+const BATCH_SIZE = 10;
+const DELAY_MS = 5000;
 const INTERVAL_MS = 15 * 60 * 1000;
 const START_DELAY_MS = 45000;
 
@@ -60,6 +60,11 @@ function pickRefreshRoutes(routes, now = Date.now()) {
     .slice(0, BATCH_SIZE);
 }
 
+function isProviderRateLimit(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return message.includes('too many requests') || message.includes('ratelimit') || message.includes('rate limit');
+}
+
 async function fetchDemandRoutePages() {
   const rows = [];
   const PAGE = 1000;
@@ -98,6 +103,7 @@ async function refreshOperationalDemandRoutesOnce() {
           route: `${route.origin_iata}-${route.destination_iata}`,
           error: error.message,
         });
+        if (isProviderRateLimit(error)) break;
       }
       await new Promise((resolve) => setTimeout(resolve, DELAY_MS));
     }
