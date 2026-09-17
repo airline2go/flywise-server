@@ -32,7 +32,7 @@ describe('getRouteIndexabilityDecision — enforced vs legacy (shared fixture)',
 });
 
 describe('SEO recovery core', () => {
-  test('core is exactly 50 versioned routes', () => expect(SEO_CORE_ROUTE_COUNT).toBe(50));
+  test('core is exactly 60 versioned routes', () => expect(SEO_CORE_ROUTE_COUNT).toBe(60));
   test('core mode defaults ON and supports instant rollback', () => {
     const previous = process.env.SEO_ROUTE_CORE_ONLY;
     delete process.env.SEO_ROUTE_CORE_ONLY;
@@ -43,8 +43,10 @@ describe('SEO recovery core', () => {
     else process.env.SEO_ROUTE_CORE_ONLY = previous;
   });
   test('every declared core route is recognized', () => {
-    expect(SEO_CORE_ROUTES.size).toBe(50);
+    expect(SEO_CORE_ROUTES.size).toBe(60);
     expect(isSeoCoreRoute('lgw-pmi')).toBe(true);
+    expect(isSeoCoreRoute('palma-de-mallorca-duesseldorf')).toBe(true);
+    expect(isSeoCoreRoute('berlin-copenhagen')).toBe(true);
     expect(isSeoCoreRoute('definitely-not-a-core-route')).toBe(false);
   });
   test('published-like route outside the core is pruned', () => {
