@@ -556,6 +556,7 @@ describe('GET/POST /admin/route-score-config', () => {
     expect(res.body.config).toEqual({
       halfLifeDays: 7, lookbackDays: 30, impressionWeight: 1, clickWeight: 10,
       bookingWeight: 100, ctrWeight: 50, confidenceLowMax: 100, confidenceHighMin: 1000,
+      gscImpressionWeight: 1, gscClickWeight: 10, gscLookbackDays: 90,
     });
   });
 
