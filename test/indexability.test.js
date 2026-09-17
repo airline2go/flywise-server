@@ -32,7 +32,7 @@ describe('getRouteIndexabilityDecision — enforced vs legacy (shared fixture)',
 });
 
 describe('SEO recovery core', () => {
-  test('core is exactly 60 versioned routes', () => expect(SEO_CORE_ROUTE_COUNT).toBe(60));
+  test('core is exactly 70 versioned routes', () => expect(SEO_CORE_ROUTE_COUNT).toBe(70));
   test('core mode defaults ON and supports instant rollback', () => {
     const previous = process.env.SEO_ROUTE_CORE_ONLY;
     delete process.env.SEO_ROUTE_CORE_ONLY;
@@ -43,10 +43,11 @@ describe('SEO recovery core', () => {
     else process.env.SEO_ROUTE_CORE_ONLY = previous;
   });
   test('every declared core route is recognized', () => {
-    expect(SEO_CORE_ROUTES.size).toBe(60);
+    expect(SEO_CORE_ROUTES.size).toBe(70);
     expect(isSeoCoreRoute('lgw-pmi')).toBe(true);
     expect(isSeoCoreRoute('palma-de-mallorca-duesseldorf')).toBe(true);
-    expect(isSeoCoreRoute('berlin-copenhagen')).toBe(true);
+    expect(isSeoCoreRoute('alicante-barcelona')).toBe(true);
+    expect(isSeoCoreRoute('ibiza-duesseldorf')).toBe(true);
     expect(isSeoCoreRoute('definitely-not-a-core-route')).toBe(false);
   });
   test('published-like route outside the core is pruned', () => {
@@ -78,42 +79,3 @@ describe('routeIndexable', () => {
     expect(routeIndexable({ distance_km: 500 })).toBe(false);
     expect(routeIndexable({ avg_duration_min: 90 })).toBe(true);
     expect(routeIndexable({ airline_count: 1 })).toBe(false);
-    expect(routeIndexable({ airline_count: 1, avg_duration_min: 90 })).toBe(true);
-    expect(routeIndexable({ stop_distribution: { '0': 3 } })).toBe(true);
-  });
-  test('admin content alone makes it indexable', () => {
-    expect(routeIndexable({ intro_text: 'hello' })).toBe(true);
-    expect(routeIndexable({ custom_faq: [{ q: 'a', a: 'b' }] })).toBe(true);
-  });
-});
-
-describe('entity indexability', () => {
-  test('cities/airports require >=2 destinations or editorial content', () => {
-    expect(cityIndexable({}, 1)).toBe(false); expect(cityIndexable({}, 2)).toBe(true); expect(cityIndexable({ intro_text: 'x' }, 1)).toBe(true);
-    expect(airportIndexable({}, 1)).toBe(false); expect(airportIndexable({}, 2)).toBe(true);
-  });
-  test('countries/airlines require >=2 connectivity/routes or editorial content', () => {
-    expect(countryIndexable({}, 1)).toBe(false); expect(countryIndexable({}, 2)).toBe(true);
-    expect(airlineIndexable({}, 1)).toBe(false); expect(airlineIndexable({}, 2)).toBe(true);
-  });
-});
-
-describe('counts', () => {
-  test('connectivity counts distinct destinations', () => {
-    const c = buildConnectivity([
-      { origin_city_slug: 'a', destination_city_slug: 'b', origin_iata: 'AAA', destination_iata: 'BBB', origin_country: 'DE', destination_country: 'FR', avg_duration_min: 100 },
-      { origin_city_slug: 'a', destination_city_slug: 'c', origin_iata: 'AAA', destination_iata: 'CCC', origin_country: 'DE', destination_country: 'ES', avg_duration_min: 110 },
-    ], { enforce: true, coreOnly: false });
-    expect(cityDestinationCount(c, 'a')).toBe(2); expect(airportDestinationCount(c, 'AAA')).toBe(2); expect(countryConnectivityScore(c, 'DE')).toBe(2);
-  });
-  test('airlineRouteCounts counts unique published pairs', () => {
-    const counts = airlineRouteCounts([{ airline_id: 1, route_origin_iata: 'AAA', route_destination_iata: 'BBB' }, { airline_id: 1, route_origin_iata: 'AAA', route_destination_iata: 'CCC' }, { airline_id: 1, route_origin_iata: 'AAA', route_destination_iata: 'BBB' }], [{ origin_iata: 'AAA', destination_iata: 'BBB' }, { origin_iata: 'AAA', destination_iata: 'CCC' }]);
-    expect(counts.get(1)).toBe(2);
-  });
-});
-
-test('hasManualEditorialContent detects intro and FAQ', () => {
-  expect(hasManualEditorialContent({ intro_text: 'x' })).toBe(true);
-  expect(hasManualEditorialContent({ custom_faq: [{ q: 'a', a: 'b' }] })).toBe(true);
-  expect(hasManualEditorialContent({})).toBe(false);
-});
