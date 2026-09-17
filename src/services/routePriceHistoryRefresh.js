@@ -66,18 +66,42 @@ async function computeRoutePriceStats() {
   return byRoute;
 }
 
+// Paginate route_pages as well. Without this bounded read, Supabase/PostgREST
+// can return only the first page of rows, leaving the remainder of the route
+// corpus with stale price_updated_at and stale economic aggregates.
+async function fetchAllRoutePages() {
+  const routePages = [];
+  let from = 0;
+  const pageSize = 1000;
+  for (;;) {
+    const { data: rows, error } = await supa.from('route_pages')
+      .select('id, origin_iata, destination_iata')
+      .order('id', { ascending: true })
+      .range(from, from + pageSize - 1);
+    if (error) {
+      log('warn', 'route_price_history_route_pages_read_failed', { error: error.message });
+      return null;
+    }
+    if (!rows || !rows.length) break;
+    routePages.push(...rows);
+    if (rows.length < pageSize) break;
+    from += pageSize;
+  }
+  return routePages;
+}
+
 async function refreshRoutePriceHistoryOnce() {
   if (!supa) return;
   try {
     const byRoute = await computeRoutePriceStats();
     if (!byRoute) return;
 
-    const { data: routePages, error: rpError } = await supa.from('route_pages').select('id, origin_iata, destination_iata');
-    if (rpError) { log('warn', 'route_price_history_route_pages_read_failed', { error: rpError.message }); return; }
+    const routePages = await fetchAllRoutePages();
+    if (!routePages) return;
 
     const nowIso = new Date().toISOString();
     let updated = 0;
-    for (const rp of routePages || []) {
+    for (const rp of routePages) {
       const bucket = byRoute.get(`${rp.origin_iata}-${rp.destination_iata}`);
       if (!bucket || !bucket.points.length) continue; // never overwrite real stats with nulls
 
