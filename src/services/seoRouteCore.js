@@ -1,4 +1,4 @@
-// [SEO-CORE-50]
+// [SEO-CORE-60]
 // Recovery cohort for the current SEO rehabilitation phase.
 //
 // These are existing, published route pages selected from the live catalogue
@@ -61,6 +61,16 @@ const SEO_CORE_ROUTES = new Set([
   'tenerife-berlin',
   'auh-prg',
   'zrh-jfk',
+  'palma-de-mallorca-duesseldorf',
+  'valencia-fuerteventura',
+  'cologne-palma-de-mallorca',
+  'frankfurt-ibiza',
+  'alicante-malaga',
+  'barcelona-palma-de-mallorca',
+  'hamburg-duesseldorf',
+  'amsterdam-zuerich',
+  'berlin-copenhagen',
+  'palma-de-mallorca-berlin',
 ]);
 
 const SEO_CORE_ROUTE_COUNT = SEO_CORE_ROUTES.size;
