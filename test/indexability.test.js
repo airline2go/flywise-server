@@ -1,4 +1,5 @@
 const { routeIndexable, cityIndexable, airportIndexable, countryIndexable, airlineIndexable, buildConnectivity, cityDestinationCount, airportDestinationCount, countryConnectivityScore, airlineRouteCounts, hasVerifiedFlightEvidence, hasManualEditorialContent, getRouteIndexabilityDecision } = require('../src/services/indexability');
+const { SEO_CORE_ROUTES, SEO_CORE_ROUTE_COUNT, seoCoreOnlyEnabled, isSeoCoreRoute } = require('../src/services/seoRouteCore');
 const evidenceFixture = require('./fixtures/route-evidence-cases.json');
 
 describe('hasVerifiedFlightEvidence (canonical policy)', () => {
@@ -27,6 +28,33 @@ describe('getRouteIndexabilityDecision — enforced vs legacy (shared fixture)',
     expect(getRouteIndexabilityDecision({ distance_km: 500 }, { enforce: true }).reason).toBe('NO VERIFIED FLIGHT EVIDENCE');
     expect(getRouteIndexabilityDecision({ airline_count: 2 }, { enforce: true }).reason).toBe('NO VERIFIED FLIGHT EVIDENCE');
     expect(getRouteIndexabilityDecision({ intro_text: 'x' }, { enforce: true }).reason).toBe('MANUAL EDITORIAL CONTENT');
+  });
+});
+
+describe('SEO recovery core', () => {
+  test('core is exactly 50 versioned routes', () => expect(SEO_CORE_ROUTE_COUNT).toBe(50));
+  test('core mode defaults ON and supports instant rollback', () => {
+    const previous = process.env.SEO_ROUTE_CORE_ONLY;
+    delete process.env.SEO_ROUTE_CORE_ONLY;
+    expect(seoCoreOnlyEnabled()).toBe(true);
+    process.env.SEO_ROUTE_CORE_ONLY = '0';
+    expect(seoCoreOnlyEnabled()).toBe(false);
+    if (previous == null) delete process.env.SEO_ROUTE_CORE_ONLY;
+    else process.env.SEO_ROUTE_CORE_ONLY = previous;
+  });
+  test('every declared core route is recognized', () => {
+    expect(SEO_CORE_ROUTES.size).toBe(50);
+    expect(isSeoCoreRoute('lgw-pmi')).toBe(true);
+    expect(isSeoCoreRoute('definitely-not-a-core-route')).toBe(false);
+  });
+  test('published-like route outside the core is pruned', () => {
+    const d = getRouteIndexabilityDecision({ slug: 'outside-core', avg_duration_min: 120, insights_updated_at: new Date().toISOString() }, { coreOnly: true });
+    expect(d.indexable).toBe(false);
+    expect(d.reason).toBe('OUTSIDE SEO CORE (pruned)');
+  });
+  test('published-like route inside the core remains indexable', () => {
+    const d = getRouteIndexabilityDecision({ slug: 'lgw-pmi', avg_duration_min: 120, insights_updated_at: new Date().toISOString() }, { coreOnly: true });
+    expect(d.indexable).toBe(true);
   });
 });
 
@@ -73,7 +101,7 @@ describe('counts', () => {
     const c = buildConnectivity([
       { origin_city_slug: 'a', destination_city_slug: 'b', origin_iata: 'AAA', destination_iata: 'BBB', origin_country: 'DE', destination_country: 'FR', avg_duration_min: 100 },
       { origin_city_slug: 'a', destination_city_slug: 'c', origin_iata: 'AAA', destination_iata: 'CCC', origin_country: 'DE', destination_country: 'ES', avg_duration_min: 110 },
-    ], { enforce: true });
+    ], { enforce: true, coreOnly: false });
     expect(cityDestinationCount(c, 'a')).toBe(2); expect(airportDestinationCount(c, 'AAA')).toBe(2); expect(countryConnectivityScore(c, 'DE')).toBe(2);
   });
   test('airlineRouteCounts counts unique published pairs', () => {
