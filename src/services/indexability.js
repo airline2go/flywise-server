@@ -234,7 +234,7 @@ function airlineRouteCounts(observedRows, publishedRoutes) {
     const pair = `${o.route_origin_iata}${separator}${o.route_destination_iata}`;
     if (!publishedPairs.has(pair)) continue;
     let seen = seenPairsByAirline.get(id);
-    if (!seen) { seen = new Set(); seenByAirline.set(id, seen); }
+    if (!seen) { seen = new Set(); seenPairsByAirline.set(id, seen); }
     if (seen.size >= 2) continue;
     if (!seen.has(pair)) {
       seen.add(pair);
