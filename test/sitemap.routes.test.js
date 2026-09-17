@@ -19,13 +19,20 @@ beforeEach(() => { supa.__reset(); supa.from.mockClear(); clearIndexabilityCache
 
 describe('GET /sitemap-data/routes', () => {
   test('returns only indexable routes, lean {id,lastmod,o,d}', async () => {
-    supa.__setResponse('route_pages', { result: { data: [
-      { slug: 'ber-muc', distance_km: 500, avg_duration_min: 90, updated_at: '2026-05-01T00:00:00Z', origin_iata: 'BER', destination_iata: 'MUC' },
-      { slug: 'thin-xx', origin_iata: 'XXX', destination_iata: 'YYY' },
-    ], error: null } });
-    const res = await request(buildApp()).get('/sitemap-data/routes');
-    expect(res.status).toBe(200); expect(res.body.hasMore).toBe(false);
-    expect(res.body.items).toEqual([{ id: 'ber-muc', lastmod: '2026-05-01', o: 'BER', d: 'MUC' }]);
+    const previousCoreOnly = process.env.SEO_ROUTE_CORE_ONLY;
+    process.env.SEO_ROUTE_CORE_ONLY = '0';
+    try {
+      supa.__setResponse('route_pages', { result: { data: [
+        { slug: 'ber-muc', distance_km: 500, avg_duration_min: 90, updated_at: '2026-05-01T00:00:00Z', origin_iata: 'BER', destination_iata: 'MUC' },
+        { slug: 'thin-xx', origin_iata: 'XXX', destination_iata: 'YYY' },
+      ], error: null } });
+      const res = await request(buildApp()).get('/sitemap-data/routes');
+      expect(res.status).toBe(200); expect(res.body.hasMore).toBe(false);
+      expect(res.body.items).toEqual([{ id: 'ber-muc', lastmod: '2026-05-01', o: 'BER', d: 'MUC' }]);
+    } finally {
+      if (previousCoreOnly == null) delete process.env.SEO_ROUTE_CORE_ONLY;
+      else process.env.SEO_ROUTE_CORE_ONLY = previousCoreOnly;
+    }
   });
   test('page query is parsed and echoed', async () => {
     supa.__setResponse('route_pages', { result: { data: [], error: null } });
