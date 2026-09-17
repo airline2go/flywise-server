@@ -34,6 +34,21 @@ describe('GET /sitemap-data/routes', () => {
       else process.env.SEO_ROUTE_CORE_ONLY = previousCoreOnly;
     }
   });
+  test('uses the freshest route timestamp for lastmod', async () => {
+    const previousCoreOnly = process.env.SEO_ROUTE_CORE_ONLY;
+    process.env.SEO_ROUTE_CORE_ONLY = '0';
+    try {
+      supa.__setResponse('route_pages', { result: { data: [
+        { slug: 'alc-bcn', distance_km: 404, avg_duration_min: 94, updated_at: '2026-09-04T00:00:00Z', insights_updated_at: '2026-09-17T19:28:28.353Z', created_at: '2026-01-01T00:00:00Z', origin_iata: 'ALC', destination_iata: 'BCN' },
+      ], error: null } });
+      const res = await request(buildApp()).get('/sitemap-data/routes');
+      expect(res.status).toBe(200);
+      expect(res.body.items).toEqual([{ id: 'alc-bcn', lastmod: '2026-09-17', o: 'ALC', d: 'BCN' }]);
+    } finally {
+      if (previousCoreOnly == null) delete process.env.SEO_ROUTE_CORE_ONLY;
+      else process.env.SEO_ROUTE_CORE_ONLY = previousCoreOnly;
+    }
+  });
   test('page query is parsed and echoed', async () => {
     supa.__setResponse('route_pages', { result: { data: [], error: null } });
     const res = await request(buildApp()).get('/sitemap-data/routes?page=3');
