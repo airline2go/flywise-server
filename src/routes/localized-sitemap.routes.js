@@ -2,7 +2,16 @@ const supa = require('../clients/supabase');
 const rateLimit = require('../middleware/rateLimit');
 const { isSupportedRouteSeoLocale } = require('../services/seo/routeLocales');
 const PAGE_SIZE = 200;
-function lastmod(...values){for(const v of values){if(!v)continue;const d=new Date(v);if(!Number.isNaN(d.getTime()))return d.toISOString().slice(0,10);}return null;}
+function lastmod(...values){
+  let latestMs = -Infinity;
+  for(const v of values){
+    if(!v)continue;
+    const d=new Date(v);
+    const ms=d.getTime();
+    if(!Number.isNaN(ms)&&ms>latestMs)latestMs=ms;
+  }
+  return latestMs===-Infinity?null:new Date(latestMs).toISOString().slice(0,10);
+}
 module.exports = (app) => app.get('/sitemap-data/routes-localized',rateLimit('content',2500,60000),async(req,res)=>{try{
   const language=String(req.query.lang||'').toLowerCase();
   if(!isSupportedRouteSeoLocale(language)||language==='de')return res.status(400).json({ok:false,error:'unsupported localized route language'});
