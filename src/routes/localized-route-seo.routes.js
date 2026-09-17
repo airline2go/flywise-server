@@ -1,5 +1,6 @@
 const supa = require('../clients/supabase');
 const rateLimit = require('../middleware/rateLimit');
+const { routeIndexable } = require('../services/indexability');
 const { effectiveLocalizedRouteSeo } = require('../services/seo/localizedEffective');
 const { getRouteSeoLocales, isSupportedRouteSeoLocale } = require('../services/seo/routeLocales');
 const SITE = String(process.env.PUBLIC_SITE_URL || process.env.SITE_URL || 'https://airpiv.com').replace(/\/+$/, '');
@@ -21,7 +22,7 @@ module.exports = (app) => {
     if(e1) throw new Error(e1.message); if(!route) return res.status(404).json({ok:false,error:'Route nicht gefunden'});
     const {data:row,error:e2}=await supa.from('route_seo_locales').select('*').eq('route_page_id',route.id).eq('language',lang).not('seo_generated_at','is',null).maybeSingle();
     if(e2) throw new Error(e2.message); if(!row) return res.status(404).json({ok:false,error:'Localized SEO not generated'});
-    res.json({ok:true,route:{...route,language:lang,seo:effectiveLocalizedRouteSeo(row),hreflang:await alternates(route.id,route.slug)},languages:getRouteSeoLocales()});
+    res.json({ok:true,route:{...route,indexable:routeIndexable(route),language:lang,seo:effectiveLocalizedRouteSeo(row),hreflang:await alternates(route.id,route.slug)},languages:getRouteSeoLocales()});
   }catch(e){res.status(500).json({ok:false,error:e.message});}});
   app.get('/route-pages/:slug/hreflang',limit,async(req,res)=>{try{
     const {data:route,error}=await supa.from('route_pages').select('id,slug').eq('slug',req.params.slug).eq('status','published').maybeSingle();
