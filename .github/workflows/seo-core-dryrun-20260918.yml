@@ -1,9 +1,11 @@
 name: Temporary SEO Core Dry Run
 
 on:
-  push:
+  pull_request:
     branches:
-      - ops/seo-core-dryrun-20260918
+      - main
+    paths:
+      - .github/workflows/seo-core-dryrun-20260918.yml
 
 permissions:
   contents: read
