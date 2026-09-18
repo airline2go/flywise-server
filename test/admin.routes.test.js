@@ -125,10 +125,11 @@ describe('POST /admin/seo/localized-batch-generate + status', () => {
 
   test('exposes the last localized batch status without requiring a full-admin role', async () => {
     await request(buildApp()).post('/admin/seo/localized-batch-generate').set(AUTH).send({ language: 'fr', limit: 10, offset: 0, dry_run: true });
+    await new Promise((resolve) => setImmediate(resolve));
     const res = await request(buildApp()).get('/admin/seo/localized-batch-status').set(AUTH);
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
-    expect(res.body.language).toBe('fr');
+    expect(res.body.summary.language).toBe('fr');
   });
 });
 
