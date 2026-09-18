@@ -1,6 +1,31 @@
 process.env.ADMIN_TOKEN = 'test-admin-token';
 process.env.SEARCH_SESSION_SECRET = 'test-search-session-secret';
 
+const mockRedisValues = new Map();
+const mockRedis = {
+  status: 'end',
+  get: jest.fn(async (key) => mockRedisValues.get(key) || null),
+  set: jest.fn(async (key, value, ...args) => {
+    if (args.includes('NX')) {
+      if (mockRedisValues.has(key)) return null;
+      mockRedisValues.set(key, value);
+      return 'OK';
+    }
+    mockRedisValues.set(key, value);
+    return 'OK';
+  }),
+  eval: jest.fn(async (_script, _numKeys, key, token) => {
+    if (mockRedisValues.get(key) !== token) return 0;
+    mockRedisValues.delete(key);
+    return 1;
+  }),
+  incr: jest.fn(async () => 1),
+  expire: jest.fn(async () => 1),
+  pexpire: jest.fn(async () => 1),
+  pttl: jest.fn(async () => 0),
+};
+jest.mock('../src/clients/redis', () => mockRedis);
+
 jest.mock('../src/clients/supabase', () => {
   const responses = {};
   const updateCalls = [];
@@ -83,6 +108,15 @@ function publishPair(from, to) {
 beforeEach(() => {
   resetPublishedRouteCache();
   supa.__reset();
+  mockRedis.status = 'end';
+  mockRedisValues.clear();
+  mockRedis.get.mockClear();
+  mockRedis.set.mockClear();
+  mockRedis.eval.mockClear();
+  mockRedis.incr.mockClear();
+  mockRedis.expire.mockClear();
+  mockRedis.pexpire.mockClear();
+  mockRedis.pttl.mockClear();
   mockDuffelFn.mockReset();
   mockGetTicketProfitTiers.mockClear();
   mockComputeTieredMargin.mockClear();
@@ -118,6 +152,21 @@ describe('POST /search', () => {
     ]);
   });
 
+  test('a multi-city search sends the same normalized slices used by its cache key', async () => {
+    mockDuffelFn.mockResolvedValue({ data: { id: 'orq_3', offers: [] } });
+    await authed(request(app).post('/search')).send({
+      slices: [
+        { origin: ' ber ', destination: ' cdg ', departure_date: ' 2026-08-01 ' },
+        { origin: 'cdg', destination: ' lis', departure_date: '2026-08-03' },
+      ],
+    });
+    const [, , body] = mockDuffelFn.mock.calls[0];
+    expect(body.data.slices).toEqual([
+      { origin: 'BER', destination: 'CDG', departure_date: '2026-08-01' },
+      { origin: 'CDG', destination: 'LIS', departure_date: '2026-08-03' },
+    ]);
+  });
+
   test('an identical repeated search within the cache window is served from cache', async () => {
     mockDuffelFn.mockResolvedValue({ data: { id: 'orq_4', offers: [{ id: 'off_4', total_amount: '50.00' }] } });
     const payload = { origin: 'MUC', destination: 'LHR', departure_date: '2026-09-01' };
@@ -126,6 +175,38 @@ describe('POST /search', () => {
     expect(first.status).toBe(200);
     expect(second.body).toEqual(first.body);
     expect(mockDuffelFn).toHaveBeenCalledTimes(1);
+  });
+
+  test('coalesces concurrent identical cache misses into one Duffel request', async () => {
+    mockRedis.status = 'ready';
+    const payload = { origin: 'BOS', destination: 'LIS', departure_date: '2027-08-03' };
+    let resolveDuffel;
+    let markDuffelStarted;
+    const duffelStarted = new Promise((resolve) => { markDuffelStarted = resolve; });
+    mockDuffelFn.mockImplementationOnce(() => {
+      markDuffelStarted();
+      return new Promise((resolve) => { resolveDuffel = resolve; });
+    });
+
+    const first = authed(request(app).post('/search')).send(payload);
+    const second = authed(request(app).post('/search')).send(payload);
+    const responses = Promise.all([first, second]);
+    await duffelStarted;
+    expect(mockDuffelFn).toHaveBeenCalledTimes(1);
+
+    resolveDuffel({ data: { id: 'orq_single_flight', offers: [{ id: 'off_single_flight', total_amount: '75.00' }] } });
+    const [firstResponse, secondResponse] = await responses;
+
+    expect(firstResponse.status).toBe(200);
+    expect(secondResponse.status).toBe(200);
+    expect(secondResponse.body).toEqual(firstResponse.body);
+    expect(mockDuffelFn).toHaveBeenCalledTimes(1);
+    expect(mockRedis.set).toHaveBeenCalledWith(
+      expect.stringMatching(/^search_lock:v1:/), expect.any(String), 'PX', 30000, 'NX'
+    );
+    expect(mockRedis.eval).toHaveBeenCalledWith(
+      expect.any(String), 1, expect.stringMatching(/^search_lock:v1:/), expect.any(String)
+    );
   });
 });
 
@@ -251,3 +332,4 @@ describe('avgDurationExcludingOutliers', () => {
     expect(avgDurationExcludingOutliers([66, 71, 80, 393, 410])).toBe(72);
   });
 });
+
