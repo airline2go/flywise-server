@@ -1,4 +1,5 @@
 const { generateRoutePage, supportedLanguages } = require('../src/services/seo/engine');
+const { validateGeneratedSeo } = require('../src/services/seo/quality');
 const { buildTitleDisambiguationMap, qualifySeoText, clampMetaDescription } = require('../src/services/multilingualSeoBatchProcessor');
 
 const route = {
@@ -26,6 +27,41 @@ describe('multilingual route SEO', () => {
     expect(result.content.metaDescription).toBeTruthy();
     expect(result.content.sections.length).toBeGreaterThanOrEqual(3);
     expect(result.content.faq.length).toBeGreaterThanOrEqual(3);
+  });
+
+  test('secondary metadata stays truthfulness-safe for sparse route evidence', () => {
+    const sparse = {
+      ...route,
+      slug: 'cgd-dub',
+      origin_city: 'Changde',
+      origin_iata: 'CGD',
+      destination_city: 'Dublin',
+      destination_iata: 'DUB',
+      distance_km: 9084,
+      haul_type: 'long-haul',
+      airline_count: 5,
+      itinerary_count: null,
+      avg_duration_min: null,
+      min_duration_min: null,
+      price_min: 542.23,
+      price_max: 542.23,
+      price_avg: 542.23,
+      price_currency: 'EUR',
+      price_trend: null,
+      price_sample_count: 1,
+      direct_flight_available: null,
+      all_direct: null,
+      stop_distribution: null,
+    };
+    for (const language of ['en', 'fr', 'es', 'it', 'nl', 'tr']) {
+      const result = generateRoutePage(sparse, language);
+      expect(result.skipped).toBe(false);
+      expect(result.content.title.length).toBeGreaterThanOrEqual(30);
+      expect(result.content.title.length).toBeLessThanOrEqual(70);
+      expect(result.content.metaDescription.length).toBeGreaterThanOrEqual(90);
+      expect(result.content.metaDescription.length).toBeLessThanOrEqual(170);
+      expect(validateGeneratedSeo(sparse, result.content).valid).toBe(true);
+    }
   });
 
   test('secondary locales are not blocked by German manual content', () => {
