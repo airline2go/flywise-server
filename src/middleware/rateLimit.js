@@ -5,6 +5,7 @@
 
 const redis = require('../clients/redis');
 const log = require('../utils/log');
+const { clientIp } = require('../utils/clientIp');
 
 const rlStore = new Map();
 
@@ -41,14 +42,7 @@ async function consumeRateLimit(bucket, key, max, windowMs) {
 }
 
 function getClientKey(req) {
-  // Render terminates the public proxy. Do not trust an arbitrary
-  // comma-separated client-supplied chain; use the left-most forwarded IP
-  // only when it is present, otherwise fall back to the socket address.
-  const forwarded = req.headers['x-forwarded-for'];
-  const forwardedIp = typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : '';
-  const socketIp = req.socket?.remoteAddress || '';
-  const ip = forwardedIp || socketIp || 'unknown';
-  return ip.slice(0, 64);
+  return clientIp(req).slice(0, 64);
 }
 
 function rateLimit(bucket, max, windowMs) {
@@ -72,3 +66,5 @@ if (_rlCleanup.unref) _rlCleanup.unref();
 
 module.exports = rateLimit;
 module.exports.consumeRateLimit = consumeRateLimit;
+module.exports.getClientKey = getClientKey;
+
