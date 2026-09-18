@@ -1,4 +1,8 @@
-jest.mock('../src/middleware/rateLimit', () => () => (req, res, next) => next());
+jest.mock('../src/middleware/rateLimit', () => (bucket, max, windowMs) => {
+  global.__airpivRateLimitCalls = global.__airpivRateLimitCalls || [];
+  global.__airpivRateLimitCalls.push({ bucket, max, windowMs });
+  return (req, res, next) => next();
+});
 const mockEnv = {
   ALLOWED_ORIGINS: ['https://airpiv.com', 'https://www.airpiv.com'],
   EDGE_SHARED_SECRET: '',
@@ -17,6 +21,10 @@ function buildApp() {
 }
 
 describe('apiAccessShield', () => {
+  beforeEach(() => {
+    global.__airpivRateLimitCalls = [];
+  });
+
   afterEach(() => {
     mockEnv.EDGE_SHARED_SECRET = '';
   });
@@ -50,6 +58,14 @@ describe('apiAccessShield', () => {
       .set('User-Agent', 'Mozilla/5.0')
       .set('Authorization', 'Bearer test-token');
     expect(res.status).toBe(200);
+  });
+
+  test('configures a separate higher rate budget for trusted server GETs', () => {
+    buildApp();
+    expect(global.__airpivRateLimitCalls).toEqual(expect.arrayContaining([
+      { bucket: 'api-edge-server-burst', max: 240, windowMs: 10000 },
+      { bucket: 'api-edge-server-sustained', max: 2400, windowMs: 60000 },
+    ]));
   });
 
   test.each(['next.js/16.2.10', 'node/22.0.0', 'undici'])('allows trusted server GETs with supported UA: %s', async (userAgent) => {

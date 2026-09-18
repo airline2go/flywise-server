@@ -53,6 +53,12 @@ function hasValidEdgeSecret(req) {
 function shield(app) {
   const burst = rateLimit('api-edge-burst', 45, 10000);
   const sustained = rateLimit('api-edge-sustained', 240, 60000);
+  // Vercel/Next server-side GETs share a small egress-IP pool. Keep them
+  // authenticated/provenance-gated as above, but give that trusted path a
+  // higher distributed budget so normal SEO prerender/crawl bursts do not
+  // turn backend 429s into frontend 500s.
+  const trustedServerBurst = rateLimit('api-edge-server-burst', 240, 10000);
+  const trustedServerSustained = rateLimit('api-edge-server-sustained', 2400, 60000);
 
   app.use((req, res, next) => {
     if (EXEMPT_PATHS.has(req.path) || EXEMPT_PREFIXES.some((p) => req.path.startsWith(p))) return next();
@@ -79,13 +85,18 @@ function shield(app) {
       return res.status(403).json({ ok: false, error: 'API access is restricted.' });
     }
 
-    return next();
+    // Trusted Next.js/Vercel GETs are still subject to distributed limits,
+    // just a separate higher budget appropriate for shared server egress IPs.
+    if (hasTrustedServerProvenance(req)) {
+      return trustedServerBurst(req, res, () => trustedServerSustained(req, res, next));
+    }
+
+    // Normal browser/service traffic keeps the stricter global shield.
+    return burst(req, res, () => sustained(req, res, next));
   });
 
   // Rejected scanners do not consume Redis counters. Endpoint-specific limits
   // still apply later for sensitive/expensive operations.
-  app.use(burst);
-  app.use(sustained);
 }
 
 module.exports = shield;
