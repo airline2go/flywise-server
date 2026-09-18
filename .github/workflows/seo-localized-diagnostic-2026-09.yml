@@ -15,9 +15,10 @@ jobs:
     timeout-minutes: 10
     env:
       ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
-      API_BASE: https://flywise-server-eu.onrender.com
+      API_BASE: https://api.airpiv.com
+      BROWSER_UA: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
     steps:
-      - name: Probe direct Render backend endpoint
+      - name: Probe API endpoint with browser-shaped user agent
         shell: bash
         run: |
           set -u
@@ -29,6 +30,7 @@ jobs:
             echo "--- POST dry-run en ---"
             http_code="$(curl --silent --show-error --output diagnostic/post.json --write-out '%{http_code}' \
               --request POST \
+              --user-agent "$BROWSER_UA" \
               --header "Authorization: Bearer ${ADMIN_TOKEN:-}" \
               --header "Accept: application/json" \
               --header "Content-Type: application/json" \
@@ -43,6 +45,7 @@ jobs:
               echo "poll=$i timestamp=$(date -u +%FT%TZ)"
               curl --silent --show-error \
                 --request GET \
+                --user-agent "$BROWSER_UA" \
                 --header "Authorization: Bearer ${ADMIN_TOKEN:-}" \
                 --header "Accept: application/json" \
                 "$API_BASE/admin/seo/localized-batch-status" \
@@ -58,6 +61,6 @@ jobs:
       - name: Upload diagnostic evidence
         uses: actions/upload-artifact@v4
         with:
-          name: seo-localized-diagnostic-direct
+          name: seo-localized-diagnostic-browser-ua
           path: diagnostic/
           if-no-files-found: error
