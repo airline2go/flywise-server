@@ -61,6 +61,7 @@ jobs:
           curl --fail-with-body --silent --show-error \
             --request POST \
             --header "Authorization: Bearer $ADMIN_TOKEN" \
+            --header "User-Agent: AirpivAdminCI/1.0 (+https://airpiv.com)" \
             --header "Accept: application/json" \
             --header "Content-Type: application/json" \
             --data '{"dry_run":true,"force":false}' \
@@ -70,6 +71,7 @@ jobs:
           for i in $(seq 1 180); do
             body="$(curl --fail-with-body --silent --show-error \
               --header "Authorization: Bearer $ADMIN_TOKEN" \
+              --header "User-Agent: AirpivAdminCI/1.0 (+https://airpiv.com)" \
               --header "Accept: application/json" \
               https://api.airpiv.com/admin/seo/batch-status)"
 
