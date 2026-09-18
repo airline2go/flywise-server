@@ -20,6 +20,7 @@ jobs:
     env:
       ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
       API_BASE: https://api.airpiv.com
+      BROWSER_UA: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
     steps:
       - name: Preflight and bounded localized SEO refresh
         shell: bash
@@ -36,6 +37,7 @@ jobs:
             local before before_finished before_started
             before="$(curl --fail-with-body --silent --show-error \
               --request GET \
+              --user-agent "$BROWSER_UA" \
               --header "Authorization: Bearer $ADMIN_TOKEN" \
               --header "Accept: application/json" \
               "$API_BASE/admin/seo/localized-batch-status")"
@@ -45,6 +47,7 @@ jobs:
             echo "Submitting lang=$lang offset=$offset limit=$limit dry_run=$dry_run"
             response="$(curl --fail-with-body --silent --show-error \
               --request POST \
+              --user-agent "$BROWSER_UA" \
               --header "Authorization: Bearer $ADMIN_TOKEN" \
               --header "Accept: application/json" \
               --header "Content-Type: application/json" \
@@ -56,6 +59,7 @@ jobs:
             for _ in $(seq 1 360); do
               status="$(curl --fail-with-body --silent --show-error \
                 --request GET \
+                --user-agent "$BROWSER_UA" \
                 --header "Authorization: Bearer $ADMIN_TOKEN" \
                 --header "Accept: application/json" \
                 "$API_BASE/admin/seo/localized-batch-status")"
