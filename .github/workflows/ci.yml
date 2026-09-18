@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Run authenticated core-only SEO dry run
+      - name: Regenerate audited stale core route
         env:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
         run: |
@@ -56,20 +56,4 @@ jobs:
             exit 1
           fi
 
-          curl --fail-with-body --silent --show-error             --request POST             --header "Authorization: Bearer $ADMIN_TOKEN"             --header "User-Agent: AirpivAdminCI/1.0 (+https://airpiv.com)"             --header "Accept: application/json"             --header "Content-Type: application/json"             --data '{"dry_run":false,"force":false}'             https://api.airpiv.com/admin/seo/batch-generate
-
-          for i in $(seq 1 180); do
-            body="$(curl --fail-with-body --silent --show-error               --header "Authorization: Bearer $ADMIN_TOKEN"               --header "User-Agent: AirpivAdminCI/1.0 (+https://airpiv.com)"               --header "Accept: application/json"               https://api.airpiv.com/admin/seo/batch-status)"
-            echo "=== Batch status poll $i ==="
-            echo "$body" | jq .
-            running="$(echo "$body" | jq -r '.running // false')"
-            if [ "$running" = "false" ]; then
-              echo "=== Final summary ==="
-              echo "$body" | jq '.summary // {}'
-              exit 0
-            fi
-            sleep 4
-          done
-
-          echo "SEO batch dry-run did not finish within polling window" >&2
-          exit 1
+          curl --fail-with-body --silent --show-error             --request POST             --header "Authorization: Bearer $ADMIN_TOKEN"             --header "User-Agent: AirpivAdminCI/1.0 (+https://airpiv.com)"             --header "Accept: application/json"             --header "Content-Type: application/json"             --data '{"language":"de","dry_run":false,"force":true}'             https://api.airpiv.com/admin/seo/route/d82801b2-26d9-494c-819b-26c6d67aa6fd | jq .
