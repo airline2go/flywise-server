@@ -1,5 +1,6 @@
 // Route SEO engine: evidence-first, deterministic assembly, locale-aware packs.
 const { makeRng, pick, buildContext } = require('./compose');
+const { generatedFieldIsSafe } = require('./truthfulness');
 const { makePack } = require('./blocks.secondary');
 const { makeArabicPack } = require('./blocks.ar');
 const de = require('./blocks.de');
@@ -43,8 +44,19 @@ function chooseAngle(c, rng, INTRO_ANGLES) {
   const scores = scoreAngles(c);
   const ranked = Object.entries(scores).filter(([k]) => INTRO_ANGLES[k])
     .sort((a,b) => (b[1]-a[1]) || (ANGLE_TIEBREAK.indexOf(a[0])-ANGLE_TIEBREAK.indexOf(b[0])));
-  const angle = ranked.length ? ranked[0][0] : 'traveler';
-  return { angle, intro: pick(rng, INTRO_ANGLES[angle])(c) };
+
+  for (const [angle] of ranked) {
+    const candidates = INTRO_ANGLES[angle]
+      .map((fn) => tidy(fn(c)))
+      .filter((intro) => generatedFieldIsSafe(c, intro));
+    if (candidates.length) return { angle, intro: pick(rng, candidates) };
+  }
+
+  const fallbackCandidates = [
+    c.o + '–' + c.d + ' ist eine veröffentlichte Flugverbindung im Airpiv-Routenkatalog.',
+    c.o + ' und ' + c.d + ' sind im aktuellen Airpiv-Routenkatalog als Flugverbindung erfasst.',
+  ].filter((text) => generatedFieldIsSafe(c, text));
+  return { angle: 'traveler', intro: pick(rng, fallbackCandidates) };
 }
 const ANGLE_TO_BLOCK = { price:'price-analysis', airline:'airline-analysis', business:'direct-analysis', destination:'popularity', seasonal:'seasonal', airport:'airport-detail' };
 function assembleSections(c, rng, BLOCKS, openingBlockId) {
@@ -52,13 +64,17 @@ function assembleSections(c, rng, BLOCKS, openingBlockId) {
   const overview = applicable.find((b) => b.id === 'overview');
   const rest = applicable.filter((b) => b.id !== 'overview' && b.id !== openingBlockId)
     .sort((a,b) => (b.weight(c)-a.weight(c)) || a.id.localeCompare(b.id));
-  return (overview ? [overview,...rest] : rest).map((b) => b.render(c,rng)).filter((s)=>s&&s.body&&s.body.trim());
+  return (overview ? [overview,...rest] : rest)
+    .map((b) => b.render(c,rng))
+    .filter((s) => s && s.body && s.body.trim())
+    .filter((s) => generatedFieldIsSafe(c, (s.heading || '') + ' ' + (s.body || '')));
 }
 const FAQ_ORDER = ['duration','price-from','direct','airlines','book-when','cheaper-months','weekend'];
 function assembleFaq(c, candidates) {
   return candidates.filter((f)=>f.applicable(c)).sort((a,b)=>{
     const ia=FAQ_ORDER.indexOf(a.id), ib=FAQ_ORDER.indexOf(b.id); return (ia===-1?99:ia)-(ib===-1?99:ib);
-  }).map((f)=>({question:f.q(c),answer:f.a(c)}));
+  }).map((f)=>({question:f.q(c),answer:f.a(c)}))
+    .filter((faq) => generatedFieldIsSafe(c, faq.question + ' ' + faq.answer));
 }
 function generateRoutePage(route, language='de', sources={}) {
   const allowManual = language !== 'de';
