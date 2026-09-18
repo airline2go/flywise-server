@@ -1,3 +1,4 @@
+// [SEO-TRUTHFULNESS-REGRESSION] Representative generated German pages must pass the persistence quality gate.
 const { generateRoutePage, assessEligibility, hasManualContent, supportedLanguages } = require('../src/services/seo/engine');
 const { validateGeneratedSeo } = require('../src/services/seo/quality');
 const { similarityReport, pageSimilarity } = require('../src/services/seo/similarity');
