@@ -29,6 +29,23 @@ describe('multilingual route SEO', () => {
     expect(result.content.faq.length).toBeGreaterThanOrEqual(3);
   });
 
+  test('secondary locales can render evidence-backed routes without distance', () => {
+    const missingDistance = {
+      ...route,
+      slug: 'madrid-alicante',
+      distance_km: null,
+      avg_duration_min: 101,
+      min_duration_min: 70,
+      itinerary_count: 56,
+      price_sample_count: 13,
+    };
+    for (const language of ['en', 'fr', 'es', 'it', 'nl', 'tr']) {
+      const result = generateRoutePage(missingDistance, language);
+      expect(result.skipped).toBe(false);
+      expect(validateGeneratedSeo(missingDistance, result.content).valid).toBe(true);
+    }
+  });
+
   test('secondary metadata stays truthfulness-safe for sparse route evidence', () => {
     const sparse = {
       ...route,
