@@ -61,7 +61,7 @@ describe('multilingual route SEO', () => {
       ...result.content.faq.map((item) => item.question + ' ' + item.answer),
     ].join(' ');
     expect(text).not.toMatch(/Observed flight time|are represented in the route data|Direct and connecting options|Check terminal and ground-transport/i);
-    expect(text).not.toMatch(/\bStd\.\b|\bMin\.\b/);
+    expect(text).not.toMatch(/\bStd\.\b|\bMin\.\b|\bshort-haul\b|\bmedium-haul\b|\blong-haul\b/);
   });
 
 });
