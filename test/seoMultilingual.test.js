@@ -60,7 +60,7 @@ describe('multilingual route SEO', () => {
       expect(result.content.title.length).toBeLessThanOrEqual(70);
       expect(result.content.metaDescription.length).toBeGreaterThanOrEqual(90);
       expect(result.content.metaDescription.length).toBeLessThanOrEqual(170);
-      const quality = validateGeneratedSeo(sparse, result.content); if (!quality.valid) console.log('SPARSE_QUALITY_DEBUG', language, quality.reasons, result.content); expect(quality.valid).toBe(true);
+      expect(validateGeneratedSeo(sparse, result.content).valid).toBe(true);
     }
   });
 
