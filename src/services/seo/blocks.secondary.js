@@ -22,6 +22,16 @@ function makePack(lang){const l=LOCALE[lang];if(!l)return null;function formatDu
   return h ? (m ? h + ' h ' + m + ' min' : h + ' h') : m + ' min';
 }
 
+const haulLabels = {
+  en: { 'short-haul': 'short-haul', 'medium-haul': 'medium-haul', 'long-haul': 'long-haul' },
+  fr: { 'short-haul': 'court-courrier', 'medium-haul': 'moyen-courrier', 'long-haul': 'long-courrier' },
+  es: { 'short-haul': 'corta distancia', 'medium-haul': 'media distancia', 'long-haul': 'larga distancia' },
+  it: { 'short-haul': 'corto raggio', 'medium-haul': 'medio raggio', 'long-haul': 'lungo raggio' },
+  nl: { 'short-haul': 'korte afstand', 'medium-haul': 'middellange afstand', 'long-haul': 'lange afstand' },
+  tr: { 'short-haul': 'kısa mesafe', 'medium-haul': 'orta mesafe', 'long-haul': 'uzun mesafe' },
+}[lang] || {};
+const haulLabel = c => haulLabels[c.haul] || c.haul;
+
 const airPlural = {
   en: 'airlines',
   fr: 'compagnies aériennes',
@@ -32,11 +42,11 @@ const airPlural = {
 }[lang] || l.air;
 
 const overviewCopy = {
-  en: c => c.o + ' and ' + c.d + ' are about ' + Math.round(c.km) + ' km apart by air. ' + (formatDuration(lang, c.durMin) ? 'Observed flight time is around ' + formatDuration(lang, c.durMin) + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' are represented in the route data. ' : '') + 'The route is classified as ' + c.haul + '.',
-  fr: c => c.o + ' et ' + c.d + ' sont séparées d’environ ' + Math.round(c.km) + ' km à vol d’oiseau. ' + (formatDuration(lang, c.durMin) ? 'La durée de vol observée est d’environ ' + formatDuration(lang, c.durMin) + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' apparaissent dans les données de la liaison. ' : '') + 'La liaison est classée comme ' + c.haul + '.',
-  es: c => c.o + ' y ' + c.d + ' están a unos ' + Math.round(c.km) + ' km de distancia por aire. ' + (formatDuration(lang, c.durMin) ? 'El tiempo de vuelo observado es de unos ' + formatDuration(lang, c.durMin) + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' aparecen en los datos de la ruta. ' : '') + 'La ruta está clasificada como ' + c.haul + '.',
-  it: c => c.o + ' e ' + c.d + ' distano circa ' + Math.round(c.km) + ' km in linea d’aria. ' + (formatDuration(lang, c.durMin) ? 'Il tempo di volo osservato è di circa ' + formatDuration(lang, c.durMin) + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' sono presenti nei dati della rotta. ' : '') + 'La rotta è classificata come ' + c.haul + '.',
-  nl: c => c.o + ' en ' + c.d + ' liggen ongeveer ' + Math.round(c.km) + ' km van elkaar over de lucht. ' + (formatDuration(lang, c.durMin) ? 'De waargenomen vliegtijd is ongeveer ' + formatDuration(lang, c.durMin) + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' zijn in de routegegevens vertegenwoordigd. ' : '') + 'De route is ingedeeld als ' + c.haul + '.',
+  en: c => c.o + ' and ' + c.d + ' are about ' + Math.round(c.km) + ' km apart by air. ' + (formatDuration(lang, c.durMin) ? 'Observed flight time is around ' + formatDuration(lang, c.durMin) + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' are represented in the route data. ' : '') + 'The route is classified as ' + haulLabel(c) + '.',
+  fr: c => c.o + ' et ' + c.d + ' sont séparées d’environ ' + Math.round(c.km) + ' km à vol d’oiseau. ' + (formatDuration(lang, c.durMin) ? 'La durée de vol observée est d’environ ' + formatDuration(lang, c.durMin) + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' apparaissent dans les données de la liaison. ' : '') + 'La liaison est classée comme ' + haulLabel(c) + '.',
+  es: c => c.o + ' y ' + c.d + ' están a unos ' + Math.round(c.km) + ' km de distancia por aire. ' + (formatDuration(lang, c.durMin) ? 'El tiempo de vuelo observado es de unos ' + formatDuration(lang, c.durMin) + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' aparecen en los datos de la ruta. ' : '') + 'La ruta está clasificada como ' + haulLabel(c) + '.',
+  it: c => c.o + ' e ' + c.d + ' distano circa ' + Math.round(c.km) + ' km in linea d’aria. ' + (formatDuration(lang, c.durMin) ? 'Il tempo di volo osservato è di circa ' + formatDuration(lang, c.durMin) + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' sono presenti nei dati della rotta. ' : '') + 'La rotta è classificata come ' + haulLabel(c) + '.',
+  nl: c => c.o + ' en ' + c.d + ' liggen ongeveer ' + Math.round(c.km) + ' km van elkaar over de lucht. ' + (formatDuration(lang, c.durMin) ? 'De waargenomen vliegtijd is ongeveer ' + formatDuration(lang, c.durMin) + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' zijn in de routegegevens vertegenwoordigd. ' : '') + 'De route is ingedeeld als ' + haulLabel(c) + '.',
   tr: c => c.o + ' ile ' + c.d + ' kuş uçuşu yaklaşık ' + Math.round(c.km) + ' km uzaklıktadır. ' + (formatDuration(lang, c.durMin) ? 'Gözlemlenen uçuş süresi yaklaşık ' + formatDuration(lang, c.durMin) + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' rota verilerinde yer alıyor. ' : '') + 'Rota ' + c.haul + ' olarak sınıflandırılmıştır.',
 }[lang];
 
