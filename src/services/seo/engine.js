@@ -3,6 +3,7 @@ const { makeRng, pick, buildContext } = require('./compose');
 const { makePack } = require('./blocks.secondary');
 const { makeArabicPack } = require('./blocks.ar');
 const { buildSecondaryTitle, buildSecondaryMeta, buildSecondaryIntro } = require('./secondaryMetadata');
+const { generatedFieldIsSafe } = require('./truthfulness');
 const de = require('./blocks.de');
 
 const SECONDARY = ['en', 'fr', 'es', 'it', 'nl', 'tr', 'ar'];
@@ -61,6 +62,28 @@ function assembleFaq(c, candidates) {
     const ia=FAQ_ORDER.indexOf(a.id), ib=FAQ_ORDER.indexOf(b.id); return (ia===-1?99:ia)-(ib===-1?99:ib);
   }).map((f)=>({question:f.q(c),answer:f.a(c)}));
 }
+function safeSecondarySection(route, language) {
+  const labels = {
+    en: { heading: 'Route information', body: 'Review the stored route information for ' + route.origin_city + ' and ' + route.destination_city + ' shown on this page.' },
+    fr: { heading: 'Informations sur la route', body: 'Consultez les informations enregistrées pour la liaison entre ' + route.origin_city + ' et ' + route.destination_city + ' affichées sur cette page.' },
+    es: { heading: 'Información de la ruta', body: 'Consulta la información registrada de la ruta entre ' + route.origin_city + ' y ' + route.destination_city + ' que aparece en esta página.' },
+    it: { heading: 'Informazioni sulla rotta', body: 'Consulta le informazioni registrate sulla rotta tra ' + route.origin_city + ' e ' + route.destination_city + ' mostrate in questa pagina.' },
+    nl: { heading: 'Route-informatie', body: 'Controleer de opgeslagen route-informatie voor ' + route.origin_city + ' en ' + route.destination_city + ' op deze pagina.' },
+    tr: { heading: 'Rota bilgileri', body: route.origin_city + ' ile ' + route.destination_city + ' için bu sayfada gösterilen kayıtlı rota bilgilerini inceleyin.' },
+  };
+  return labels[language] || labels.en;
+}
+function safeSecondaryFaq(route, language) {
+  const labels = {
+    en: { question: 'What route information is shown on this page?', answer: 'Use the stored route information for ' + route.origin_city + ' and ' + route.destination_city + ' shown on this page.' },
+    fr: { question: 'Quelles informations de route sont affichées sur cette page ?', answer: 'Utilisez les informations de route enregistrées pour ' + route.origin_city + ' et ' + route.destination_city + ' affichées sur cette page.' },
+    es: { question: '¿Qué información de la ruta aparece en esta página?', answer: 'Usa la información registrada de la ruta entre ' + route.origin_city + ' y ' + route.destination_city + ' que aparece en esta página.' },
+    it: { question: 'Quali informazioni sulla rotta sono mostrate in questa pagina?', answer: 'Usa le informazioni registrate sulla rotta tra ' + route.origin_city + ' e ' + route.destination_city + ' mostrate in questa pagina.' },
+    nl: { question: 'Welke route-informatie staat op deze pagina?', answer: 'Gebruik de opgeslagen routegegevens voor ' + route.origin_city + ' en ' + route.destination_city + ' die op deze pagina staan.' },
+    tr: { question: 'Bu sayfada hangi rota bilgileri gösteriliyor?', answer: route.origin_city + ' ve ' + route.destination_city + ' için bu sayfada gösterilen kayıtlı rota bilgilerini kullanın.' },
+  };
+  return labels[language] || labels.en;
+}
 function generateRoutePage(route, language='de', sources={}) {
   const allowManual = language !== 'de';
   const gate = assessEligibility(route, { allowManual });
@@ -72,8 +95,14 @@ function generateRoutePage(route, language='de', sources={}) {
   const {angle,intro:introRaw}=chooseAngle(c,rng,pack.INTRO_ANGLES);
   const openingBlockId=ANGLE_TO_BLOCK[angle]||null;
   const intro=language !== 'de' && language !== 'ar' ? buildSecondaryIntro(route, language) : tidy(introRaw);
-  const sections=assembleSections(c,rng,pack.BLOCKS,openingBlockId).map((s)=>({heading:tidy(s.heading),body:tidy(s.body)}));
-  const faq=assembleFaq(c,pack.FAQ_CANDIDATES).map((f)=>({question:tidy(f.question),answer:tidy(f.answer)}));
+  let sections=assembleSections(c,rng,pack.BLOCKS,openingBlockId).map((s)=>({heading:tidy(s.heading),body:tidy(s.body)}));
+  let faq=assembleFaq(c,pack.FAQ_CANDIDATES).map((f)=>({question:tidy(f.question),answer:tidy(f.answer)}));
+  if (language !== 'de' && language !== 'ar') {
+    sections = sections.map((section) => generatedFieldIsSafe(route, (section.heading || '') + ' ' + (section.body || ''))
+      ? section : safeSecondarySection(route, language));
+    faq = faq.map((item) => generatedFieldIsSafe(route, (item.question || '') + ' ' + (item.answer || ''))
+      ? item : safeSecondaryFaq(route, language));
+  }
   const title=language !== 'de' && language !== 'ar'
     ? buildSecondaryTitle(route, language)
     : tidy(pick(rng,pack.TITLES)(c));
