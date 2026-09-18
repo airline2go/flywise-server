@@ -1,4 +1,5 @@
 const log = require('../utils/log');
+const crypto = require('crypto');
 const redis = require('../clients/redis');
 const rateLimit = require('../middleware/rateLimit');
 const { requireAdmin, attachUserIfPresent } = require('../middleware/auth');
@@ -332,10 +333,28 @@ app.get('/debug/raw', requireAdmin, rateLimit('pay', 10, 60000), async (req, res
 });
 
 const SEARCH_CACHE_TTL_MS = 120000;
+const SEARCH_CACHE_PREFIX = 'search_cache:v2:';
+const SEARCH_LOCK_PREFIX = 'search_lock:v1:';
+const SEARCH_LOCK_TTL_MS = 30000;
+const SEARCH_LOCK_RENEW_INTERVAL_MS = 10000;
+const SEARCH_LOCK_WAIT_MS = 15000;
+const SEARCH_LOCK_POLL_MS = 100;
+const SEARCH_LOCK_RELEASE_SCRIPT = 'if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end';
+const SEARCH_LOCK_RENEW_SCRIPT = 'if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("PEXPIRE", KEYS[1], ARGV[2]) else return 0 end';
+
+function redisReady() {
+  return !!(redis && redis.status === 'ready');
+}
+function searchCacheRedisKey(cacheKey) {
+  return SEARCH_CACHE_PREFIX + cacheKey;
+}
+function searchLockRedisKey(cacheKey) {
+  return SEARCH_LOCK_PREFIX + cacheKey;
+}
 async function getSharedSearchCache(cacheKey) {
-  if (!redis || redis.status !== 'ready') return null;
+  if (!redisReady()) return null;
   try {
-    const raw = await redis.get('search_cache:v2:' + cacheKey);
+    const raw = await redis.get(searchCacheRedisKey(cacheKey));
     if (!raw) return null;
     return JSON.parse(raw);
   } catch (e) {
@@ -343,16 +362,127 @@ async function getSharedSearchCache(cacheKey) {
   }
 }
 async function setSharedSearchCache(cacheKey, data) {
-  if (!redis || redis.status !== 'ready') return;
+  if (!redisReady()) return;
   try {
-    await redis.set('search_cache:v2:' + cacheKey, JSON.stringify(data), 'EX', Math.ceil(SEARCH_CACHE_TTL_MS / 1000));
+    await redis.set(searchCacheRedisKey(cacheKey), JSON.stringify(data), 'EX', Math.ceil(SEARCH_CACHE_TTL_MS / 1000));
   } catch (e) { /* cache is best-effort */ }
 }
+async function acquireSearchLock(cacheKey) {
+  if (!redisReady()) return { state: 'unavailable' };
+  const token = crypto.randomUUID();
+  try {
+    const result = await redis.set(searchLockRedisKey(cacheKey), token, 'PX', SEARCH_LOCK_TTL_MS, 'NX');
+    return result === 'OK' ? { state: 'acquired', token } : { state: 'held' };
+  } catch (e) {
+    return { state: 'unavailable' };
+  }
+}
+async function releaseSearchLock(cacheKey, token) {
+  if (!token || !redisReady()) return;
+  try {
+    await redis.eval(SEARCH_LOCK_RELEASE_SCRIPT, 1, searchLockRedisKey(cacheKey), token);
+  } catch (e) { /* lock expires safely if Redis is unavailable */ }
+}
+function keepSearchLockAlive(cacheKey, token) {
+  if (!token) return () => {};
+  const timer = setInterval(() => {
+    if (!redisReady()) return;
+    redis.eval(SEARCH_LOCK_RENEW_SCRIPT, 1, searchLockRedisKey(cacheKey), token, SEARCH_LOCK_TTL_MS)
+      .catch(() => {});
+  }, SEARCH_LOCK_RENEW_INTERVAL_MS);
+  if (typeof timer.unref === 'function') timer.unref();
+  return () => clearInterval(timer);
+}
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+async function waitForSharedSearchCache(cacheKey) {
+  const deadline = Date.now() + SEARCH_LOCK_WAIT_MS;
+  while (Date.now() < deadline && redisReady()) {
+    await wait(SEARCH_LOCK_POLL_MS);
+    const cached = await getSharedSearchCache(cacheKey);
+    if (cached) return cached;
+  }
+  return null;
+}
 const _searchCache = new Map();
+const _searchInFlight = new Map();
 setInterval(() => {
   const cutoff = Date.now() - SEARCH_CACHE_TTL_MS;
   for (const [k, v] of _searchCache) { if (v.t < cutoff) _searchCache.delete(k); }
 }, SEARCH_CACHE_TTL_MS).unref();
+
+function rememberSearchResponse(cacheKey, data) {
+  _searchCache.set(cacheKey, { t: Date.now(), data });
+  return data;
+}
+
+async function getOrCreateSearchResponse(cacheKey, createResponse) {
+  const inFlight = _searchInFlight.get(cacheKey);
+  if (inFlight) return inFlight;
+
+  const flight = (async () => {
+    const sharedCached = await getSharedSearchCache(cacheKey);
+    if (sharedCached) return rememberSearchResponse(cacheKey, sharedCached);
+
+    const lock = await acquireSearchLock(cacheKey);
+    if (lock.state === 'held') {
+      const waitedCached = await waitForSharedSearchCache(cacheKey);
+      if (waitedCached) return rememberSearchResponse(cacheKey, waitedCached);
+      const err = new Error('Search is already in progress. Please try again shortly.');
+      err.status = 503;
+      throw err;
+    }
+
+    if (lock.state === 'unavailable') return createResponse();
+
+    const stopLockRenewal = keepSearchLockAlive(cacheKey, lock.token);
+    try {
+      // A different instance can finish between the first cache read and lock acquisition.
+      const cachedAfterLock = await getSharedSearchCache(cacheKey);
+      if (cachedAfterLock) return rememberSearchResponse(cacheKey, cachedAfterLock);
+      return await createResponse();
+    } finally {
+      stopLockRenewal();
+      await releaseSearchLock(cacheKey, lock.token);
+    }
+  })();
+
+  _searchInFlight.set(cacheKey, flight);
+  try {
+    return await flight;
+  } finally {
+    if (_searchInFlight.get(cacheKey) === flight) _searchInFlight.delete(cacheKey);
+  }
+}
+
+async function fetchAndCacheSearch(req, cacheKey, slices, passengers, cabin_class) {
+  const result = await duffel('POST', '/air/offer_requests?return_offers=true&supplier_timeout=8000', {
+    data: { slices, passengers, cabin_class },
+  }, null, duffelSearchOpts(req, 'user_search', ROUTE_PRICE_DUFFEL_OPTS));
+
+  const ticketTiers = await getTicketProfitTiers();
+  const rawOffers = result.data?.offers || [];
+  const carrierCodes = [...new Set(rawOffers
+    .map((o) => o?.slices?.[0]?.segments?.[0]?.marketing_carrier?.iata_code)
+    .filter(Boolean))];
+  let fareRulesByAirline = {};
+  try {
+    fareRulesByAirline = await getFareRulesByAirlines(carrierCodes);
+  } catch (_) { fareRulesByAirline = {}; }
+  const offers = rawOffers.map((o) => normalizeOffer(o, ticketTiers, fareRulesByAirline));
+  try {
+    for (const off of offers) {
+      if (off && off.baggage) logBaggageResolution(off.id, off.baggage.meta && off.baggage.meta.ctx || {}, off.baggage);
+    }
+  } catch (_) { /* observability must never break search */ }
+
+  const responseData = { ok: true, offer_request_id: result.data?.id, offers, total: offers.length };
+  rememberSearchResponse(cacheKey, responseData);
+  await setSharedSearchCache(cacheKey, responseData);
+  incrementDailyPriceCheckCounter();
+  return responseData;
+}
 
 app.post('/search', attachUserIfPresent, searchGuard({
   bucket: 'search', source: 'user_search',
@@ -374,6 +504,8 @@ app.post('/search', attachUserIfPresent, searchGuard({
         departure_date: String(s?.departure_date || '').trim(),
       }))
       : null;
+    const validNormalizedSlices = normalizedSlices && normalizedSlices
+      .filter((s) => s.origin && s.destination && s.departure_date);
     const searchCacheKey = JSON.stringify({
       origin: String(origin || '').trim().toUpperCase(),
       destination: String(destination || '').trim().toUpperCase(),
@@ -383,7 +515,7 @@ app.post('/search', attachUserIfPresent, searchGuard({
       adults: Number(adults) || 1,
       children: Number(children) || 0,
       infants: Number(infants) || 0,
-      bodySlices: normalizedSlices,
+      bodySlices: validNormalizedSlices,
     });
     const cachedSearch = _searchCache.get(searchCacheKey);
     if (cachedSearch && (Date.now() - cachedSearch.t) < SEARCH_CACHE_TTL_MS) {
@@ -391,8 +523,7 @@ app.post('/search', attachUserIfPresent, searchGuard({
     }
     const sharedCachedSearch = await getSharedSearchCache(searchCacheKey);
     if (sharedCachedSearch) {
-      _searchCache.set(searchCacheKey, { t: Date.now(), data: sharedCachedSearch });
-      return res.json(sharedCachedSearch);
+      return res.json(rememberSearchResponse(searchCacheKey, sharedCachedSearch));
     }
 
     const passengers = [];
@@ -402,9 +533,7 @@ app.post('/search', attachUserIfPresent, searchGuard({
 
     let slices;
     if (Array.isArray(bodySlices) && bodySlices.length) {
-      slices = bodySlices
-        .filter((s) => s && s.origin && s.destination && s.departure_date)
-        .map((s) => ({ origin: s.origin, destination: s.destination, departure_date: s.departure_date }));
+      slices = validNormalizedSlices;
       if (!slices.length) {
         return res.status(400).json({ ok: false, error: 'slices غير صالحة (origin/destination/departure_date مطلوبة لكل مقطع)' });
       }
@@ -416,31 +545,10 @@ app.post('/search', attachUserIfPresent, searchGuard({
       if (return_date) slices.push({ origin: destination, destination: origin, departure_date: return_date });
     }
 
-    const result = await duffel('POST', '/air/offer_requests?return_offers=true&supplier_timeout=8000', {
-      data: { slices, passengers, cabin_class },
-    }, null, duffelSearchOpts(req, 'user_search', ROUTE_PRICE_DUFFEL_OPTS));
-
-    const ticketTiers = await getTicketProfitTiers();
-    const rawOffers = result.data?.offers || [];
-    const carrierCodes = [...new Set(rawOffers
-      .map((o) => o?.slices?.[0]?.segments?.[0]?.marketing_carrier?.iata_code)
-      .filter(Boolean))];
-    let fareRulesByAirline = {};
-    try {
-      fareRulesByAirline = await getFareRulesByAirlines(carrierCodes);
-    } catch (_) { fareRulesByAirline = {}; }
-    const offers = rawOffers.map((o) => normalizeOffer(o, ticketTiers, fareRulesByAirline));
-    try {
-      for (const off of offers) {
-        if (off && off.baggage) logBaggageResolution(off.id, off.baggage.meta && off.baggage.meta.ctx || {}, off.baggage);
-      }
-    } catch (_) { /* observability must never break search */ }
-
-    const responseData = { ok: true, offer_request_id: result.data?.id, offers, total: offers.length };
-    _searchCache.set(searchCacheKey, { t: Date.now(), data: responseData });
-    await setSharedSearchCache(searchCacheKey, responseData);
+    const responseData = await getOrCreateSearchResponse(searchCacheKey, () =>
+      fetchAndCacheSearch(req, searchCacheKey, slices, passengers, cabin_class)
+    );
     res.json(responseData);
-    incrementDailyPriceCheckCounter();
   } catch (err) {
     res.status(err.status || 500).json({ ok: false, error: err.message, details: err.details });
   }
@@ -541,3 +649,4 @@ module.exports.avgDurationExcludingOutliers = avgDurationExcludingOutliers;
 module.exports.fetchAndCacheRoutePrice = fetchAndCacheRoutePrice;
 module.exports.isPublishedRoute = isPublishedRoute;
 module.exports.resetPublishedRouteCache = function () { _publishedRouteCache.map.clear(); };
+
