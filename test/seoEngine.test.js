@@ -1,4 +1,5 @@
 const { generateRoutePage, assessEligibility, hasManualContent, supportedLanguages } = require('../src/services/seo/engine');
+const { validateGeneratedSeo } = require('../src/services/seo/quality');
 const { similarityReport, pageSimilarity } = require('../src/services/seo/similarity');
 
 // ─── Route fixtures spanning the real data space ────────────────
@@ -81,6 +82,23 @@ describe('quality gate & manual protection', () => {
   });
   test('supportedLanguages lists de', () => {
     expect(supportedLanguages()).toContain('de');
+  });
+});
+
+describe('generated SEO truthfulness compatibility', () => {
+  test('representative German generated pages pass the deterministic quality gate', () => {
+    const routes = [
+      makeRoute(CITIES[0], CITIES[2]),
+      { ...makeRoute(CITIES[0], CITIES[2]), price_trend: 'up', airline_count: 7, price_min: 59, price_max: 180, price_avg: 110, price_sample_count: 17 },
+      { ...makeRoute(CITIES[0], CITIES[18]), price_trend: 'down', airline_count: 1, price_min: 780, price_max: 1120, price_avg: 900, price_sample_count: 12 },
+    ];
+    for (const route of routes) {
+      const generated = generateRoutePage(route, 'de');
+      expect(generated.skipped).toBe(false);
+      const quality = validateGeneratedSeo(route, generated.content);
+      expect(quality.valid).toBe(true);
+      expect(quality.reasons).toEqual([]);
+    }
   });
 });
 

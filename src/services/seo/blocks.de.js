@@ -23,8 +23,8 @@ const haulWord = (h) => (h === 'short-haul' ? 'Kurzstrecke' : h === 'medium-haul
 // (see engine.js). Each angle has several independently written openings.
 const INTRO_ANGLES = {
   price: [
-    (c) => `Wer die Strecke ${c.o}–${c.d} im Blick hat, schaut zuerst auf den Preis${c.priceMin != null ? `, und der beginnt hier bei rund ${EUR(c.priceMin)}` : ''}. ${c.priceB === 'budget' ? 'Für eine Verbindung dieser Art ist das günstig — die eigentliche Kunst liegt darin, den niedrigen Tarif auch zum passenden Reisedatum zu treffen.' : c.priceB === 'premium' ? 'Das liegt am oberen Ende; auf dieser Verbindung entscheidet der Buchungszeitpunkt spürbar über den Endpreis.' : 'Das ist ein solider Mittelwert; mit etwas Flexibilität lässt sich der Tarif oft noch drücken.'}`,
-    (c) => `${c.priceMin != null ? `Ab etwa ${EUR(c.priceMin)} ` : 'Preislich '}bewegt sich ${c.o} nach ${c.d} in einem Bereich, der sich mit dem richtigen Timing deutlich beeinflussen lässt. ${c.priceTrend === 'down' ? 'Zuletzt zeigten die beobachteten Tarife eher nach unten — ein gutes Zeichen für Wartende.' : c.priceTrend === 'up' ? 'Zuletzt zogen die Tarife eher an, frühes Buchen zahlt sich hier also aus.' : 'Die Tarife blieben zuletzt vergleichsweise stabil, was die Planung erleichtert.'}`,
+    (c) => `Wer die Strecke ${c.o}–${c.d} im Blick hat, schaut zuerst auf den Preis${c.priceMin != null ? `, und der beginnt hier bei rund ${EUR(c.priceMin)}` : ''}. ${c.priceB === 'budget' ? `Für diese ${haulWord(c.haul)} liegt die beobachtete Preisspanne im unteren Segment des aktuellen Routenkatalogs.` : c.priceB === 'premium' ? `Für diese ${haulWord(c.haul)} liegt die beobachtete Preisspanne im oberen Segment des aktuellen Routenkatalogs.` : `Für diese ${haulWord(c.haul)} liegt die beobachtete Preisspanne im mittleren Segment des aktuellen Routenkatalogs.`}`,
+    (c) => `${c.priceMin != null ? `Ab etwa ${EUR(c.priceMin)} ` : 'Preislich '}bewegt sich ${c.o} nach ${c.d} in einem im Routenkatalog beobachteten Bereich. ${c.haul === 'short-haul' ? 'Die Verbindung ist als Kurzstrecke erfasst.' : c.haul === 'medium-haul' ? 'Die Verbindung ist als Mittelstrecke erfasst.' : 'Die Verbindung ist als Langstrecke erfasst.'}${c.directB === 'all-direct' ? ' Die beobachteten Verbindungen sind direkt.' : c.directB === 'connections-only' ? ' Die beobachteten Verbindungen enthalten einen Umstieg.' : ''} ${c.priceTrend === 'down' ? 'Zuletzt zeigten die beobachteten Tarife eher nach unten.' : c.priceTrend === 'up' ? 'Zuletzt zeigten die beobachteten Tarife eher nach oben.' : c.priceTrend === 'stable' ? 'Zuletzt zeigten die beobachteten Tarife eine stabile Richtung.' : 'Für einen belastbaren kurzfristigen Trend liegen keine ausreichenden Beobachtungen vor.'}`,
   ],
   duration: [
     (c) => `${c.fmtDur ? `Rund ${c.fmtDur} ` : ''}dauert der Flug von ${c.o} nach ${c.d} — ${c.haul === 'short-haul' ? 'kurz genug, dass die eigentliche Reisezeit eher von An- und Abfahrt zum Flughafen bestimmt wird als vom Flug selbst.' : c.haul === 'long-haul' ? 'lang genug, dass Sitzwahl, Abflugzeit und Kabinenkomfort zu echten Entscheidungen werden.' : 'überschaubar genug für ein verlängertes Wochenende, ohne dass ein Erholungstag nötig wäre.'}`,
@@ -35,11 +35,11 @@ const INTRO_ANGLES = {
     (c) => `${c.dIata} ist der Zielflughafen für ${c.d}, doch die Anreise ab ${c.o} über ${c.oIata} lohnt einen genaueren Blick: Lage, Anbindung und Sicherheitsaufkommen unterscheiden sich je nach Terminal deutlich.`,
   ],
   airline: [
-    (c) => `Auf der Verbindung ${c.o}–${c.d} ${c.airlineB === 'many' ? `konkurriert eine ganze Reihe von Fluggesellschaften — ${c.airlineCount} verschiedene wurden zuletzt gezählt` : c.airlineB === 'single' ? 'ist die Auswahl an Fluggesellschaften überschaubar' : `bewegen sich mehrere Anbieter${c.airlineCount ? ` (zuletzt ${c.airlineCount})` : ''}`}, und genau das bestimmt Preisspanne wie Servicequalität.`,
-    (c) => `${c.airlineCount ? `${c.airlineCount} Fluggesellschaften ` : 'Mehrere Anbieter '}bedienen ${c.o} nach ${c.d} — ${c.airlineB === 'many' ? 'diese Dichte drückt die Preise und erweitert die Auswahl an Abflugzeiten erheblich.' : c.airlineB === 'single' ? 'bei geringer Konkurrenz lohnt der frühe Blick auf die Tarife besonders.' : 'genug für echten Wettbewerb, ohne die Suche unübersichtlich zu machen.'}`,
+    (c) => `Auf der Verbindung ${c.o}–${c.d} ${c.airlineB === 'many' ? `${c.airlineCount} verschiedene Fluggesellschaften wurden zuletzt gezählt` : c.airlineB === 'single' ? 'ist ein nennenswerter Anbieter vertreten' : `${c.airlineCount ? c.airlineCount + ' ' : ''}Fluggesellschaften wurden zuletzt im Routendatensatz erfasst`}.`,
+    (c) => `${c.airlineCount ? `${c.airlineCount} Fluggesellschaften ` : 'Mehrere Anbieter '}bedienen ${c.o} nach ${c.d}. Im Routendatensatz sind diese Anbieter als aktive Streckenbeteiligte erfasst.`,
   ],
   destination: [
-    (c) => `${c.d} zieht Reisende aus ${c.o} das ganze Jahr über an, und die Flugverbindung dorthin ist der praktische erste Schritt. ${c.domestic ? 'Da beide Städte im selben Land liegen, entfällt jede Grenzformalität.' : 'Als internationale Verbindung lohnt der frühe Blick auf Einreise- und Gepäckregeln.'}`,
+    (c) => `Die Strecke ${c.o}–${c.d} verbindet die beiden im Routenkatalog erfassten Flughäfen. ${c.domestic ? 'Beide Flughäfen liegen im selben Land.' : 'Die Verbindung verläuft international.'}`,
     (c) => `Der Weg von ${c.o} nach ${c.d} führt zu einem Ziel mit eigenem Charakter — und die richtige Flugverbindung entscheidet mit, wie entspannt die Reise beginnt.`,
   ],
   traveler: [
@@ -53,10 +53,10 @@ const INTRO_ANGLES = {
     (c) => `Wer mit der Familie von ${c.o} nach ${c.d} fliegt, plant anders: ${c.directB === 'all-direct' ? 'dass hier durchgehend direkt geflogen wird, erspart Umsteigestress mit Kindern.' : 'ein möglichst direkter Flug und passende Abflugzeiten stehen dann vor dem letzten Euro Ersparnis.'} Gepäck und Sitzplatzreservierung wollen früh bedacht sein.`,
   ],
   weekend: [
-    (c) => `${c.o}–${c.d} eignet sich${c.haul === 'short-haul' ? ' bestens' : c.haul === 'medium-haul' ? ' gut' : ' nur bedingt'} für einen Wochenendtrip: ${c.fmtDur ? `bei rund ${c.fmtDur} Flugzeit ` : ''}${c.haul === 'long-haul' ? 'bleibt vom kurzen Wochenende wenig übrig — mehr Tage lohnen sich hier.' : 'bleibt genug Zeit vor Ort, wenn Hin- und Rückflug klug gelegt werden.'}`,
+    (c) => `Die Verbindung ${c.o}–${c.d} lässt sich anhand der beobachteten Flugzeit einordnen: ${c.fmtDur ? `bei rund ${c.fmtDur} ` : ''}${c.haul === 'long-haul' ? 'ist die Verbindung langstreckentypisch.' : 'bleibt die reine Flugzeit im Kurz- oder Mittelstreckenbereich.'}`,
   ],
   seasonal: [
-    (c) => `Wann man ${c.o} nach ${c.d} fliegt, macht einen Unterschied — bei Preis wie Andrang. ${c.priceTrend === 'down' ? 'Die zuletzt beobachtete Preisrichtung war eher fallend.' : c.priceTrend === 'up' ? 'Die zuletzt beobachtete Preisrichtung war eher steigend.' : 'Die Nebensaison bringt auf dieser Verbindung erfahrungsgemäß die ruhigeren Termine.'}`,
+    (c) => `Die saisonale Einordnung ${c.priceTrend === 'down' ? 'zeigt zuletzt eine fallende Preisrichtung.' : c.priceTrend === 'up' ? 'zeigt zuletzt eine steigende Preisrichtung.' : c.priceTrend === 'stable' ? 'zeigt zuletzt eine weitgehend stabile Preisrichtung.' : 'lässt sich aus den vorliegenden Routendaten nur eingeschränkt ableiten.'}`,
   ],
 };
 
@@ -97,10 +97,10 @@ const BLOCKS = [
         : c.priceTrend === 'up' ? pick(rng, ['Zuletzt zogen die Preise an.', 'Die Richtung wies zuletzt nach oben.'])
         : c.priceTrend === 'stable' ? 'Die Preise blieben zuletzt weitgehend stabil.' : '';
       const advice = c.priceB === 'budget'
-        ? 'Auf diesem günstigen Niveau lohnt es sich, nicht auf ein noch niedrigeres zu warten, sondern einen guten Tarif direkt zu sichern.'
+        ? 'Die beobachtete Preisspanne liegt im unteren Segment des aktuellen Routenkatalogs.'
         : c.priceB === 'premium'
-        ? 'In diesem Preissegment macht früheres Buchen und Flexibilität beim Wochentag den größten Unterschied.'
-        : 'Wer ein bis zwei Tage flexibel ist, findet hier regelmäßig einen spürbar besseren Tarif.';
+        ? 'Die beobachtete Preisspanne liegt im oberen Segment des aktuellen Routenkatalogs.'
+        : 'Die beobachtete Preisspanne liegt im mittleren Segment des aktuellen Routenkatalogs.';
       return {
         heading: pick(rng, ['Preisanalyse', 'Was die Strecke kostet', 'Preisniveau und Timing']),
         body: [range, trend, advice].filter(Boolean).join(' '),
@@ -114,7 +114,7 @@ const BLOCKS = [
     render: (c, rng) => {
       const lead = c.airlineB === 'many'
         ? pick(rng, [
-            `Mit ${c.airlineCount} konkurrierenden Fluggesellschaften herrscht auf ${c.o}–${c.d} echter Wettbewerb.`,
+            `Auf ${c.o}–${c.d} sind ${c.airlineCount} Fluggesellschaften im Routendatensatz erfasst.`,
             `${c.airlineCount} Anbieter teilen sich diese Verbindung — ungewöhnlich viel Auswahl.`,
           ])
         : c.airlineB === 'single'
@@ -124,10 +124,10 @@ const BLOCKS = [
             `Zuletzt waren ${c.airlineCount} Anbieter auf dieser Strecke aktiv.`,
           ]);
       const impl = c.airlineB === 'many'
-        ? 'Diese Dichte weitet die Auswahl an Abflugzeiten und drückt tendenziell die Tarife — der Preisvergleich lohnt hier besonders.'
+        ? 'Im Routendatensatz sind mehrere Anbieter vertreten.'
         : c.airlineB === 'single'
-        ? 'Bei geringer Konkurrenz schwanken die Preise weniger; ein früher Buchungszeitpunkt ist die verlässlichere Ersparnis.'
-        : 'Genug Auswahl für Wettbewerb, ohne die Suche unübersichtlich werden zu lassen.';
+        ? 'Im Routendatensatz ist ein nennenswerter Anbieter vertreten.'
+        : 'Im Routendatensatz sind mehrere Anbieter vertreten.';
       return { heading: pick(rng, ['Fluggesellschaften auf der Strecke', 'Wer diese Verbindung fliegt', 'Airline-Auswahl']), body: `${lead} ${impl}` };
     },
   },
@@ -160,15 +160,11 @@ const BLOCKS = [
     applicable: () => true,
     weight: (c) => (c.facts.has('price') || c.facts.has('priceTrend') ? 0.8 : 0.55),
     render: (c, rng) => {
-      const window = c.haul === 'long-haul' ? 'sechs bis acht Wochen' : c.haul === 'medium-haul' ? 'drei bis vier Wochen' : 'zwei bis drei Wochen';
-      const base = pick(rng, [
-        `Als Faustregel gilt für diese ${haulWord(c.haul)} ein Vorlauf von ${window} vor Abflug.`,
-        `Für eine ${haulWord(c.haul)} wie ${c.o}–${c.d} liegt das günstigste Fenster meist ${window} vor dem Reisetag.`,
-      ]);
-      const trendHint = c.priceTrend === 'up' ? ' Da die Tarife zuletzt anzogen, spricht viel für frühes Buchen.'
-        : c.priceTrend === 'down' ? ' Weil die Preise zuletzt nachgaben, kann sich bei flexiblen Daten kurzes Abwarten mit Preisalarm lohnen.' : '';
-      const day = pick(rng, ['Abflüge unter der Woche liegen preislich meist unter Freitag und Sonntag.', 'Dienstag und Mittwoch sind erfahrungsgemäß die günstigeren Abflugtage.']);
-      return { heading: pick(rng, ['Wann buchen?', 'Buchungsstrategie', 'Der beste Zeitpunkt']), body: base + trendHint + ' ' + day };
+      const trend = c.priceTrend === 'up' ? 'Die zuletzt beobachtete Preisrichtung war steigend.'
+        : c.priceTrend === 'down' ? 'Die zuletzt beobachtete Preisrichtung war fallend.'
+        : c.priceTrend === 'stable' ? 'Die zuletzt beobachtete Preisrichtung war stabil.'
+        : 'Für einen belastbaren kurzfristigen Preisverlauf liegen keine ausreichenden Beobachtungen vor.';
+      return { heading: pick(rng, ['Preisverlauf', 'Aktueller Routendatenstand', 'Preisbeobachtung']), body: trend };
     },
   },
   {
@@ -177,10 +173,10 @@ const BLOCKS = [
     weight: () => 0.5,
     render: (c, rng) => {
       const parts = [];
-      if (c.popB === 'high') parts.push(pick(rng, [`${c.d} ist ein stark nachgefragtes Ziel, was sich in den Hauptreisezeiten auf die Preise legt.`, `Die hohe Nachfrage auf ${c.o}–${c.d} macht Nebensaison-Termine besonders wertvoll.`]));
-      else if (c.popB === 'niche') parts.push('Als weniger überlaufene Verbindung bleibt die Preisspreizung über das Jahr hier meist moderat.');
-      if (c.priceTrend) parts.push(c.priceTrend === 'down' ? 'Die zuletzt beobachtete Preisrichtung war fallend.' : c.priceTrend === 'up' ? 'Die zuletzt beobachtete Preisrichtung war steigend.' : 'Die Preise zeigten sich zuletzt saisonal stabil.');
-      parts.push('Wer zeitlich flexibel ist, verschiebt Abflug oder Rückkehr um wenige Tage und trifft oft eine günstigere Preisklasse.');
+      if (c.popB === 'high') parts.push(`Im Routendatensatz ist ${c.d} als stärker nachgefragtes Ziel eingeordnet.`);
+      else if (c.popB === 'niche') parts.push(`${c.d} ist im aktuellen Routendatensatz als weniger stark nachgefragtes Ziel eingeordnet.`);
+      if (c.priceTrend) parts.push(c.priceTrend === 'down' ? 'Die zuletzt beobachtete Preisrichtung war fallend.' : c.priceTrend === 'up' ? 'Die zuletzt beobachtete Preisrichtung war steigend.' : 'Die Preise zeigten sich zuletzt weitgehend stabil.');
+      parts.push('Ein belastbarer Monats- oder Wochentagspreisvergleich wird aus diesen Routendaten nicht abgeleitet.');
       return { heading: pick(rng, ['Saisonale Hinweise', 'Reisezeit und Preis', 'Wann ist es günstiger?']), body: parts.join(' ') };
     },
   },
@@ -219,15 +215,15 @@ const FAQ_CANDIDATES = [
   { id: 'duration', applicable: (c) => c.facts.has('duration') && !!c.fmtDur, q: (c) => `Wie lange dauert der Flug von ${c.o} nach ${c.d}?`,
     a: (c) => `Die typische reine Flugzeit liegt bei rund ${c.fmtDur}${c.km ? ` bei etwa ${c.km} km Distanz` : ''}. Die genaue Dauer hängt von Wind, Route und Flugzeugtyp ab.` },
   { id: 'book-when', applicable: () => true, q: (c) => `Wann sollte ich Flüge von ${c.o} nach ${c.d} buchen?`,
-    a: (c) => { const w = c.haul === 'long-haul' ? 'sechs bis acht Wochen' : c.haul === 'medium-haul' ? 'drei bis vier Wochen' : 'zwei bis drei Wochen'; return `Für diese ${haulWord(c.haul)} ist ein Vorlauf von ${w} meist ideal.${c.priceTrend === 'up' ? ' Da die Tarife zuletzt anzogen, lohnt frühes Buchen zusätzlich.' : c.priceTrend === 'down' ? ' Weil die Preise zuletzt nachgaben, kann ein Preisalarm bei flexiblen Daten helfen.' : ''} Abflüge unter der Woche sind in der Regel günstiger.`; } },
+    a: (c) => c.priceTrend === 'up' ? 'Die zuletzt beobachtete Preisrichtung war steigend. Ein belastbarer allgemeiner Buchungsvorlauf wird aus den vorliegenden Routendaten nicht abgeleitet.' : c.priceTrend === 'down' ? 'Die zuletzt beobachtete Preisrichtung war fallend. Ein belastbarer allgemeiner Buchungsvorlauf wird aus den vorliegenden Routendaten nicht abgeleitet.' : c.priceTrend === 'stable' ? 'Die zuletzt beobachtete Preisrichtung war stabil. Ein belastbarer allgemeiner Buchungsvorlauf wird aus den vorliegenden Routendaten nicht abgeleitet.' : 'Die vorliegenden Routendaten enthalten keinen belastbaren allgemeinen Buchungsvorlauf.' },
   { id: 'direct', applicable: (c) => c.facts.has('directness'), q: (c) => `Gibt es Direktflüge von ${c.o} nach ${c.d}?`,
     a: (c) => c.directB === 'all-direct' ? 'Ja — alle zuletzt beobachteten Verbindungen sind Direktflüge.' : c.directB === 'connections-only' ? 'Direktflüge sind selten; in der Regel ist ein Umstieg einzuplanen.' : 'Ja, Direktflüge sind verfügbar; daneben gibt es meist günstigere Verbindungen mit Umstieg.' },
   { id: 'airlines', applicable: (c) => c.facts.has('airlines'), q: (c) => `Welche Fluggesellschaften fliegen ${c.o}–${c.d}?`,
     a: (c) => c.airlineB === 'many' ? `Auf dieser Strecke waren zuletzt ${c.airlineCount} Fluggesellschaften aktiv — der Preisvergleich lohnt sich dadurch besonders.` : c.airlineB === 'single' ? 'Die Verbindung wird von nur einer nennenswerten Fluggesellschaft bedient.' : `Zuletzt bedienten ${c.airlineCount} Fluggesellschaften die Strecke.` },
   { id: 'cheaper-months', applicable: (c) => c.facts.has('price') || c.facts.has('priceTrend'), q: (c) => `Ist die Strecke ${c.o}–${c.d} zu bestimmten Zeiten günstiger?`,
-    a: (c) => `Ja. ${c.priceTrend === 'down' ? 'Die zuletzt beobachtete Preisrichtung war fallend. ' : c.priceTrend === 'up' ? 'Die zuletzt beobachtete Preisrichtung war steigend. ' : ''}Wer Abflug oder Rückkehr um wenige Tage verschiebt und die Nebensaison nutzt, trifft regelmäßig eine günstigere Preisklasse.` },
+    a: (c) => `Die aktuellen Routendaten zeigen ${c.priceTrend === 'down' ? 'zuletzt eine fallende' : c.priceTrend === 'up' ? 'zuletzt eine steigende' : c.priceTrend === 'stable' ? 'eine weitgehend stabile' : 'keine belastbar ableitbare'} Preisrichtung. Ein belastbarer Monatsvergleich ist daraus nicht abzuleiten.` },
   { id: 'weekend', applicable: (c) => c.haul !== 'long-haul', q: (c) => `Eignet sich ${c.o}–${c.d} für einen Wochenendtrip?`,
-    a: (c) => c.haul === 'short-haul' ? `Sehr gut. ${c.fmtDur ? `Bei rund ${c.fmtDur} Flugzeit ` : ''}bleibt vor Ort genug Zeit, wenn Hin- und Rückflug klug gelegt werden.` : `Bedingt. ${c.fmtDur ? `Mit rund ${c.fmtDur} je Richtung ` : ''}lohnt sich eher ein langes Wochenende als ein kurzer Zwei-Tage-Trip.` },
+    a: (c) => `Die beobachtete reine Flugzeit liegt bei ${c.fmtDur || 'keiner ausreichend belegten Dauer'}. Die Eignung für eine Wochenendreise wird aus den Routendaten nicht bewertet.` },
   { id: 'price-from', applicable: (c) => c.facts.has('price'), q: (c) => `Was kostet ein Flug von ${c.o} nach ${c.d}?`,
     a: (c) => `Die zuletzt beobachteten Tarife begannen bei etwa ${EUR(c.priceMin)}${c.priceMax && c.priceMax > c.priceMin ? ` und reichten bis rund ${EUR(c.priceMax)}` : ''}. Preise werden pro Abflug dynamisch gebildet und ändern sich laufend.` },
 ];
