@@ -114,7 +114,7 @@ const BLOCKS = [
     render: (c, rng) => {
       const lead = c.airlineB === 'many'
         ? pick(rng, [
-            `Mit ${c.airlineCount} konkurrierenden Fluggesellschaften herrscht auf ${c.o}–${c.d} echter Wettbewerb.`,
+            `Auf ${c.o}–${c.d} sind ${c.airlineCount} Fluggesellschaften im Routendatensatz erfasst.`,
             `${c.airlineCount} Anbieter teilen sich diese Verbindung — ungewöhnlich viel Auswahl.`,
           ])
         : c.airlineB === 'single'
