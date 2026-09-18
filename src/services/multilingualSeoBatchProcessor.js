@@ -46,26 +46,26 @@ function qualifySeoText(text, route, qualification) {
   return result;
 }
 
-function safeSectionBody(route, language) {
+function safeSection(route, language) {
   const byLanguage = {
-    en: `Review the stored route information for ${route.origin_city} and ${route.destination_city} before booking.`,
-    fr: `Consultez les informations enregistrées pour la liaison entre ${route.origin_city} et ${route.destination_city} avant de réserver.`,
-    es: `Consulta la información registrada de la ruta entre ${route.origin_city} y ${route.destination_city} antes de reservar.`,
-    it: `Consulta le informazioni registrate sulla rotta tra ${route.origin_city} e ${route.destination_city} prima di prenotare.`,
-    nl: `Controleer de opgeslagen route-informatie voor ${route.origin_city} en ${route.destination_city} voordat je boekt.`,
-    tr: `${route.origin_city} ile ${route.destination_city} arasındaki kayıtlı rota bilgilerini rezervasyondan önce inceleyin.`,
+    en: { heading: 'Route information', body: `Review the stored route information for ${route.origin_city} and ${route.destination_city} before booking.` },
+    fr: { heading: 'Informations sur la route', body: `Consultez les informations enregistrées pour la liaison entre ${route.origin_city} et ${route.destination_city} avant de réserver.` },
+    es: { heading: 'Información de la ruta', body: `Consulta la información registrada de la ruta entre ${route.origin_city} y ${route.destination_city} antes de reservar.` },
+    it: { heading: 'Informazioni sulla rotta', body: `Consulta le informazioni registrate sulla rotta tra ${route.origin_city} e ${route.destination_city} prima di prenotare.` },
+    nl: { heading: 'Route-informatie', body: `Controleer de opgeslagen route-informatie voor ${route.origin_city} en ${route.destination_city} voordat je boekt.` },
+    tr: { heading: 'Rota bilgileri', body: `${route.origin_city} ile ${route.destination_city} arasındaki kayıtlı rota bilgilerini rezervasyondan önce inceleyin.` },
   };
   return byLanguage[language] || byLanguage.en;
 }
 
-function safeFaqAnswer(route, language) {
+function safeFaq(route, language) {
   const byLanguage = {
-    en: `Use the stored route information for ${route.origin_city} and ${route.destination_city} shown on this page.`,
-    fr: `Utilisez les informations de route enregistrées pour ${route.origin_city} et ${route.destination_city} affichées sur cette page.`,
-    es: `Usa la información de ruta registrada para ${route.origin_city} y ${route.destination_city} que aparece en esta página.`,
-    it: `Usa le informazioni di rotta registrate per ${route.origin_city} e ${route.destination_city} mostrate in questa pagina.`,
-    nl: `Gebruik de opgeslagen routegegevens voor ${route.origin_city} en ${route.destination_city} die op deze pagina staan.`,
-    tr: `${route.origin_city} ve ${route.destination_city} için bu sayfada gösterilen kayıtlı rota bilgilerini kullanın.`,
+    en: { question: 'What information is shown on this route page?', answer: `Use the stored route information for ${route.origin_city} and ${route.destination_city} shown on this page.` },
+    fr: { question: 'Quelles informations sont affichées sur cette page de route ?', answer: `Utilisez les informations de route enregistrées pour ${route.origin_city} et ${route.destination_city} affichées sur cette page.` },
+    es: { question: '¿Qué información aparece en esta página de ruta?', answer: `Usa la información de ruta registrada para ${route.origin_city} y ${route.destination_city} que aparece en esta página.` },
+    it: { question: 'Quali informazioni sono mostrate in questa pagina della rotta?', answer: `Usa le informazioni di rotta registrate per ${route.origin_city} e ${route.destination_city} mostrate in questa pagina.` },
+    nl: { question: 'Welke informatie staat op deze routepagina?', answer: `Gebruik de opgeslagen routegegevens voor ${route.origin_city} en ${route.destination_city} die op deze pagina staan.` },
+    tr: { question: 'Bu rota sayfasında hangi bilgiler gösteriliyor?', answer: `${route.origin_city} ve ${route.destination_city} için bu sayfada gösterilen kayıtlı rota bilgilerini kullanın.` },
   };
   return byLanguage[language] || byLanguage.en;
 }
@@ -78,11 +78,11 @@ function sanitizeSecondaryContent(route, language, content) {
   next.introPlain = next.intro;
   next.sections = (Array.isArray(next.sections) ? next.sections : []).map((section) => {
     const text = `${section && section.heading ? section.heading : ''} ${section && section.body ? section.body : ''}`;
-    return generatedFieldIsSafe(route, text) ? section : { ...section, body: safeSectionBody(route, language) };
+    return generatedFieldIsSafe(route, text) ? section : safeSection(route, language);
   });
   next.faq = (Array.isArray(next.faq) ? next.faq : []).map((item) => {
     const text = `${item && item.question ? item.question : ''} ${item && item.answer ? item.answer : ''}`;
-    return generatedFieldIsSafe(route, text) ? item : { ...item, answer: safeFaqAnswer(route, language) };
+    return generatedFieldIsSafe(route, text) ? item : safeFaq(route, language);
   });
   return next;
 }
