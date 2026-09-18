@@ -70,6 +70,48 @@ describe('GET /sitemap-data/cities', () => {
   });
 });
 
+describe('GET /sitemap-data/cities with demand gate', () => {
+  test('keeps entity connectivity when demand/freshness policy is enabled', async () => {
+    const previousCoreOnly = process.env.SEO_ROUTE_CORE_ONLY;
+    const previousDemandGate = process.env.SEO_ROUTE_DEMAND_GATE;
+    process.env.SEO_ROUTE_CORE_ONLY = '0';
+    process.env.SEO_ROUTE_DEMAND_GATE = '1';
+    try {
+      supa.__setResponse('cities', {
+        result: { data: [{ city_slug: 'berlin', created_at: '2026-01-01T00:00:00Z' }], error: null },
+      });
+      supa.__setResponse('route_pages', {
+        result: { data: [
+          {
+            origin_city_slug: 'berlin', destination_city_slug: 'muenchen',
+            origin_iata: 'BER', destination_iata: 'MUC',
+            origin_country: 'DE', destination_country: 'DE',
+            avg_duration_min: 100, route_score: 0.7,
+            insights_updated_at: '2026-09-17T00:00:00Z',
+          },
+          {
+            origin_city_slug: 'berlin', destination_city_slug: 'paris',
+            origin_iata: 'BER', destination_iata: 'CDG',
+            origin_country: 'DE', destination_country: 'FR',
+            avg_duration_min: 120, route_score: 0.6,
+            insights_updated_at: '2026-09-17T00:00:00Z',
+          },
+        ], error: null },
+      });
+      supa.__setResponse('route_airlines', { result: { data: [], error: null } });
+
+      const res = await request(buildApp()).get('/sitemap-data/cities');
+      expect(res.status).toBe(200);
+      expect(res.body.items).toEqual([{ id: 'berlin', lastmod: '2026-01-01' }]);
+    } finally {
+      if (previousCoreOnly == null) delete process.env.SEO_ROUTE_CORE_ONLY;
+      else process.env.SEO_ROUTE_CORE_ONLY = previousCoreOnly;
+      if (previousDemandGate == null) delete process.env.SEO_ROUTE_DEMAND_GATE;
+      else process.env.SEO_ROUTE_DEMAND_GATE = previousDemandGate;
+    }
+  });
+});
+
 describe('GET /sitemap-data/countries', () => {
   test('includes a country whose connectivity score ≥2', async () => {
     supa.__setResponse('countries', { result: { data: [{ code: 'DE', created_at: '2026-01-01T00:00:00Z' }], error: null } });
