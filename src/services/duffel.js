@@ -77,7 +77,8 @@ async function duffel(method, path, body = null, extraHeaders = null, options = 
   const timeoutMs = (options && options.timeoutMs) || DUFFEL_TIMEOUT_MS;
   const externalSignal = (options && options.signal) || null;
   const deadlineError = () => { const err = new Error('Zeitlimit für die Preisberechnung überschritten'); err.status = 504; err.code = 'UPSTREAM_DEADLINE'; return err; };
-  const maxAttempts = 2;
+  // Search/airport lookups are expensive upstream calls. Avoid an automatic retry on transient failures here; the client can retry, while a second server-side attempt duplicates Duffel consumption. Keep two attempts for transactional/privileged calls.
+  const maxAttempts = isSearchPath(path) ? 1 : 2;
   const ctx = (options && options.searchContext) || {};
   const operationId = randomUUID();
   const auditContext = { operationId, source, trigger: (options && options.trigger) || (logContext && logContext.trigger) || source, actorUserId: (options && options.actorUserId) || ctx.userId || null, actorIp: (options && options.actorIp) || ctx.ip || null, actorUserAgent: (options && options.actorUserAgent) || ctx.userAgent || null, searchSessionId: ctx.sid || null, routeOrigin: (logContext && logContext.route_origin) || null, routeDestination: (logContext && logContext.route_destination) || null, metadata: (options && options.auditMetadata) || null };
