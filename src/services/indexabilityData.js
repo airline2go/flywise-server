@@ -25,11 +25,12 @@ const TTL_MS = 60 * 1000; // 60s: one sitemap regeneration cycle reuses one scan
 let cache = null; // { at, connectivity, airlineCounts }
 
 async function fetchAllPublishedRoutes() {
-  // [P0-2] Evidence columns (airline_count, avg_duration_min, stop_distribution,
-  // price_sample_count, itinerary_count) + intro_text/custom_faq are pulled so
-  // buildConnectivity can exclude zero-evidence routes when the policy is
-  // enforced. They add a few columns to a scan that already runs once per cycle.
-  const cols = 'origin_iata,destination_iata,origin_city_slug,destination_city_slug,origin_country,destination_country,airline_count,avg_duration_min,stop_distribution,price_sample_count,itinerary_count,intro_text,custom_faq';
+  // [P0-2] Evidence + demand/freshness columns are pulled so buildConnectivity
+  // can apply the exact same route indexability policy as the route sitemap.
+  // The demand/freshness fields are mandatory when SEO_ROUTE_DEMAND_GATE is on;
+  // omitting them would make every route look demand-less and collapse all
+  // derived city/country/airport connectivity to zero.
+  const cols = 'origin_iata,destination_iata,origin_city_slug,destination_city_slug,origin_country,destination_country,airline_count,avg_duration_min,stop_distribution,price_sample_count,itinerary_count,intro_text,custom_faq,route_score,weekly_flights,insights_updated_at';
   const out = [];
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await supa.from('route_pages')
