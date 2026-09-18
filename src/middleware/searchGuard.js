@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const env = require('../config/env');
 const log = require('../utils/log');
 const { consumeRateLimit } = require('./rateLimit');
+const { clientIp } = require('../utils/clientIp');
 const SESSION_TTL_SEC = 30 * 60;
 const HEADER = 'x-search-session';
 function hashId(value) {
@@ -38,9 +39,6 @@ function verifySearchSession(token) {
   const exp = parseInt(expStr, 10);
   if (exp <= Math.floor(Date.now() / 1000)) return { ok: false, reason: 'expired' };
   return { ok: true, sid, exp };
-}
-function clientIp(req) {
-  return (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
 }
 function logSearchAccess(fields) {
   log(fields.allowed ? 'info' : 'warn', 'search_guard', {
@@ -162,3 +160,4 @@ module.exports = {
   logSearchAccess,
   SESSION_TTL_SEC,
 };
+
