@@ -41,7 +41,7 @@ jobs:
               sleep 2
             done
             echo "Backend localized SEO batch remained busy for 120 seconds." >&2
-            exit 1
+            return 1
           }
 
           run_batch() {
@@ -51,58 +51,76 @@ jobs:
             local dry_run="$4"
             local expected="$5"
 
-            wait_idle
+            for attempt in 1 2 3; do
+              echo "=== $lang offset=$offset limit=$limit dry_run=$dry_run attempt=$attempt ==="
+              wait_idle || { echo "Backend remained busy before $lang offset $offset" >&2; continue; }
 
-            echo "=== $lang offset=$offset limit=$limit dry_run=$dry_run ==="
-            response="$(curl --fail-with-body --silent --show-error \
-              --request POST \
-              --user-agent "$BROWSER_UA" \
-              --header "Authorization: Bearer $ADMIN_TOKEN" \
-              --header "Accept: application/json" \
-              --header "Content-Type: application/json" \
-              --data "{\"language\":\"$lang\",\"offset\":$offset,\"limit\":$limit,\"dry_run\":$dry_run,\"force\":true}" \
-              "$API_BASE/admin/seo/localized-batch-generate")"
-            echo "$response"
-            printf '%s' "$response" | jq -e '.ok == true and .status == "processing"' >/dev/null
-
-            # The endpoint is asynchronous; a 15-second safety delay avoids the
-            # fast-completion/timestamp race seen with the previous orchestration.
-            sleep 15
-
-            for _ in $(seq 1 60); do
-              status="$(curl --fail-with-body --silent --show-error \
-                --request GET \
+              response="$(curl --fail-with-body --silent --show-error \
+                --request POST \
                 --user-agent "$BROWSER_UA" \
                 --header "Authorization: Bearer $ADMIN_TOKEN" \
                 --header "Accept: application/json" \
-                "$API_BASE/admin/seo/localized-batch-status")"
+                --header "Content-Type: application/json" \
+                --data "{\"language\":\"$lang\",\"offset\":$offset,\"limit\":$limit,\"dry_run\":$dry_run,\"force\":true}" \
+                "$API_BASE/admin/seo/localized-batch-generate")"
+              echo "$response"
+              printf '%s' "$response" | jq -e '.ok == true and .status == "processing"' >/dev/null
 
-              running="$(printf '%s' "$status" | jq -r '.running // false')"
-              state_lang="$(printf '%s' "$status" | jq -r '.language // empty')"
-              state_offset="$(printf '%s' "$status" | jq -r '.offset // -1')"
+              # Allow fast batches to settle, but keep the refresh bounded and restart-safe.
+              sleep 4
 
-              if [[ "$running" == "false" && "$state_lang" == "$lang" && "$state_offset" == "$offset" ]]; then
-                total="$(printf '%s' "$status" | jq -r '.summary.total // -1')"
-                processed="$(printf '%s' "$status" | jq -r '.summary.processed // -1')"
-                updated="$(printf '%s' "$status" | jq -r '.summary.updated // -1')"
-                skipped="$(printf '%s' "$status" | jq -r '.summary.skipped // -1')"
-                failed="$(printf '%s' "$status" | jq -r '.summary.failed // -1')"
-                rejected="$(printf '%s' "$status" | jq -r '.summary.qualityRejected // -1')"
-                echo "$status" | jq .
+              retry_needed=false
+              for _ in $(seq 1 60); do
+                status="$(curl --fail-with-body --silent --show-error \
+                  --request GET \
+                  --user-agent "$BROWSER_UA" \
+                  --header "Authorization: Bearer $ADMIN_TOKEN" \
+                  --header "Accept: application/json" \
+                  "$API_BASE/admin/seo/localized-batch-status")"
 
-                [[ "$total" == "$expected" ]] || { echo "Unexpected total: $total != $expected" >&2; exit 1; }
-                [[ "$processed" == "$expected" ]] || { echo "Unexpected processed: $processed != $expected" >&2; exit 1; }
-                [[ "$updated" == "$expected" ]] || { echo "Unexpected updated: $updated != $expected" >&2; exit 1; }
-                [[ "$skipped" == "0" ]] || { echo "Unexpected skipped: $skipped" >&2; exit 1; }
-                [[ "$failed" == "0" ]] || { echo "Batch failures: $failed" >&2; exit 1; }
-                [[ "$rejected" == "0" ]] || { echo "Quality rejections: $rejected" >&2; exit 1; }
-                return 0
+                running="$(printf '%s' "$status" | jq -r '.running // false')"
+                state_lang="$(printf '%s' "$status" | jq -r '.language // empty')"
+                state_offset="$(printf '%s' "$status" | jq -r '.offset // -1')"
+
+                if [[ "$running" == "false" && "$state_lang" == "$lang" && "$state_offset" == "$offset" ]]; then
+                  total="$(printf '%s' "$status" | jq -r '.summary.total // -1')"
+                  processed="$(printf '%s' "$status" | jq -r '.summary.processed // -1')"
+                  updated="$(printf '%s' "$status" | jq -r '.summary.updated // -1')"
+                  skipped="$(printf '%s' "$status" | jq -r '.summary.skipped // -1')"
+                  failed="$(printf '%s' "$status" | jq -r '.summary.failed // -1')"
+                  rejected="$(printf '%s' "$status" | jq -r '.summary.qualityRejected // -1')"
+                  echo "$status" | jq .
+
+                  [[ "$total" == "$expected" ]] || { echo "Unexpected total: $total != $expected" >&2; retry_needed=true; break; }
+                  [[ "$processed" == "$expected" ]] || { echo "Unexpected processed: $processed != $expected" >&2; retry_needed=true; break; }
+                  [[ "$updated" == "$expected" ]] || { echo "Unexpected updated: $updated != $expected" >&2; retry_needed=true; break; }
+                  [[ "$skipped" == "0" ]] || { echo "Unexpected skipped: $skipped" >&2; retry_needed=true; break; }
+                  [[ "$failed" == "0" ]] || { echo "Batch failures: $failed" >&2; retry_needed=true; break; }
+                  [[ "$rejected" == "0" ]] || { echo "Quality rejections: $rejected" >&2; retry_needed=true; break; }
+
+                  return 0
+                fi
+
+                # A backend instance restart clears the in-memory batch state.
+                # force=true makes re-submitting the same bounded batch idempotent.
+                if [[ "$running" == "false" && "$state_lang" != "$lang" ]]; then
+                  echo "Batch state disappeared before completion; retrying bounded batch." >&2
+                  retry_needed=true
+                  break
+                fi
+
+                sleep 2
+              done
+
+              if [[ "$retry_needed" == "true" ]]; then
+                sleep 2
+                continue
               fi
 
-              sleep 2
+              echo "Timed out waiting for $lang offset $offset on attempt $attempt" >&2
             done
 
-            echo "Timed out waiting for $lang offset $offset" >&2
+            echo "Failed bounded batch after 3 attempts: $lang offset $offset" >&2
             exit 1
           }
 
