@@ -35,11 +35,20 @@ jest.mock('../src/clients/supabase', () => {
   };
 });
 
+jest.mock('../src/services/multilingualSeoBatchProcessor', () => ({
+  SECONDARY_LANGUAGES: ['en', 'ar', 'es', 'fr', 'it', 'nl', 'tr'],
+  processLocalizedRoutes: jest.fn(() => Promise.resolve({
+    language: 'fr', offset: 0, total: 1, processed: 1, updated: 1, skipped: 0,
+    failed: 0, qualityRejected: 0, dryRun: true, force: false,
+  })),
+}));
+
 jest.mock('../src/utils/log', () => jest.fn());
 
 const express = require('express');
 const request = require('supertest');
 const supa = require('../src/clients/supabase');
+const { processLocalizedRoutes } = require('../src/services/multilingualSeoBatchProcessor');
 
 // [TEST-ISOLATION] Several tests below capture `supa.from.getMockImplementation()`
 // as their own "originalFrom" and layer a table-specific override on top —
@@ -76,6 +85,50 @@ beforeEach(() => {
   supa.__reset();
   supa.from.mockClear();
   supa.rpc.mockClear();
+  processLocalizedRoutes.mockClear();
+});
+
+describe('POST /admin/seo/localized-batch-generate + status', () => {
+  test('rejects an unauthenticated localized batch request', async () => {
+    const res = await request(buildApp()).post('/admin/seo/localized-batch-generate').send({ language: 'fr' });
+    expect(res.status).toBe(401);
+  });
+
+  test('blocks staff sessions because localized regeneration is owner-only', async () => {
+    const res = await request(buildApp()).post('/admin/seo/localized-batch-generate')
+      .set(staffAuthHeaders())
+      .send({ language: 'fr' });
+    expect(res.status).toBe(403);
+  });
+
+  test('rejects unsupported languages and unsafe batch bounds', async () => {
+    const app = buildApp();
+    const badLanguage = await request(app).post('/admin/seo/localized-batch-generate').set(AUTH).send({ language: 'de' });
+    expect(badLanguage.status).toBe(400);
+    const tooLarge = await request(app).post('/admin/seo/localized-batch-generate').set(AUTH).send({ language: 'fr', limit: 101 });
+    expect(tooLarge.status).toBe(400);
+    const badOffset = await request(app).post('/admin/seo/localized-batch-generate').set(AUTH).send({ language: 'fr', limit: 50, offset: -1 });
+    expect(badOffset.status).toBe(400);
+  });
+
+  test('starts a bounded dry-run with an explicit language/offset window', async () => {
+    const res = await request(buildApp()).post('/admin/seo/localized-batch-generate').set(AUTH).send({
+      language: 'fr', limit: 25, offset: 200, dry_run: true, force: false,
+    });
+    expect(res.status).toBe(202);
+    expect(res.body).toMatchObject({ ok: true, status: 'processing', language: 'fr', limit: 25, offset: 200, dryRun: true, force: false });
+    expect(processLocalizedRoutes).toHaveBeenCalledWith(expect.objectContaining({
+      language: 'fr', limit: 25, offset: 200, dryRun: true, force: false,
+      progressCallback: expect.any(Function),
+    }));
+  });
+
+  test('exposes localized batch status to an authenticated admin', async () => {
+    const res = await request(buildApp()).get('/admin/seo/localized-batch-status').set(AUTH);
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(typeof res.body.running).toBe('boolean');
+  });
 });
 
 describe('requireAdmin', () => {

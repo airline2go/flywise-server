@@ -2090,10 +2090,15 @@ app.get('/admin/api-logs/stats', rateLimit('admin', 120, 60000), requireFullAdmi
 // ═══════════════════════════════════════════════════════════════
 
 const { processRoutes, generateStatistics, processSingleRoute, PRIMARY_LANGUAGE } = require('../services/seoBatchProcessor');
+const { processLocalizedRoutes, SECONDARY_LANGUAGES } = require('../services/multilingualSeoBatchProcessor');
 
 // Live snapshot of the most recent (or in-flight) batch run — polled by the
 // admin UI via GET /admin/seo/batch-status. Only one batch runs at a time.
 let seoBatchState = { running: false, startedAt: null, finishedAt: null, progress: null, summary: null };
+// Controlled secondary-language SEO regeneration state. Each run is intentionally bounded
+// by the admin endpoint so a full refresh is executed as auditable batches rather than one
+// unbounded production mutation.
+let seoLocalizedBatchState = { running: false, language: null, offset: null, limit: null, dryRun: null, force: null, startedAt: null, finishedAt: null, progress: null, summary: null };
 
 // Readiness report: eligible vs. skipped (manual content / insufficient data).
 app.get('/admin/seo/statistics', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
@@ -2152,6 +2157,74 @@ app.post('/admin/seo/batch-generate', rateLimit('admin', 120, 60000), requireFul
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
+});
+
+// Controlled localized SEO regeneration: one bounded window per call.
+// Maximum 100 routes per run; use offset to advance through the sorted route list.
+// This makes the existing multilingual generator safe to execute in production in
+// auditable batches and gives the admin an explicit dry-run/force switch.
+app.post('/admin/seo/localized-batch-generate', rateLimit('admin', 120, 60000), requireFullAdmin, async (req, res) => {
+  try {
+    if (seoLocalizedBatchState.running) {
+      return res.status(409).json({ ok: false, error: 'A localized SEO batch run is already in progress', progress: seoLocalizedBatchState.progress });
+    }
+
+    const language = String(req.body?.language || '').trim().toLowerCase();
+    if (!SECONDARY_LANGUAGES.includes(language)) {
+      return res.status(400).json({ ok: false, error: 'Unsupported secondary SEO language', supportedLanguages: SECONDARY_LANGUAGES });
+    }
+
+    const rawLimit = req.body?.limit == null ? 50 : Number(req.body.limit);
+    const rawOffset = req.body?.offset == null ? 0 : Number(req.body.offset);
+    if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > 100) {
+      return res.status(400).json({ ok: false, error: 'limit must be an integer between 1 and 100' });
+    }
+    if (!Number.isInteger(rawOffset) || rawOffset < 0) {
+      return res.status(400).json({ ok: false, error: 'offset must be a non-negative integer' });
+    }
+
+    const dryRun = req.body?.dry_run === true;
+    const force = req.body?.force === true;
+    seoLocalizedBatchState = {
+      running: true,
+      language,
+      offset: rawOffset,
+      limit: rawLimit,
+      dryRun,
+      force,
+      startedAt: new Date().toISOString(),
+      finishedAt: null,
+      progress: null,
+      summary: null,
+    };
+
+    processLocalizedRoutes({
+      language,
+      offset: rawOffset,
+      limit: rawLimit,
+      dryRun,
+      force,
+      progressCallback: (update) => { seoLocalizedBatchState.progress = update; },
+    }).then((summary) => {
+      seoLocalizedBatchState.running = false;
+      seoLocalizedBatchState.finishedAt = new Date().toISOString();
+      seoLocalizedBatchState.summary = summary;
+      log('info', 'localized_seo_batch_generation_completed', summary);
+    }).catch((error) => {
+      seoLocalizedBatchState.running = false;
+      seoLocalizedBatchState.finishedAt = new Date().toISOString();
+      seoLocalizedBatchState.summary = { error: error.message };
+      log('error', 'localized_seo_batch_generation_error', { language, offset: rawOffset, limit: rawLimit, error: error.message });
+    });
+
+    res.status(202).json({ ok: true, status: 'processing', language, offset: rawOffset, limit: rawLimit, dryRun, force });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get('/admin/seo/localized-batch-status', rateLimit('admin', 120, 60000), requireAdmin, async (req, res) => {
+  res.json({ ok: true, ...seoLocalizedBatchState });
 });
 
 // Progress / result of the current-or-last batch run.

@@ -61,10 +61,13 @@ async function fetchRoutes() {
   return sortRoutesForSeo(allRoutes);
 }
 
-async function processLocalizedRoutes({ language, limit = null, dryRun = false, force = false, progressCallback } = {}) {
+async function processLocalizedRoutes({ language, limit = null, offset = 0, dryRun = false, force = false, progressCallback } = {}) {
   if (!SECONDARY_LANGUAGES.includes(language)) throw new Error(`Unsupported secondary SEO language: ${language}`);
   const allRoutes = await fetchRoutes();
-  const routes = Number.isInteger(limit) && limit > 0 ? allRoutes.slice(0, limit) : allRoutes;
+  const safeOffset = Number.isInteger(offset) && offset >= 0 ? offset : 0;
+  const routes = Number.isInteger(limit) && limit > 0
+    ? allRoutes.slice(safeOffset, safeOffset + limit)
+    : allRoutes.slice(safeOffset);
   const titleDisambiguation = buildTitleDisambiguationMap(allRoutes);
   let processed = 0, updated = 0, skipped = 0, failed = 0, qualityRejected = 0;
 
@@ -128,7 +131,7 @@ async function processLocalizedRoutes({ language, limit = null, dryRun = false, 
     }
     if (!dryRun) await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  return { language, total: routes.length, processed, updated, skipped, failed, qualityRejected, dryRun, force };
+  return { language, offset: safeOffset, total: routes.length, processed, updated, skipped, failed, qualityRejected, dryRun, force };
 }
 
 module.exports = { SECONDARY_LANGUAGES, processLocalizedRoutes, fetchRoutes, BATCH_SIZE, buildTitleDisambiguationMap, qualifySeoText };
