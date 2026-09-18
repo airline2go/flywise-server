@@ -15,9 +15,9 @@ jobs:
     timeout-minutes: 10
     env:
       ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
-      API_BASE: https://api.airpiv.com
+      API_BASE: https://flywise-server-eu.onrender.com
     steps:
-      - name: Probe localized batch endpoint
+      - name: Probe direct Render backend endpoint
         shell: bash
         run: |
           set -u
@@ -25,6 +25,7 @@ jobs:
           {
             echo "timestamp=$(date -u +%FT%TZ)"
             echo "admin_token_present=$([[ -n "${ADMIN_TOKEN:-}" ]] && echo true || echo false)"
+            echo "api_base=$API_BASE"
             echo "--- POST dry-run en ---"
             http_code="$(curl --silent --show-error --output diagnostic/post.json --write-out '%{http_code}' \
               --request POST \
@@ -57,6 +58,6 @@ jobs:
       - name: Upload diagnostic evidence
         uses: actions/upload-artifact@v4
         with:
-          name: seo-localized-diagnostic
+          name: seo-localized-diagnostic-direct
           path: diagnostic/
           if-no-files-found: error
