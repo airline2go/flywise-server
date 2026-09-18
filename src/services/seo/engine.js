@@ -2,6 +2,7 @@
 const { makeRng, pick, buildContext } = require('./compose');
 const { makePack } = require('./blocks.secondary');
 const { makeArabicPack } = require('./blocks.ar');
+const { buildSecondaryTitle, buildSecondaryMeta, buildSecondaryIntro } = require('./secondaryMetadata');
 const de = require('./blocks.de');
 
 const SECONDARY = ['en', 'fr', 'es', 'it', 'nl', 'tr', 'ar'];
@@ -70,11 +71,15 @@ function generateRoutePage(route, language='de', sources={}) {
   const rng=makeRng(`${c.slug}|${language}`);
   const {angle,intro:introRaw}=chooseAngle(c,rng,pack.INTRO_ANGLES);
   const openingBlockId=ANGLE_TO_BLOCK[angle]||null;
-  const intro=tidy(introRaw);
+  const intro=language !== 'de' && language !== 'ar' ? buildSecondaryIntro(route, language) : tidy(introRaw);
   const sections=assembleSections(c,rng,pack.BLOCKS,openingBlockId).map((s)=>({heading:tidy(s.heading),body:tidy(s.body)}));
   const faq=assembleFaq(c,pack.FAQ_CANDIDATES).map((f)=>({question:tidy(f.question),answer:tidy(f.answer)}));
-  const title=tidy(pick(rng,pack.TITLES)(c));
-  const metaDescription=tidy(pick(rng,pack.METAS)(c));
+  const title=language !== 'de' && language !== 'ar'
+    ? buildSecondaryTitle(route, language)
+    : tidy(pick(rng,pack.TITLES)(c));
+  const metaDescription=language !== 'de' && language !== 'ar'
+    ? buildSecondaryMeta(route, language)
+    : tidy(pick(rng,pack.METAS)(c));
   const bodyHtml=sections.map((s)=>`<h2>${s.heading}</h2>\n<p>${s.body}</p>`).join('\n');
   return { skipped:false, angle, dataCoverage:Array.from(c.facts).sort(), content:{title,metaDescription,intro:`<p>${intro}</p>\n${bodyHtml}`,introPlain:[intro,...sections.map((s)=>s.body)].join(' '),sections,faq} };
 }
