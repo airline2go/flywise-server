@@ -8,7 +8,21 @@ const LOCALE={
 };
 function safeTitle(c,preferred,compact){const title=preferred(c);if(title.length>=30&&title.length<=70)return title;const short=compact(c);if(short.length>=30&&short.length<=70)return short;return title;}
 function safeMeta(c,preferred,compact,suffix){const meta=preferred(c);if(meta.length>=90&&meta.length<=170)return meta;const short=`${compact(c)} ${suffix}`;return short.length>=90&&short.length<=170?short:meta;}
-function makePack(lang){const l=LOCALE[lang];if(!l)return null;const airPlural = {
+function makePack(lang){const l=LOCALE[lang];if(!l)return null;function formatDuration(lang, min) {
+  if (!Number.isFinite(Number(min)) || Number(min) <= 0) return null;
+  const total = Math.round(Number(min));
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  if (lang === 'en') return h ? (m ? h + 'h ' + m + 'm' : h + 'h') : m + 'm';
+  if (lang === 'fr') return h ? (m ? h + ' h ' + m + ' min' : h + ' h') : m + ' min';
+  if (lang === 'es') return h ? (m ? h + ' h ' + m + ' min' : h + ' h') : m + ' min';
+  if (lang === 'it') return h ? (m ? h + ' h ' + m + ' min' : h + ' h') : m + ' min';
+  if (lang === 'nl') return h ? (m ? h + ' u ' + m + ' min' : h + ' u') : m + ' min';
+  if (lang === 'tr') return h ? (m ? h + ' sa ' + m + ' dk' : h + ' sa') : m + ' dk';
+  return h ? (m ? h + ' h ' + m + ' min' : h + ' h') : m + ' min';
+}
+
+const airPlural = {
   en: 'airlines',
   fr: 'compagnies aériennes',
   es: 'aerolíneas',
@@ -18,12 +32,12 @@ function makePack(lang){const l=LOCALE[lang];if(!l)return null;const airPlural =
 }[lang] || l.air;
 
 const overviewCopy = {
-  en: c => c.o + ' and ' + c.d + ' are about ' + Math.round(c.km) + ' km apart by air. ' + (c.fmtDur ? 'Observed flight time is around ' + c.fmtDur + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' are represented in the route data. ' : '') + 'The route is classified as ' + c.haul + '.',
-  fr: c => c.o + ' et ' + c.d + ' sont séparées d’environ ' + Math.round(c.km) + ' km à vol d’oiseau. ' + (c.fmtDur ? 'La durée de vol observée est d’environ ' + c.fmtDur + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' apparaissent dans les données de la liaison. ' : '') + 'La liaison est classée comme ' + c.haul + '.',
-  es: c => c.o + ' y ' + c.d + ' están a unos ' + Math.round(c.km) + ' km de distancia por aire. ' + (c.fmtDur ? 'El tiempo de vuelo observado es de unos ' + c.fmtDur + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' aparecen en los datos de la ruta. ' : '') + 'La ruta está clasificada como ' + c.haul + '.',
-  it: c => c.o + ' e ' + c.d + ' distano circa ' + Math.round(c.km) + ' km in linea d’aria. ' + (c.fmtDur ? 'Il tempo di volo osservato è di circa ' + c.fmtDur + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' sono presenti nei dati della rotta. ' : '') + 'La rotta è classificata come ' + c.haul + '.',
-  nl: c => c.o + ' en ' + c.d + ' liggen ongeveer ' + Math.round(c.km) + ' km van elkaar over de lucht. ' + (c.fmtDur ? 'De waargenomen vliegtijd is ongeveer ' + c.fmtDur + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' zijn in de routegegevens vertegenwoordigd. ' : '') + 'De route is ingedeeld als ' + c.haul + '.',
-  tr: c => c.o + ' ile ' + c.d + ' kuş uçuşu yaklaşık ' + Math.round(c.km) + ' km uzaklıktadır. ' + (c.fmtDur ? 'Gözlemlenen uçuş süresi yaklaşık ' + c.fmtDur + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' rota verilerinde yer alıyor. ' : '') + 'Rota ' + c.haul + ' olarak sınıflandırılmıştır.',
+  en: c => c.o + ' and ' + c.d + ' are about ' + Math.round(c.km) + ' km apart by air. ' + (formatDuration(lang, c.durMin) ? 'Observed flight time is around ' + formatDuration(lang, c.durMin) + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' are represented in the route data. ' : '') + 'The route is classified as ' + c.haul + '.',
+  fr: c => c.o + ' et ' + c.d + ' sont séparées d’environ ' + Math.round(c.km) + ' km à vol d’oiseau. ' + (formatDuration(lang, c.durMin) ? 'La durée de vol observée est d’environ ' + formatDuration(lang, c.durMin) + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' apparaissent dans les données de la liaison. ' : '') + 'La liaison est classée comme ' + c.haul + '.',
+  es: c => c.o + ' y ' + c.d + ' están a unos ' + Math.round(c.km) + ' km de distancia por aire. ' + (formatDuration(lang, c.durMin) ? 'El tiempo de vuelo observado es de unos ' + formatDuration(lang, c.durMin) + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' aparecen en los datos de la ruta. ' : '') + 'La ruta está clasificada como ' + c.haul + '.',
+  it: c => c.o + ' e ' + c.d + ' distano circa ' + Math.round(c.km) + ' km in linea d’aria. ' + (formatDuration(lang, c.durMin) ? 'Il tempo di volo osservato è di circa ' + formatDuration(lang, c.durMin) + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' sono presenti nei dati della rotta. ' : '') + 'La rotta è classificata come ' + c.haul + '.',
+  nl: c => c.o + ' en ' + c.d + ' liggen ongeveer ' + Math.round(c.km) + ' km van elkaar over de lucht. ' + (formatDuration(lang, c.durMin) ? 'De waargenomen vliegtijd is ongeveer ' + formatDuration(lang, c.durMin) + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' zijn in de routegegevens vertegenwoordigd. ' : '') + 'De route is ingedeeld als ' + c.haul + '.',
+  tr: c => c.o + ' ile ' + c.d + ' kuş uçuşu yaklaşık ' + Math.round(c.km) + ' km uzaklıktadır. ' + (formatDuration(lang, c.durMin) ? 'Gözlemlenen uçuş süresi yaklaşık ' + formatDuration(lang, c.durMin) + '. ' : '') + (c.airlineCount ? c.airlineCount + ' ' + airPlural + ' rota verilerinde yer alıyor. ' : '') + 'Rota ' + c.haul + ' olarak sınıflandırılmıştır.',
 }[lang];
 
 const priceCopy = {
@@ -77,12 +91,12 @@ const faq = [
     applicable: c => c.facts.has('duration'),
     q: () => l.faq[0],
     a: c => ({
-      en: c.fmtDur ? 'The observed average flight time is around ' + c.fmtDur + '.' : 'No reliable observed flight time is currently available.',
-      fr: c.fmtDur ? 'La durée moyenne de vol observée est d’environ ' + c.fmtDur + '.' : 'Aucune durée de vol observée fiable n’est actuellement disponible.',
-      es: c.fmtDur ? 'El tiempo medio de vuelo observado es de unos ' + c.fmtDur + '.' : 'No hay un tiempo de vuelo observado fiable disponible actualmente.',
-      it: c.fmtDur ? 'Il tempo medio di volo osservato è di circa ' + c.fmtDur + '.' : 'Al momento non è disponibile una durata di volo osservata affidabile.',
-      nl: c.fmtDur ? 'De waargenomen gemiddelde vliegtijd is ongeveer ' + c.fmtDur + '.' : 'Er is momenteel geen betrouwbare waargenomen vliegtijd beschikbaar.',
-      tr: c.fmtDur ? 'Gözlemlenen ortalama uçuş süresi yaklaşık ' + c.fmtDur + '.' : 'Şu anda güvenilir bir gözlemlenen uçuş süresi bulunmuyor.',
+      en: formatDuration(lang, c.durMin) ? 'The observed average flight time is around ' + formatDuration(lang, c.durMin) + '.' : 'No reliable observed flight time is currently available.',
+      fr: formatDuration(lang, c.durMin) ? 'La durée moyenne de vol observée est d’environ ' + formatDuration(lang, c.durMin) + '.' : 'Aucune durée de vol observée fiable n’est actuellement disponible.',
+      es: formatDuration(lang, c.durMin) ? 'El tiempo medio de vuelo observado es de unos ' + formatDuration(lang, c.durMin) + '.' : 'No hay un tiempo de vuelo observado fiable disponible actualmente.',
+      it: formatDuration(lang, c.durMin) ? 'Il tempo medio di volo osservato è di circa ' + formatDuration(lang, c.durMin) + '.' : 'Al momento non è disponibile una durata di volo osservata affidabile.',
+      nl: formatDuration(lang, c.durMin) ? 'De waargenomen gemiddelde vliegtijd is ongeveer ' + formatDuration(lang, c.durMin) + '.' : 'Er is momenteel geen betrouwbare waargenomen vliegtijd beschikbaar.',
+      tr: formatDuration(lang, c.durMin) ? 'Gözlemlenen ortalama uçuş süresi yaklaşık ' + formatDuration(lang, c.durMin) + '.' : 'Şu anda güvenilir bir gözlemlenen uçuş süresi bulunmuyor.',
     }[lang]),
   },
   {
