@@ -1,0 +1,62 @@
+name: Localized SEO refresh diagnostic
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/seo-localized-diagnostic-2026-09.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+      API_BASE: https://api.airpiv.com
+    steps:
+      - name: Probe localized batch endpoint
+        shell: bash
+        run: |
+          set -u
+          mkdir -p diagnostic
+          {
+            echo "timestamp=$(date -u +%FT%TZ)"
+            echo "admin_token_present=$([[ -n "${ADMIN_TOKEN:-}" ]] && echo true || echo false)"
+            echo "--- POST dry-run en ---"
+            http_code="$(curl --silent --show-error --output diagnostic/post.json --write-out '%{http_code}' \
+              --request POST \
+              --header "Authorization: Bearer ${ADMIN_TOKEN:-}" \
+              --header "Accept: application/json" \
+              --header "Content-Type: application/json" \
+              --data '{"language":"en","offset":0,"limit":5,"dry_run":true,"force":true}' \
+              "$API_BASE/admin/seo/localized-batch-generate" 2>diagnostic/post.stderr || true)"
+            echo "http_code=$http_code"
+            cat diagnostic/post.json || true
+            echo
+            cat diagnostic/post.stderr || true
+            echo "--- STATUS POLL ---"
+            for i in $(seq 1 20); do
+              echo "poll=$i timestamp=$(date -u +%FT%TZ)"
+              curl --silent --show-error \
+                --request GET \
+                --header "Authorization: Bearer ${ADMIN_TOKEN:-}" \
+                --header "Accept: application/json" \
+                "$API_BASE/admin/seo/localized-batch-status" \
+                > "diagnostic/status-$i.json" 2> "diagnostic/status-$i.stderr" || true
+              cat "diagnostic/status-$i.json" || true
+              echo
+              cat "diagnostic/status-$i.stderr" || true
+              echo
+              sleep 1
+            done
+          } | tee diagnostic/summary.txt
+
+      - name: Upload diagnostic evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: seo-localized-diagnostic
+          path: diagnostic/
+          if-no-files-found: error
