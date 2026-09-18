@@ -22,6 +22,25 @@ jobs:
       API_BASE: https://api.airpiv.com
       BROWSER_UA: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
     steps:
+      - name: Wait for production backend readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            code="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+              --request GET \
+              --user-agent "$BROWSER_UA" \
+              "$API_BASE/health" || true)"
+            echo "backend readiness poll=$i http=$code"
+            if [[ "$code" == "200" ]]; then
+              sleep 15
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Production backend did not become ready within 5 minutes." >&2
+          exit 1
+
       - name: Preflight and bounded localized SEO refresh
         shell: bash
         run: |
