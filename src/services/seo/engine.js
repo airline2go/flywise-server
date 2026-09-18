@@ -4,6 +4,7 @@ const { makePack } = require('./blocks.secondary');
 const { makeArabicPack } = require('./blocks.ar');
 const { buildSecondaryTitle, buildSecondaryMeta, buildSecondaryIntro } = require('./secondaryMetadata');
 const { generatedFieldIsSafe } = require('./truthfulness');
+const { hasVerifiedFlightEvidence } = require('../indexability');
 const de = require('./blocks.de');
 
 const SECONDARY = ['en', 'fr', 'es', 'it', 'nl', 'tr', 'ar'];
@@ -17,12 +18,12 @@ function hasManualContent(route) {
   return !!(route.custom_title || route.custom_meta_description ||
     (Array.isArray(route.custom_faq) ? route.custom_faq.length : route.custom_faq) || route.intro_text);
 }
-function assessEligibility(route, { allowManual = false } = {}) {
+function assessEligibility(route, { allowManual = false, allowMissingDistance = false } = {}) {
   const reasons = [];
   if (!route) return { eligible: false, reasons: ['no route'] };
   if (route.status !== 'published') reasons.push(`status is '${route.status}'`);
   if (!route.origin_city || !route.destination_city) reasons.push('missing city name');
-  if (!route.distance_km || route.distance_km <= 0) reasons.push('missing distance_km');
+  if (!allowMissingDistance && (!route.distance_km || route.distance_km <= 0)) reasons.push('missing distance_km');
   if (!route.haul_type) reasons.push('missing haul_type');
   if (!allowManual && hasManualContent(route)) reasons.push('manually edited content present');
   return { eligible: reasons.length === 0, reasons };
@@ -86,7 +87,8 @@ function safeSecondaryFaq(route, language) {
 }
 function generateRoutePage(route, language='de', sources={}) {
   const allowManual = language !== 'de';
-  const gate = assessEligibility(route, { allowManual });
+  const allowMissingDistance = language !== 'de' && hasVerifiedFlightEvidence(route);
+  const gate = assessEligibility(route, { allowManual, allowMissingDistance });
   if (!gate.eligible) return { skipped:true, reasons:gate.reasons };
   const pack = PACKS[language];
   if (!pack) return { skipped:true, reasons:[`language '${language}' has no block pack`] };
