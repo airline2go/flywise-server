@@ -49,4 +49,19 @@ describe('multilingual route SEO', () => {
     expect(qualifySeoText('Flights from Berlin to Paris', c, { origin: false, destination: false }))
       .toBe('Flights from Berlin to Paris');
   });
+
+
+  test.each(['fr','es','it','nl','tr'])('does not leak English or German secondary prose into %s', (language) => {
+    const result = generateRoutePage(route, language);
+    expect(result.skipped).toBe(false);
+    const text = [
+      result.content.intro,
+      result.content.introPlain,
+      ...result.content.sections.map((section) => section.heading + ' ' + section.body),
+      ...result.content.faq.map((item) => item.question + ' ' + item.answer),
+    ].join(' ');
+    expect(text).not.toMatch(/Observed flight time|are represented in the route data|Direct and connecting options|Check terminal and ground-transport/i);
+    expect(text).not.toMatch(/\bStd\.\b|\bMin\.\b|\bshort-haul\b|\bmedium-haul\b|\blong-haul\b/);
+  });
+
 });
