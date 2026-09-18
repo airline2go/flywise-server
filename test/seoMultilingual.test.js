@@ -1,5 +1,5 @@
 const { generateRoutePage, supportedLanguages } = require('../src/services/seo/engine');
-const { buildTitleDisambiguationMap, qualifySeoText } = require('../src/services/multilingualSeoBatchProcessor');
+const { buildTitleDisambiguationMap, qualifySeoText, clampMetaDescription } = require('../src/services/multilingualSeoBatchProcessor');
 
 const route = {
   id: '00000000-0000-0000-0000-000000000001', slug: 'berlin-paris', status: 'published',
@@ -37,7 +37,7 @@ describe('multilingual route SEO', () => {
   test('qualifies only genuinely colliding city-pair routes', () => {
     const a = { ...route, slug: 'fra-ham', origin_city: 'Frankfurt', origin_iata: 'FRA', destination_city: 'Hamburg', destination_iata: 'HAM' };
     const b = { ...route, slug: 'fra-xfw', origin_city: 'Frankfurt', origin_iata: 'FRA', destination_city: 'Hamburg', destination_iata: 'XFW' };
-    const c = { ...route, slug: 'ber-par', origin_city: 'Berlin', origin_iata: 'BER', destination_city: 'Paris', destination_iata: 'CDG' };
+    const c = { ...route, slug: 'ber-par', origin_city: 'Berlin', origin_iata: 'BER', destination_iata: 'CDG', destination_city: 'Paris' };
     const map = buildTitleDisambiguationMap([a, b, c]);
 
     expect(map.get('fra-ham')).toEqual({ origin: false, destination: true });
@@ -50,6 +50,18 @@ describe('multilingual route SEO', () => {
       .toBe('Flights from Berlin to Paris');
   });
 
+  test('clamps a disambiguated meta description back inside the quality gate', () => {
+    const duplicate = { ...route, slug: 'pmi-lhr', origin_city: 'Palma de Mallorca', origin_iata: 'PMI', destination_city: 'London', destination_iata: 'LHR' };
+    const long = 'Compare flights from Palma de Mallorca to London using route data on fares, airlines, flight time and direct options. Use the available route evidence when planning your trip.';
+    const qualified = qualifySeoText(long, duplicate, { origin: true, destination: true });
+    const clamped = clampMetaDescription(qualified);
+
+    expect(qualified.length).toBeGreaterThan(170);
+    expect(clamped.length).toBeLessThanOrEqual(170);
+    expect(clamped.length).toBeGreaterThanOrEqual(90);
+    expect(clamped).toContain('Palma de Mallorca (PMI)');
+    expect(clamped).toContain('London (LHR)');
+  });
 
   test.each(['fr','es','it','nl','tr'])('does not leak English or German secondary prose into %s', (language) => {
     const result = generateRoutePage(route, language);
@@ -63,5 +75,4 @@ describe('multilingual route SEO', () => {
     expect(text).not.toMatch(/Observed flight time|are represented in the route data|Direct and connecting options|Check terminal and ground-transport/i);
     expect(text).not.toMatch(/\bStd\.\b|\bMin\.\b|\bshort-haul\b|\bmedium-haul\b|\blong-haul\b/);
   });
-
 });

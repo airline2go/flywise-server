@@ -44,6 +44,14 @@ function qualifySeoText(text, route, qualification) {
   return result;
 }
 
+function clampMetaDescription(text, maxLength = 170) {
+  const value = String(text || '').replace(/\s+/g, ' ').trim();
+  if (value.length <= maxLength) return value;
+  const limit = Math.max(90, maxLength - 1);
+  const cut = value.slice(0, limit).replace(/\s+\S*$/, '').trim();
+  return `${cut}…`;
+}
+
 async function fetchRoutes() {
   if (!supa) throw new Error('Database not available');
   const allRoutes = [];
@@ -91,7 +99,9 @@ async function processLocalizedRoutes({ language, limit = null, offset = 0, dryR
         const qualification = titleDisambiguation.get(route.slug);
         if (qualification) {
           gen.content.title = qualifySeoText(gen.content.title, route, qualification);
-          gen.content.metaDescription = qualifySeoText(gen.content.metaDescription, route, qualification);
+          gen.content.metaDescription = clampMetaDescription(qualifySeoText(gen.content.metaDescription, route, qualification));
+        } else {
+          gen.content.metaDescription = clampMetaDescription(gen.content.metaDescription);
         }
 
         const quality = validateGeneratedSeo(route, gen.content);
@@ -134,4 +144,4 @@ async function processLocalizedRoutes({ language, limit = null, offset = 0, dryR
   return { language, offset: safeOffset, total: routes.length, processed, updated, skipped, failed, qualityRejected, dryRun, force };
 }
 
-module.exports = { SECONDARY_LANGUAGES, processLocalizedRoutes, fetchRoutes, BATCH_SIZE, buildTitleDisambiguationMap, qualifySeoText };
+module.exports = { SECONDARY_LANGUAGES, processLocalizedRoutes, fetchRoutes, BATCH_SIZE, buildTitleDisambiguationMap, qualifySeoText, clampMetaDescription };
