@@ -331,11 +331,28 @@ app.get('/debug/raw', requireAdmin, rateLimit('pay', 10, 60000), async (req, res
   }
 });
 
+const SEARCH_CACHE_TTL_MS = 120000;
+async function getSharedSearchCache(cacheKey) {
+  if (!redis || redis.status !== 'ready') return null;
+  try {
+    const raw = await redis.get('search_cache:v2:' + cacheKey);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+async function setSharedSearchCache(cacheKey, data) {
+  if (!redis || redis.status !== 'ready') return;
+  try {
+    await redis.set('search_cache:v2:' + cacheKey, JSON.stringify(data), 'EX', Math.ceil(SEARCH_CACHE_TTL_MS / 1000));
+  } catch (e) { /* cache is best-effort */ }
+}
 const _searchCache = new Map();
 setInterval(() => {
-  const cutoff = Date.now() - 90000;
+  const cutoff = Date.now() - SEARCH_CACHE_TTL_MS;
   for (const [k, v] of _searchCache) { if (v.t < cutoff) _searchCache.delete(k); }
-}, 90000).unref();
+}, SEARCH_CACHE_TTL_MS).unref();
 
 app.post('/search', attachUserIfPresent, searchGuard({
   bucket: 'search', source: 'user_search',
@@ -350,10 +367,32 @@ app.post('/search', attachUserIfPresent, searchGuard({
       slices: bodySlices,
     } = req.body;
 
-    const searchCacheKey = JSON.stringify({ origin, destination, departure_date, return_date, cabin_class, adults, children, infants, bodySlices });
+    const normalizedSlices = Array.isArray(bodySlices)
+      ? bodySlices.map((s) => ({
+        origin: String(s?.origin || '').trim().toUpperCase(),
+        destination: String(s?.destination || '').trim().toUpperCase(),
+        departure_date: String(s?.departure_date || '').trim(),
+      }))
+      : null;
+    const searchCacheKey = JSON.stringify({
+      origin: String(origin || '').trim().toUpperCase(),
+      destination: String(destination || '').trim().toUpperCase(),
+      departure_date: String(departure_date || '').trim(),
+      return_date: String(return_date || '').trim(),
+      cabin_class: String(cabin_class || 'economy').toLowerCase(),
+      adults: Number(adults) || 1,
+      children: Number(children) || 0,
+      infants: Number(infants) || 0,
+      bodySlices: normalizedSlices,
+    });
     const cachedSearch = _searchCache.get(searchCacheKey);
-    if (cachedSearch && (Date.now() - cachedSearch.t) < 90000) {
+    if (cachedSearch && (Date.now() - cachedSearch.t) < SEARCH_CACHE_TTL_MS) {
       return res.json(cachedSearch.data);
+    }
+    const sharedCachedSearch = await getSharedSearchCache(searchCacheKey);
+    if (sharedCachedSearch) {
+      _searchCache.set(searchCacheKey, { t: Date.now(), data: sharedCachedSearch });
+      return res.json(sharedCachedSearch);
     }
 
     const passengers = [];
@@ -399,6 +438,7 @@ app.post('/search', attachUserIfPresent, searchGuard({
 
     const responseData = { ok: true, offer_request_id: result.data?.id, offers, total: offers.length };
     _searchCache.set(searchCacheKey, { t: Date.now(), data: responseData });
+    await setSharedSearchCache(searchCacheKey, responseData);
     res.json(responseData);
     incrementDailyPriceCheckCounter();
   } catch (err) {
@@ -454,8 +494,8 @@ app.get('/route-price', rateLimit('route-price', 60, 60000), async (req, res) =>
 
 app.get('/search/airports', attachUserIfPresent, searchGuard({
   bucket: 'airports', source: 'airport_search',
-  ipMax: 60, ipWindowMs: 60000,
-  sessionMax: 60, sessionWindowMs: 60000,
+  ipMax: 30, ipWindowMs: 60000,
+  sessionMax: 30, sessionWindowMs: 60000,
 }), async (req, res) => {
   try {
     const q = (req.query.q || '').toString().trim();
