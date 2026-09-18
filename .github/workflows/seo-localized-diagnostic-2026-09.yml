@@ -18,49 +18,70 @@ jobs:
       API_BASE: https://api.airpiv.com
       BROWSER_UA: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
     steps:
-      - name: Probe API endpoint with browser-shaped user agent
+      - name: Dry-run all secondary languages
         shell: bash
         run: |
           set -u
           mkdir -p diagnostic
-          {
-            echo "timestamp=$(date -u +%FT%TZ)"
-            echo "admin_token_present=$([[ -n "${ADMIN_TOKEN:-}" ]] && echo true || echo false)"
-            echo "api_base=$API_BASE"
-            echo "--- POST dry-run en ---"
-            http_code="$(curl --silent --show-error --output diagnostic/post.json --write-out '%{http_code}' \
+          echo "timestamp=$(date -u +%FT%TZ)" | tee diagnostic/summary.txt
+          echo "admin_token_present=$([[ -n "${ADMIN_TOKEN:-}" ]] && echo true || echo false)" | tee -a diagnostic/summary.txt
+
+          for lang in en es fr it nl tr; do
+            echo "=== DRY-RUN $lang ===" | tee -a diagnostic/summary.txt
+
+            before="$(curl --silent --show-error \
+              --request GET \
+              --user-agent "$BROWSER_UA" \
+              --header "Authorization: Bearer ${ADMIN_TOKEN:-}" \
+              --header "Accept: application/json" \
+              "$API_BASE/admin/seo/localized-batch-status" || true)"
+            before_finished="$(printf '%s' "$before" | jq -r '.finishedAt // empty')"
+            before_started="$(printf '%s' "$before" | jq -r '.startedAt // empty')"
+
+            http_code="$(curl --silent --show-error --output "diagnostic/$lang-post.json" --write-out '%{http_code}' \
               --request POST \
               --user-agent "$BROWSER_UA" \
               --header "Authorization: Bearer ${ADMIN_TOKEN:-}" \
               --header "Accept: application/json" \
               --header "Content-Type: application/json" \
-              --data '{"language":"en","offset":0,"limit":5,"dry_run":true,"force":true}' \
-              "$API_BASE/admin/seo/localized-batch-generate" 2>diagnostic/post.stderr || true)"
-            echo "http_code=$http_code"
-            cat diagnostic/post.json || true
-            echo
-            cat diagnostic/post.stderr || true
-            echo "--- STATUS POLL ---"
-            for i in $(seq 1 20); do
-              echo "poll=$i timestamp=$(date -u +%FT%TZ)"
-              curl --silent --show-error \
+              --data "{\"language\":\"$lang\",\"offset\":0,\"limit\":5,\"dry_run\":true,\"force\":true}" \
+              "$API_BASE/admin/seo/localized-batch-generate" 2> "diagnostic/$lang-post.stderr" || true)"
+            echo "http_code=$http_code" | tee -a diagnostic/summary.txt
+            cat "diagnostic/$lang-post.json" | tee -a diagnostic/summary.txt
+            echo | tee -a diagnostic/summary.txt
+
+            completed="false"
+            for i in $(seq 1 30); do
+              status="$(curl --silent --show-error \
                 --request GET \
                 --user-agent "$BROWSER_UA" \
                 --header "Authorization: Bearer ${ADMIN_TOKEN:-}" \
                 --header "Accept: application/json" \
-                "$API_BASE/admin/seo/localized-batch-status" \
-                > "diagnostic/status-$i.json" 2> "diagnostic/status-$i.stderr" || true
-              cat "diagnostic/status-$i.json" || true
-              echo
-              cat "diagnostic/status-$i.stderr" || true
-              echo
+                "$API_BASE/admin/seo/localized-batch-status" || true)"
+              printf '%s' "$status" > "diagnostic/$lang-status-$i.json"
+              state_lang="$(printf '%s' "$status" | jq -r '.language // empty')"
+              state_offset="$(printf '%s' "$status" | jq -r '.offset // -1')"
+              running="$(printf '%s' "$status" | jq -r '.running // false')"
+              finished="$(printf '%s' "$status" | jq -r '.finishedAt // empty')"
+              started="$(printf '%s' "$status" | jq -r '.startedAt // empty')"
+              if [[ "$running" == "false" && "$state_lang" == "$lang" && "$state_offset" == "0" && -n "$finished" && "$finished" != "$before_finished" && "$started" != "$before_started" ]]; then
+                echo "$status" | jq . | tee -a diagnostic/summary.txt
+                completed="true"
+                break
+              fi
               sleep 1
             done
-          } | tee diagnostic/summary.txt
+
+            if [[ "$completed" != "true" ]]; then
+              echo "TIMEOUT/NO-COMPLETION $lang" | tee -a diagnostic/summary.txt
+            fi
+            echo | tee -a diagnostic/summary.txt
+            sleep 1
+          done
 
       - name: Upload diagnostic evidence
         uses: actions/upload-artifact@v4
         with:
-          name: seo-localized-diagnostic-browser-ua
+          name: seo-localized-diagnostic-all-langs
           path: diagnostic/
           if-no-files-found: error
