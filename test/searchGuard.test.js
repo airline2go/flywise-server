@@ -84,7 +84,7 @@ function nextIp() {
 }
 function ss() { return createSearchSession().token; }
 function authed(req, token, ip) {
-  return req.set('X-Search-Session', token || ss()).set('X-Forwarded-For', ip || nextIp());
+  return req.set('X-Search-Session', token || ss()).set('CF-Connecting-IP', ip || nextIp());
 }
 function publishPair(from, to) {
   supa.__setResponse('route_pages', {
@@ -135,7 +135,7 @@ describe('CASE 1 — bot without Search Session never reaches Duffel', () => {
   test('POST /search without X-Search-Session is 403 and Duffel is not called', async () => {
     const res = await request(app)
       .post('/search')
-      .set('X-Forwarded-For', nextIp())
+      .set('CF-Connecting-IP', nextIp())
       .send({ origin: 'BER', destination: 'CDG', departure_date: '2026-08-01' });
     expect(res.status).toBe(403);
     expect(res.body.ok).toBe(false);
@@ -143,7 +143,7 @@ describe('CASE 1 — bot without Search Session never reaches Duffel', () => {
   });
 
   test('GET /search/airports without a session is 403 and Duffel is not called', async () => {
-    const res = await request(app).get('/search/airports?q=berlin').set('X-Forwarded-For', nextIp());
+    const res = await request(app).get('/search/airports?q=berlin').set('CF-Connecting-IP', nextIp());
     expect(res.status).toBe(403);
     expect(mockDuffelFn).not.toHaveBeenCalled();
   });
@@ -151,14 +151,14 @@ describe('CASE 1 — bot without Search Session never reaches Duffel', () => {
 
 describe('CASE 2 — real guest with Search Session may search without an account', () => {
   test('POST /search/session issues a token without login', async () => {
-    const res = await request(app).post('/search/session').set('X-Forwarded-For', nextIp()).send({});
+    const res = await request(app).post('/search/session').set('CF-Connecting-IP', nextIp()).send({});
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.token).toMatch(/^v1\./);
   });
 
   test('POST /search with that session reaches Duffel and returns offers', async () => {
-    const token = (await request(app).post('/search/session').set('X-Forwarded-For', nextIp()).send({})).body.token;
+    const token = (await request(app).post('/search/session').set('CF-Connecting-IP', nextIp()).send({})).body.token;
     const res = await authed(request(app).post('/search'), token)
       .send({ origin: 'BER', destination: 'CDG', departure_date: '2026-11-01' });
     expect(res.status).toBe(200);
@@ -172,7 +172,7 @@ describe('CASE 3 — admin still works without Search Session', () => {
     const res = await request(app)
       .post('/search')
       .set('Authorization', 'Bearer test-admin-token')
-      .set('X-Forwarded-For', nextIp())
+      .set('CF-Connecting-IP', nextIp())
       .send({ origin: 'DUS', destination: 'PMI', departure_date: '2026-12-01' });
     expect(res.status).toBe(200);
     expect(mockDuffelFn).toHaveBeenCalledTimes(1);
@@ -188,7 +188,7 @@ describe('CASE 4 — session rate limit stops Duffel before the cap is exceeded'
       const res = await request(app)
         .post('/search')
         .set('X-Search-Session', token)
-        .set('X-Forwarded-For', ip)
+        .set('CF-Connecting-IP', ip)
         .send({ origin: 'BER', destination: 'CDG', departure_date: `2027-01-${String(i + 1).padStart(2, '0')}` });
       statuses.push(res.status);
     }
@@ -204,7 +204,7 @@ describe('CASE 5 — Turnstile is verified server-side when configured', () => {
     const prevFetch = global.fetch;
     global.fetch = jest.fn();
     try {
-      const res = await request(app).post('/search/session').set('X-Forwarded-For', nextIp()).send({});
+      const res = await request(app).post('/search/session').set('CF-Connecting-IP', nextIp()).send({});
       expect(res.status).toBe(403);
       expect(global.fetch).not.toHaveBeenCalled();
     } finally {
@@ -216,14 +216,14 @@ describe('CASE 5 — Turnstile is verified server-side when configured', () => {
 
 describe('CASE 6 — GET /route-price is cache-only and never calls Duffel', () => {
   test('an unpublished route is 403 with Duffel=0', async () => {
-    const res = await request(app).get('/route-price?from=AAA&to=BBB').set('X-Forwarded-For', nextIp());
+    const res = await request(app).get('/route-price?from=AAA&to=BBB').set('CF-Connecting-IP', nextIp());
     expect(res.status).toBe(403);
     expect(mockDuffelFn).not.toHaveBeenCalled();
   });
 
   test('a published route with no cache returns price:null and Duffel=0', async () => {
     publishPair('BER', 'CDG');
-    const res = await request(app).get('/route-price?from=BER&to=CDG').set('X-Forwarded-For', nextIp());
+    const res = await request(app).get('/route-price?from=BER&to=CDG').set('CF-Connecting-IP', nextIp());
     expect(res.status).toBe(200);
     expect(res.body).toEqual(expect.objectContaining({ ok: true, price: null }));
     expect(mockDuffelFn).not.toHaveBeenCalled();
@@ -235,3 +235,4 @@ describe('CASE 7 — background Duffel warming is off by default', () => {
     expect(env.DUFFEL_BACKGROUND_SEARCH_ENABLED).toBe(false);
   });
 });
+
