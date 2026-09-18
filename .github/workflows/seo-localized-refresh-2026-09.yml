@@ -21,26 +21,7 @@ jobs:
       ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
       API_BASE: https://api.airpiv.com
     steps:
-      - name: Preflight — five routes per secondary language, dry-run only
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -n "${ADMIN_TOKEN:-}" || { echo "ADMIN_TOKEN repository secret is not configured" >&2; exit 1; }
-
-          for lang in en es fr it nl tr; do
-            echo "=== DRY-RUN $lang ==="
-            curl --fail-with-body --silent --show-error \
-              --request POST \
-              --header "Authorization: Bearer $ADMIN_TOKEN" \
-              --header "Accept: application/json" \
-              --header "Content-Type: application/json" \
-              --data "{\"language\":\"$lang\",\"offset\":0,\"limit\":5,\"dry_run\":true,\"force\":true}" \
-              "$API_BASE/admin/seo/localized-batch-generate"
-            echo
-            sleep 1
-          done
-
-      - name: Refresh all secondary localized SEO in bounded batches
+      - name: Preflight and bounded localized SEO refresh
         shell: bash
         run: |
           set -euo pipefail
@@ -67,13 +48,11 @@ jobs:
               fi
 
               if [[ "$seen_running" == "true" && "$running" == "false" ]]; then
-                local state_lang state_offset total processed updated skipped failed rejected
+                local state_lang state_offset total processed failed rejected
                 state_lang="$(printf '%s' "$status" | jq -r '.language // empty')"
                 state_offset="$(printf '%s' "$status" | jq -r '.offset // -1')"
                 total="$(printf '%s' "$status" | jq -r '.summary.total // .progress.total // -1')"
                 processed="$(printf '%s' "$status" | jq -r '.summary.processed // .progress.processed // -1')"
-                updated="$(printf '%s' "$status" | jq -r '.summary.updated // -1')"
-                skipped="$(printf '%s' "$status" | jq -r '.summary.skipped // -1')"
                 failed="$(printf '%s' "$status" | jq -r '.summary.failed // -1')"
                 rejected="$(printf '%s' "$status" | jq -r '.summary.qualityRejected // -1')"
 
@@ -94,6 +73,21 @@ jobs:
             echo "Timed out waiting for $lang offset $offset" >&2
             exit 1
           }
+
+          for lang in en es fr it nl tr; do
+            echo "=== DRY-RUN $lang ==="
+            response="$(curl --fail-with-body --silent --show-error \
+              --request POST \
+              --header "Authorization: Bearer $ADMIN_TOKEN" \
+              --header "Accept: application/json" \
+              --header "Content-Type: application/json" \
+              --data "{\"language\":\"$lang\",\"offset\":0,\"limit\":5,\"dry_run\":true,\"force\":true}" \
+              "$API_BASE/admin/seo/localized-batch-generate")"
+            echo "$response"
+            printf '%s' "$response" | jq -e '.ok == true and .status == "processing"' >/dev/null
+            wait_for_batch "$lang" "0" "5"
+            sleep 1
+          done
 
           for lang in en es fr it nl tr; do
             for offset in 0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500 1600 1700; do
