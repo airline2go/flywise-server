@@ -649,4 +649,3 @@ module.exports.avgDurationExcludingOutliers = avgDurationExcludingOutliers;
 module.exports.fetchAndCacheRoutePrice = fetchAndCacheRoutePrice;
 module.exports.isPublishedRoute = isPublishedRoute;
 module.exports.resetPublishedRouteCache = function () { _publishedRouteCache.map.clear(); };
-
