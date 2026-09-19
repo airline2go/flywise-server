@@ -160,4 +160,3 @@ module.exports = {
   logSearchAccess,
   SESSION_TTL_SEC,
 };
-
