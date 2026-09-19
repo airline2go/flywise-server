@@ -67,4 +67,3 @@ if (_rlCleanup.unref) _rlCleanup.unref();
 module.exports = rateLimit;
 module.exports.consumeRateLimit = consumeRateLimit;
 module.exports.getClientKey = getClientKey;
-
