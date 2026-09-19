@@ -51,9 +51,10 @@ app.use(express.json({ limit: '2mb' }));
 require('./src/middleware/globalMiddleware')(app);
 
 require('./src/routes/health.routes')(app);
+// Route-page price refresh is intentionally disabled. Airpiv no longer performs
+// background or visitor-triggered route-price updates. Real user flight search
+// and booking continue through /search and booking routes.
 env.DUFFEL_BACKGROUND_SEARCH_ENABLED = false;
-require('./src/middleware/liveRoutePrice')(app);
-require('./src/middleware/routePriceVisitRefresh')(app);
 require('./src/middleware/blockAutomatedDuffelProbes')(app);
 require('./src/routes/search.routes')(app);
 require('./src/routes/booking.routes')(app);
@@ -84,7 +85,7 @@ require('./src/routes/admin-finance.routes')(app);
 require('./src/services/routeTraffic');
 require('./src/services/routeScore');
 require('./src/services/routeIntelligenceRefresh');
-require('./src/services/routePriceHistoryRefresh');
+// Route price history aggregation/refresh intentionally disabled.
 require('./src/services/socialAutoGenerate');
 require('./src/services/finance/financeCron').start();
 
