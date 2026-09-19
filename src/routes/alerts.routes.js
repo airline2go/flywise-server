@@ -59,34 +59,9 @@ app.post('/alerts/:id/delete', attachUserIfPresent, rateLimit('alerts', 30, 6000
 });
 
 app.post('/alerts/:id/check', attachUserIfPresent, rateLimit('alerts', 20, 60000), async (req, res) => {
-  try {
-    if (!req.userId) return res.status(401).json({ ok: false, error: 'Nicht angemeldet' });
-    if (!supa) return res.status(503).json({ ok: false, error: 'Datenbank nicht verfügbar' });
-    const { data: trip, error } = await supa.from('saved_trips').select('*').eq('id', req.params.id).eq('user_id', req.userId).maybeSingle();
-    if (error) throw new Error(error.message);
-    if (!trip) return res.status(404).json({ ok: false, error: 'Route nicht gefunden' });
-
-    const offerReq = await duffel('POST', '/air/offer_requests?return_offers=true', {
-      data: {
-        slices: [{ origin: trip.origin, destination: trip.destination, departure_date: trip.departure_date }],
-        passengers: [{ type: 'adult' }],
-        cabin_class: 'economy',
-      },
-    }, null, {
-      source: 'user_search',
-      searchContext: { valid: true, sid: 'user:' + req.userId, userId: req.userId },
-    });
-    const offers = (offerReq.data && offerReq.data.offers) || [];
-    let cheapest = null;
-    offers.forEach((o) => { const p = parseFloat(o.total_amount); if (cheapest === null || p < cheapest) cheapest = p; });
-
-    if (cheapest !== null) {
-      supa.from('saved_trips').update({ last_price: cheapest }).eq('id', trip.id).then(function(){}, function(){});
-    }
-    const hitTarget = (trip.target_price && cheapest !== null) ? cheapest <= Number(trip.target_price) : false;
-    res.json({ ok: true, cheapest_price: cheapest, currency: 'EUR', target_price: trip.target_price, target_reached: hitTarget });
-  } catch (err) {
-    res.status(err.status || 500).json({ ok: false, error: err.message });
-  }
+  // Fare-alert price checks are retired. Airpiv only creates Duffel priced
+  // offer requests from the real /search flow.
+  if (!req.userId) return res.status(401).json({ ok: false, error: 'Nicht angemeldet' });
+  return res.status(410).json({ ok: false, error: 'Preisalarme sind deaktiviert.' });
 });
 };
