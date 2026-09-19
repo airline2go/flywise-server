@@ -8,16 +8,40 @@ const { recordDuffelAttemptAlert } = require('./duffelUsageAlert');
 const { randomUUID } = require('crypto');
 
 const DUFFEL_TIMEOUT_MS = 20000;
+const OFFER_REQUEST_RE = /\/air\/offer_requests/;
+const PLACE_SUGGESTION_RE = /\/places\/suggestions/;
 const SEARCH_PATH_RE = /\/air\/offer_requests|\/places\/suggestions/;
 const SEARCH_SOURCES = new Set(['user_search', 'airport_search']);
 const PRIVILEGED_SOURCES = new Set(['booking', 'cancellation', 'flight_change', 'admin']);
 
+function isOfferRequestPath(path) { return OFFER_REQUEST_RE.test(String(path || '')); }
+function isPlaceSuggestionPath(path) { return PLACE_SUGGESTION_RE.test(String(path || '')); }
 function isSearchPath(path) { return SEARCH_PATH_RE.test(String(path || '')); }
 function denySearchCall(reason) { const err = new Error('Suche nicht verfügbar.'); err.status = 403; err.code = 'SEARCH_GUARD_DENIED'; err.denyReason = reason; return err; }
 function assertDuffelSearchContext(method, path, options) {
   const source = (options && options.source) || 'unspecified';
+
+  // HARD COST GUARD: Duffel offer requests are allowed ONLY for a genuine,
+  // signed user search session. No admin route probe, route-page refresh,
+  // alert, warmup, backfill, SEO job, or other privileged/background caller
+  // may create a priced offer request.
+  if (isOfferRequestPath(path)) {
+    if (source !== 'user_search') throw denySearchCall('offer_request_requires_real_user_search');
+    const ctx = options && options.searchContext;
+    if (!ctx || !ctx.valid || !ctx.sid) throw denySearchCall('missing_search_session');
+    return source;
+  }
+
+  // Airport autocomplete is not a fare/price request. It still requires a
+  // valid signed search session so bots cannot burn provider calls by typing.
+  if (isPlaceSuggestionPath(path)) {
+    if (!SEARCH_SOURCES.has(source)) throw denySearchCall('missing_source');
+    const ctx = options && options.searchContext;
+    if (!ctx || !ctx.valid || !ctx.sid) throw denySearchCall('missing_search_session');
+    return source;
+  }
+
   if (!isSearchPath(path)) return source;
-  if (SEARCH_SOURCES.has(source)) { const ctx = options && options.searchContext; if (!ctx || !ctx.valid || !ctx.sid) throw denySearchCall('missing_search_session'); return source; }
   if (PRIVILEGED_SOURCES.has(source)) return source;
   throw denySearchCall('missing_source');
 }
@@ -26,6 +50,17 @@ function classifyUpstreamStatus(status) { const s = Number(status) || 0; if (s =
 
 async function duffelAttempt(method, path, body, extraHeaders, timeoutMs, externalSignal, auditContext) {
   if (!env.DUFFEL_TOKEN) throw new Error('DUFFEL_TOKEN غير موجود في Environment Variables');
+
+  // Defense in depth for callers that invoke duffelAttempt() directly and
+  // bypass duffel(). A priced offer request must still originate from a real
+  // user search. This check happens BEFORE audit creation and BEFORE fetch(),
+  // so blocked background/admin calls create zero upstream Duffel traffic.
+  const lowLevelSource = (auditContext && auditContext.source) || 'unspecified';
+  if (isOfferRequestPath(path) && lowLevelSource !== 'user_search') {
+    const err = denySearchCall('offer_request_requires_real_user_search');
+    log('warn', 'duffel_offer_request_blocked_non_user_search', { source: lowLevelSource, path });
+    throw err;
+  }
   const opts = { method, headers: Object.assign({ Authorization: `Bearer ${env.DUFFEL_TOKEN}`, 'Content-Type': 'application/json', 'Duffel-Version': env.DUFFEL_VERSION, Accept: 'application/json' }, extraHeaders || {}) };
   if (body) opts.body = JSON.stringify(body);
   const requestId = await createAttempt({ ...auditContext, method, endpoint: path, attemptNo: auditContext.attemptNo });
