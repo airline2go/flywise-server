@@ -141,44 +141,14 @@ describe('POST /alerts/:id/check', () => {
   test('rejects an unauthenticated request', async () => {
     const res = await request(app).post('/alerts/1/check').send({});
     expect(res.status).toBe(401);
+    expect(mockDuffelFn).not.toHaveBeenCalled();
   });
 
-  test('404s when the saved trip does not exist (or does not belong to the caller)', async () => {
+  test('is retired and never calls Duffel for an authenticated user', async () => {
     const headers = authAs('u1');
-    supa.__setResponse('saved_trips', { maybeSingle: { data: null, error: null } });
-    const res = await request(app).post('/alerts/999/check').set(headers).send({});
-    expect(res.status).toBe(404);
-  });
-
-  test('returns the cheapest live price and whether the target was reached', async () => {
-    const headers = authAs('u1');
-    supa.__setResponse('saved_trips', {
-      maybeSingle: { data: { id: 1, origin: 'BER', destination: 'CDG', departure_date: '2026-08-01', target_price: 100 }, error: null },
-    });
-    mockDuffelFn.mockResolvedValue({ data: { offers: [{ total_amount: '90.00' }, { total_amount: '120.00' }] } });
     const res = await request(app).post('/alerts/1/check').set(headers).send({});
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, cheapest_price: 90, currency: 'EUR', target_price: 100, target_reached: true });
-  });
-
-  test('target_reached is false when the cheapest price is still above target', async () => {
-    const headers = authAs('u1');
-    supa.__setResponse('saved_trips', {
-      maybeSingle: { data: { id: 2, origin: 'BER', destination: 'CDG', departure_date: '2026-08-01', target_price: 50 }, error: null },
-    });
-    mockDuffelFn.mockResolvedValue({ data: { offers: [{ total_amount: '90.00' }] } });
-    const res = await request(app).post('/alerts/2/check').set(headers).send({});
-    expect(res.body.target_reached).toBe(false);
-  });
-
-  test('propagates a Duffel error with its status', async () => {
-    const headers = authAs('u1');
-    supa.__setResponse('saved_trips', {
-      maybeSingle: { data: { id: 3, origin: 'BER', destination: 'CDG', departure_date: '2026-08-01', target_price: null }, error: null },
-    });
-    const err = new Error('supplier down'); err.status = 503;
-    mockDuffelFn.mockRejectedValue(err);
-    const res = await request(app).post('/alerts/3/check').set(headers).send({});
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(410);
+    expect(res.body).toEqual({ ok: false, error: 'Preisalarme sind deaktiviert.' });
+    expect(mockDuffelFn).not.toHaveBeenCalled();
   });
 });
