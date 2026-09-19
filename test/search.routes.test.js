@@ -241,23 +241,15 @@ describe('GET /route-price', () => {
   });
 });
 
-describe('fetchAndCacheRoutePrice (authorized internal warming path)', () => {
+describe('fetchAndCacheRoutePrice (retired route-page pricing)', () => {
   const { fetchAndCacheRoutePrice } = require('../src/routes/search.routes');
-  test('a live Duffel call includes cheapest/fastest/bestValue and tags logContext', async () => {
-    mockGetAdminConfig.mockResolvedValue(null);
-    mockDuffelFn.mockResolvedValue({
-      data: {
-        id: 'orq_7',
-        offers: [
-          { id: 'cheap', total_amount: '49.00', total_currency: 'EUR', slices: [{ duration: 'PT5H', segments: [{ marketing_carrier: { name: 'A' } }, { marketing_carrier: { name: 'A' } }] }] },
-          { id: 'fast', total_amount: '199.00', total_currency: 'EUR', slices: [{ duration: 'PT1H30M', segments: [{ marketing_carrier: { name: 'B' } }] }] },
-        ],
-      },
-    });
+  test('never calls Duffel and always returns a disabled no-price response', async () => {
+    mockDuffelFn.mockResolvedValue({ data: { offers: [{ id: 'should-not-be-used' }] } });
     const res = await fetchAndCacheRoutePrice('ber', 'cdg', 21, 'route_price_BER_CDG');
-    expect(res.offers).toBeTruthy();
-    expect(mockDuffelFn).toHaveBeenCalledWith('POST', expect.any(String), expect.any(Object), null,
-      expect.objectContaining({ logContext: { route_origin: 'BER', route_destination: 'CDG' }, source: 'admin' }));
+    expect(res.disabled).toBe(true);
+    expect(res.price).toBeNull();
+    expect(res.offers).toBeNull();
+    expect(mockDuffelFn).not.toHaveBeenCalled();
   });
 });
 
@@ -276,25 +268,13 @@ describe('selectRouteOffers', () => {
   });
 });
 
-describe('warmRoutePricesOnce', () => {
+describe('warmRoutePricesOnce (retired route-page pricing)', () => {
   const { warmRoutePricesOnce } = require('../src/routes/search.routes');
-  const DUFFEL_OFFER = { data: { id: 'orq_w', offers: [{ id: 'off_w', total_amount: '150.00', total_currency: 'EUR', slices: [{ duration: 'PT3H', segments: [{ marketing_carrier: { name: 'Airpiv Air' } }] }] }] } };
-  const hoursAgo = (h) => new Date(Date.now() - h * 60 * 60 * 1000).toISOString();
-
-  test("excludes refresh_frequency='none' routes entirely", async () => {
-    supa.__setResponse('route_pages', { result: { data: [{ origin_iata: 'BER', destination_iata: 'FRA', refresh_frequency: 'none' }], error: null } });
-    mockGetAdminConfig.mockResolvedValue(null);
-    mockDuffelFn.mockResolvedValue(DUFFEL_OFFER);
-    await warmRoutePricesOnce();
+  test('is a permanent no-op and never calls Duffel', async () => {
+    mockDuffelFn.mockResolvedValue({ data: { offers: [{ id: 'should-not-be-used' }] } });
+    const res = await warmRoutePricesOnce();
+    expect(res).toEqual({ disabled: true, warmed: 0 });
     expect(mockDuffelFn).not.toHaveBeenCalled();
-  });
-
-  test("warms a '6h' route whose cache is 7h old", async () => {
-    supa.__setResponse('route_pages', { result: { data: [{ origin_iata: 'MUC', destination_iata: 'PMI', refresh_frequency: '6h' }], error: null } });
-    mockGetAdminConfig.mockResolvedValue({ price: 80, fetchedAt: hoursAgo(7) });
-    mockDuffelFn.mockResolvedValue(DUFFEL_OFFER);
-    await warmRoutePricesOnce();
-    expect(mockDuffelFn).toHaveBeenCalled();
   });
 });
 
