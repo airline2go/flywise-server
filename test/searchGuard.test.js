@@ -235,4 +235,3 @@ describe('CASE 7 — background Duffel warming is off by default', () => {
     expect(env.DUFFEL_BACKGROUND_SEARCH_ENABLED).toBe(false);
   });
 });
-
