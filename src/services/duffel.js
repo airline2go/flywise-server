@@ -35,10 +35,15 @@ function assertDuffelSearchContext(method, path, options) {
   // Airport autocomplete is not a fare/price request. It still requires a
   // valid signed search session so bots cannot burn provider calls by typing.
   if (isPlaceSuggestionPath(path)) {
-    if (!SEARCH_SOURCES.has(source)) throw denySearchCall('missing_source');
-    const ctx = options && options.searchContext;
-    if (!ctx || !ctx.valid || !ctx.sid) throw denySearchCall('missing_search_session');
-    return source;
+    if (SEARCH_SOURCES.has(source)) {
+      const ctx = options && options.searchContext;
+      if (!ctx || !ctx.valid || !ctx.sid) throw denySearchCall('missing_search_session');
+      return source;
+    }
+    // Privileged tooling may still resolve airport/place metadata; this path
+    // does not return fares and is not a priced offer request.
+    if (PRIVILEGED_SOURCES.has(source)) return source;
+    throw denySearchCall('missing_source');
   }
 
   if (!isSearchPath(path)) return source;
