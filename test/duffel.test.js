@@ -46,15 +46,15 @@ describe('duffel() — non-transient (4xx) failure', () => {
   });
 });
 
-describe('duffel() — transient (5xx) failure with retry', () => {
-  test('retries once on 5xx and logs exactly ONE entry for the whole call', async () => {
+describe('duffel() — transient search failure', () => {
+  test('does not retry a search after a 5xx response', async () => {
     const duffel = freshDuffel();
     global.fetch
       .mockResolvedValueOnce(fetchResponse(502, { errors: [{ message: 'bad gateway' }] }))
       .mockResolvedValueOnce(fetchResponse(200, { data: { id: 'orq_2' } }));
-    const result = await duffel('POST', '/air/offer_requests', {}, null, SEARCH_OPTS);
-    expect(result).toEqual({ data: { id: 'orq_2' } });
-    expect(global.fetch).toHaveBeenCalledTimes(2);
+    await expect(duffel('POST', '/air/offer_requests', {}, null, SEARCH_OPTS))
+      .rejects.toThrow('bad gateway');
+    expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 });
 
