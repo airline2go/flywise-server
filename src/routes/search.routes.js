@@ -88,51 +88,8 @@ const ROUTE_PRICE_WARM_INTERVAL_MS = 15 * 60 * 1000;
 const REFRESH_FREQUENCY_MS = { '6h': 6 * 60 * 60 * 1000, '12h': 12 * 60 * 60 * 1000, '24h': 24 * 60 * 60 * 1000 };
 
 async function warmRoutePricesOnce() {
-  if (!supa) return;
-  try {
-    const { data: routes, error } = await supa.from('route_pages')
-      .select('origin_iata,destination_iata,refresh_frequency')
-      .eq('status', 'published')
-      .neq('refresh_frequency', 'none');
-    if (error || !routes || !routes.length) return;
-    const byPair = new Map();
-    for (const r of routes) {
-      if (!r.origin_iata || !r.destination_iata) continue;
-      const thresholdMs = REFRESH_FREQUENCY_MS[r.refresh_frequency];
-      if (!thresholdMs) continue;
-      const key = r.origin_iata.toUpperCase() + '_' + r.destination_iata.toUpperCase();
-      const existing = byPair.get(key);
-      if (!existing || thresholdMs < existing.thresholdMs) {
-        byPair.set(key, { from: r.origin_iata, to: r.destination_iata, cacheKey: 'route_price_' + key, thresholdMs });
-      }
-    }
-    const pairs = Array.from(byPair.values());
-    let warmedThisCycle = 0;
-    for (const p of pairs) {
-      if (warmedThisCycle >= ROUTE_PRICE_WARM_BATCH_SIZE) break;
-      let due = true;
-      try {
-        const cached = await getAdminConfig(p.cacheKey, null);
-        if (cached && cached.fetchedAt && (Date.now() - new Date(cached.fetchedAt).getTime()) < p.thresholdMs) due = false;
-      } catch (e) { /* treat as due */ }
-      if (!due) continue;
-      try {
-        await fetchAndCacheRoutePrice(p.from, p.to, 21, p.cacheKey);
-        log('info', 'route_price_warmed', { from: p.from, to: p.to });
-      } catch (e) {
-        log('warn', 'route_price_warm_failed', { from: p.from, to: p.to, error: e.message });
-      }
-      warmedThisCycle++;
-      await new Promise((r) => setTimeout(r, ROUTE_PRICE_WARM_DELAY_MS));
-    }
-  } catch (e) {
-    log('warn', 'route_price_warm_cycle_failed', { error: e.message });
-  }
-}
-
-if (env.DUFFEL_BACKGROUND_SEARCH_ENABLED) {
-  setTimeout(() => { warmRoutePricesOnce(); }, 30000).unref();
-  setInterval(() => { warmRoutePricesOnce(); }, ROUTE_PRICE_WARM_INTERVAL_MS).unref();
+  // Route-page price warming is permanently retired.
+  return { disabled: true, warmed: 0 };
 }
 
 const DURATION_OUTLIER_MULTIPLE = 3;
