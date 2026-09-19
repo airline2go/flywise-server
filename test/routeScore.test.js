@@ -62,6 +62,9 @@ test('DEFAULT_ROUTE_SCORE_CONFIG matches the documented defaults', () => {
     ctrWeight: 50,
     confidenceLowMax: 100,
     confidenceHighMin: 1000,
+    gscImpressionWeight: 1,
+    gscClickWeight: 10,
+    gscLookbackDays: 90,
   });
 });
 
@@ -194,4 +197,15 @@ test('a single row update failure is logged but does not stop other rows from up
 
   expect(log).toHaveBeenCalledWith('warn', 'route_score_update_failed', expect.objectContaining({ error: 'update failed' }));
   expect(supa.__updateCalls).toHaveLength(2);
+});
+
+const { routeSlugFromUrl } = require('../src/services/routeScore');
+
+test('routeSlugFromUrl maps GSC page URLs (all locales) to the base route slug', () => {
+  expect(routeSlugFromUrl('https://airpiv.com/flights/lgw-pmi')).toBe('lgw-pmi');
+  expect(routeSlugFromUrl('https://airpiv.com/en/flights/lgw-pmi')).toBe('lgw-pmi');
+  expect(routeSlugFromUrl('https://airpiv.com/es/flights/palma-de-mallorca-duesseldorf?x=1')).toBe('palma-de-mallorca-duesseldorf');
+  expect(routeSlugFromUrl('https://airpiv.com/ar/city/berlin')).toBeNull();
+  expect(routeSlugFromUrl('https://airpiv.com/')).toBeNull();
+  expect(routeSlugFromUrl(null)).toBeNull();
 });

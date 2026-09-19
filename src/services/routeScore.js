@@ -34,8 +34,30 @@ const DEFAULT_ROUTE_SCORE_CONFIG = {
   ctrWeight: 50,
   confidenceLowMax: 100,   // decayed impressions below this → 'low'
   confidenceHighMin: 1000, // decayed impressions at/above this → 'high'
+  // [ROUTE-SCORE-GSC] Real Google Search Console demand blended into the score.
+  // On-site route_traffic_daily barely exists for pages Google demoted, so
+  // scoring on it alone leaves route_score ≈ 0 for almost every route — which
+  // starves the demand gate of exactly the routes it must keep. GSC page
+  // impressions/clicks are the true search-demand signal, folded in here (no
+  // decay: gsc is already fetched over a bounded recent window). Set
+  // gscImpressionWeight to 0 to disable the blend without a code change.
+  gscImpressionWeight: 1,
+  gscClickWeight: 10,
+  gscLookbackDays: 90,
 };
 const COMPUTE_INTERVAL_MS = 60 * 60 * 1000; // hourly — cheap to keep fresh
+
+// Extract a canonical route_pages slug from a GSC page URL, collapsing the
+// optional language prefix so every localized variant of a route
+// (/flights/x, /en/flights/x, /es/flights/x) rolls up to the one base slug that
+// route_pages is keyed by. Returns null for any non-route URL.
+const ROUTE_URL_RE = /\/(?:[a-z]{2}\/)?flights\/([^/?#]+)/i;
+function routeSlugFromUrl(url) {
+  if (!url || typeof url !== 'string') return null;
+  const m = url.match(ROUTE_URL_RE);
+  if (!m) return null;
+  try { return decodeURIComponent(m[1]).toLowerCase(); } catch { return m[1].toLowerCase(); }
+}
 
 function daysAgo(dayStr) {
   const day = new Date(dayStr + 'T00:00:00Z');
@@ -86,6 +108,31 @@ async function computeRouteScoresOnce() {
       from += pageSize;
     }
 
+    // [ROUTE-SCORE-GSC] Fold Google Search Console per-page demand into the same
+    // per-route accumulator. Guarded so it is a no-op (and never fails the cycle)
+    // when GSC is not configured/connected — on-site traffic scoring is then
+    // unchanged, preserving prior behaviour and existing tests.
+    let gscRoutesMatched = 0;
+    if (cfg.gscImpressionWeight > 0 || cfg.gscClickWeight > 0) {
+      try {
+        const gsc = require('./gsc');
+        if (gsc.isConfigured() && (await gsc.getConnection())) {
+          const { rows: gscRows } = await gsc.fetchSearchAnalytics({ type: 'pages', days: cfg.gscLookbackDays, rowLimit: 25000 });
+          for (const gr of gscRows || []) {
+            const slug = routeSlugFromUrl(gr.url);
+            if (!slug) continue;
+            if (!byRoute.has(slug)) byRoute.set(slug, { decayedImpressions: 0, decayedClicks: 0, decayedBookings: 0 });
+            const b = byRoute.get(slug);
+            b.gscImpressions = (b.gscImpressions || 0) + (Number(gr.impressions) || 0);
+            b.gscClicks = (b.gscClicks || 0) + (Number(gr.clicks) || 0);
+            gscRoutesMatched++;
+          }
+        }
+      } catch (e) {
+        log('warn', 'route_score_gsc_blend_failed', { error: e.message });
+      }
+    }
+
     // [ROUTE-SCORE-PAGINATION] PostgREST caps a single select at ~1000 rows, and
     // the route_pages catalogue is larger than that — an unpaginated read scored
     // only the first ~1000 routes each cycle and left the rest frozen at an old
@@ -106,12 +153,19 @@ async function computeRouteScoresOnce() {
     let updated = 0;
     for (const rp of routePages || []) {
       const traffic = byRoute.get(rp.slug) || { decayedImpressions: 0, decayedClicks: 0, decayedBookings: 0 };
+      const gscImpressions = traffic.gscImpressions || 0;
+      const gscClicks = traffic.gscClicks || 0;
       const ctr = traffic.decayedImpressions > 0 ? traffic.decayedClicks / traffic.decayedImpressions : 0;
       const score = cfg.impressionWeight * traffic.decayedImpressions
         + cfg.clickWeight * traffic.decayedClicks
         + cfg.bookingWeight * traffic.decayedBookings
-        + cfg.ctrWeight * ctr;
-      const confidence = computeConfidence(traffic.decayedImpressions, cfg);
+        + cfg.ctrWeight * ctr
+        + cfg.gscImpressionWeight * gscImpressions
+        + cfg.gscClickWeight * gscClicks;
+      // GSC search impressions are real observations, so they count toward
+      // confidence alongside on-site impressions: a route seen thousands of
+      // times in search is well-observed even before anyone clicks through.
+      const confidence = computeConfidence(traffic.decayedImpressions + gscImpressions, cfg);
 
       const { error: updateErr } = await supa.from('route_pages').update({
         route_score: Math.round(score * 100) / 100,
@@ -121,7 +175,7 @@ async function computeRouteScoresOnce() {
       if (updateErr) log('warn', 'route_score_update_failed', { slug: rp.slug, error: updateErr.message });
       else updated++;
     }
-    log('info', 'route_scores_computed', { updated, routesWithTraffic: byRoute.size });
+    log('info', 'route_scores_computed', { updated, routesWithTraffic: byRoute.size, gscRoutesMatched });
   } catch (e) {
     log('warn', 'route_score_compute_cycle_failed', { error: e.message });
   }
@@ -130,4 +184,4 @@ async function computeRouteScoresOnce() {
 setTimeout(() => { computeRouteScoresOnce(); }, 45000).unref();
 setInterval(() => { computeRouteScoresOnce(); }, COMPUTE_INTERVAL_MS).unref();
 
-module.exports = { computeRouteScoresOnce, DEFAULT_ROUTE_SCORE_CONFIG };
+module.exports = { computeRouteScoresOnce, DEFAULT_ROUTE_SCORE_CONFIG, routeSlugFromUrl };
