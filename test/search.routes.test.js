@@ -210,33 +210,21 @@ describe('POST /search', () => {
   });
 });
 
-describe('GET /route-price', () => {
-  test('requires both from and to', async () => {
-    const res = await request(app).get('/route-price?from=BER');
-    expect(res.status).toBe(400);
-  });
-
-  test('rejects an unpublished route without calling Duffel', async () => {
-    const res = await request(app).get('/route-price?from=ABC&to=XYZ');
-    expect(res.status).toBe(403);
-    expect(mockDuffelFn).not.toHaveBeenCalled();
-  });
-
-  test('returns a fresh cached price without calling Duffel', async () => {
+describe('GET /route-price (retired)', () => {
+  test('always returns 410 and never exposes cached prices or calls Duffel', async () => {
     publishPair('BER', 'CDG');
-    mockGetAdminConfig.mockResolvedValue({ price: 120, currency: 'EUR', departure_date: '2026-08-01', insights: null, fetchedAt: new Date().toISOString() });
+    mockGetAdminConfig.mockResolvedValue({ price: 120, currency: 'EUR', fetchedAt: new Date().toISOString() });
     const res = await request(app).get('/route-price?from=BER&to=CDG');
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual(expect.objectContaining({ ok: true, price: 120, cached: true }));
+    expect(res.status).toBe(410);
+    expect(res.body).toEqual(expect.objectContaining({ ok: false, disabled: true, price: null }));
+    expect(res.body).not.toHaveProperty('cached');
+    expect(mockGetAdminConfig).not.toHaveBeenCalled();
     expect(mockDuffelFn).not.toHaveBeenCalled();
   });
 
-  test('a published route with no cache returns price:null and never calls Duffel', async () => {
-    publishPair('JFK', 'LAX');
-    mockGetAdminConfig.mockResolvedValue(null);
-    const res = await request(app).get('/route-price?from=JFK&to=LAX');
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual(expect.objectContaining({ ok: true, price: null }));
+  test('missing parameters still do not trigger Duffel', async () => {
+    const res = await request(app).get('/route-price?from=BER');
+    expect(res.status).toBe(410);
     expect(mockDuffelFn).not.toHaveBeenCalled();
   });
 });
