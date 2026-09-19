@@ -332,4 +332,3 @@ describe('avgDurationExcludingOutliers', () => {
     expect(avgDurationExcludingOutliers([66, 71, 80, 393, 410])).toBe(72);
   });
 });
-
