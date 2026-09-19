@@ -214,18 +214,11 @@ describe('CASE 5 — Turnstile is verified server-side when configured', () => {
   });
 });
 
-describe('CASE 6 — GET /route-price is cache-only and never calls Duffel', () => {
-  test('an unpublished route is 403 with Duffel=0', async () => {
-    const res = await request(app).get('/route-price?from=AAA&to=BBB').set('CF-Connecting-IP', nextIp());
-    expect(res.status).toBe(403);
-    expect(mockDuffelFn).not.toHaveBeenCalled();
-  });
-
-  test('a published route with no cache returns price:null and Duffel=0', async () => {
-    publishPair('BER', 'CDG');
+describe('CASE 6 — GET /route-price is fully retired', () => {
+  test('returns 410 and Duffel=0 for any route', async () => {
     const res = await request(app).get('/route-price?from=BER&to=CDG').set('CF-Connecting-IP', nextIp());
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual(expect.objectContaining({ ok: true, price: null }));
+    expect(res.status).toBe(410);
+    expect(res.body).toEqual(expect.objectContaining({ disabled: true, price: null }));
     expect(mockDuffelFn).not.toHaveBeenCalled();
   });
 });
