@@ -420,50 +420,19 @@ app.post('/search', attachUserIfPresent, searchGuard({
 });
 
 app.get('/route-price', rateLimit('route-price', 60, 60000), async (req, res) => {
-  try {
-    const { from, to } = req.query;
-    if (!from || !to) return res.status(400).json({ ok: false, error: 'from und to sind erforderlich' });
-    const origin = String(from).toUpperCase();
-    const dest = String(to).toUpperCase();
-    const allowed = await isPublishedRoute(origin, dest);
-    if (!allowed) {
-      logSearchAccess({
-        endpoint: '/route-price', source: 'route_price', ip: clientIp(req),
-        route: origin + '-' + dest, allowed: false, reason: 'route_not_allowed',
-      });
-      return res.status(403).json({ ok: false, error: 'Route nicht verfügbar.' });
-    }
-    const daysAhead = req.query.days_ahead ? Math.max(1, Math.min(90, parseInt(req.query.days_ahead, 10) || 21)) : 21;
-    const cacheKey = 'route_price_' + origin + '_' + dest + (daysAhead !== 21 ? '_d' + daysAhead : '');
-    const cached = await getAdminConfig(cacheKey, null);
-    const cacheAgeMs = cached && cached.fetchedAt ? (Date.now() - new Date(cached.fetchedAt).getTime()) : Infinity;
-    if (cached) {
-      const checksToday = await getDailyPriceCheckCount();
-      const stale = cacheAgeMs >= PRICE_FRESHNESS_MS;
-      const snapshot = buildPriceSnapshot({
-        price: cached.price, currency: cached.currency, checkedAt: cached.fetchedAt,
-        source: stale ? 'stale-cache' : 'cache', offersCount: cached.offersCount,
-      });
-      return res.json({
-        ok: true, price: cached.price, currency: cached.currency,
-        departure_date: cached.departure_date, insights: cached.insights || null,
-        offers: cached.offers || null, cached: true, stale: stale || undefined,
-        checksToday, checkedAt: cached.fetchedAt, offersCount: cached.offersCount ?? null, snapshot,
-      });
-    }
-    logSearchAccess({
-      endpoint: '/route-price', source: 'route_price', ip: clientIp(req),
-      route: origin + '-' + dest, allowed: true, reason: 'cache_miss_no_duffel',
-    });
-    res.json({
-      ok: true, price: null, currency: null, departure_date: null,
-      snapshot: buildPriceSnapshot({ source: 'none' }),
-    });
-  } catch (err) {
-    log('warn', 'route_price_failed', { error: err.message });
-    res.json({ ok: true, price: null, currency: null, departure_date: null });
-  }
+  // Route-page pricing is retired. Never read cached/stored prices and never
+  // call Duffel from this endpoint. Priced offers are available only through
+  // the signed real-user POST /search flow.
+  return res.status(410).json({
+    ok: false,
+    disabled: true,
+    price: null,
+    currency: null,
+    departure_date: null,
+    error: 'Route pricing is disabled. Use flight search for live prices.',
+  });
 });
+
 
 app.get('/search/airports', attachUserIfPresent, searchGuard({
   bucket: 'airports', source: 'airport_search',
