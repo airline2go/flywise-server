@@ -42,114 +42,22 @@ async function getDailyPriceCheckCount() {
 const ROUTE_PRICE_DUFFEL_OPTS = { timeoutMs: 12000 };
 
 async function fetchAndCacheRoutePrice(from, to, daysAhead, cacheKey) {
-  const searchDate = new Date();
-  searchDate.setDate(searchDate.getDate() + daysAhead);
-  const departure_date = searchDate.toISOString().slice(0, 10);
-
-  const result = await duffel('POST', '/air/offer_requests?return_offers=true&supplier_timeout=8000', {
-    data: {
-      slices: [{ origin: from.toUpperCase(), destination: to.toUpperCase(), departure_date }],
-      passengers: [{ type: 'adult' }],
-      cabin_class: 'economy',
-    },
-  }, null, Object.assign({}, ROUTE_PRICE_DUFFEL_OPTS, {
-    source: 'admin',
-    logContext: { route_origin: from.toUpperCase(), route_destination: to.toUpperCase() },
-  }));
-
-  const offers = result.data?.offers || [];
-  if (!offers.length) {
-    const empty = { ok: true, price: null, currency: null, departure_date: null, insights: null, offersCount: 0, snapshot: buildPriceSnapshot({ source: 'none' }) };
-    return empty;
-  }
-
-  function isoMinutesToHours(iso) {
-    const m = String(iso || '').match(/PT(?:(\d+)H)?(?:(\d+)M)?/);
-    if (!m) return null;
-    return (parseInt(m[1] || 0, 10) * 60) + parseInt(m[2] || 0, 10);
-  }
-
-  const ticketTiers = await getTicketProfitTiers();
-  const priced = offers.map((o) => {
-    const netPrice = parseFloat(o.total_amount || 0);
-    const margin = computeTieredMargin(netPrice, ticketTiers);
-    const price = Math.round((netPrice + margin) * 100) / 100;
-    const slice = (o.slices || [])[0];
-    const durationMin = slice ? isoMinutesToHours(slice.duration) : null;
-    const segs = slice ? (slice.segments || []) : [];
-    const stops = slice ? Math.max(0, segs.length - 1) : null;
-    const mc = segs[0] && segs[0].marketing_carrier;
-    const airline = (mc && mc.name && !isExcludedCarrier(mc.iata_code, mc.name)) ? mc.name : null;
-    return { id: o.id, price, durationMin, stops, airline };
-  });
-  const { cheapest, fastest, bestValue } = selectRouteOffers(priced);
-
-  const durations = [];
-  const stopCounts = [];
-  const airlines = new Set();
-  const airlinesObserved = new Map();
-  for (const o of offers) {
-    const slice = (o.slices || [])[0];
-    if (!slice) continue;
-    const durMin = isoMinutesToHours(slice.duration);
-    if (durMin != null) durations.push(durMin);
-    const segs = slice.segments || [];
-    stopCounts.push(Math.max(0, segs.length - 1));
-    segs.forEach((s) => {
-      const carrierName = s.marketing_carrier?.name;
-      const carrierIata = s.marketing_carrier?.iata_code;
-      if (isExcludedCarrier(carrierIata, carrierName)) return;
-      if (carrierName) airlines.add(carrierName);
-      if (carrierIata) airlinesObserved.set(carrierIata, carrierName);
-    });
-  }
-  const insights = durations.length ? {
-    avgDurationMin: avgDurationExcludingOutliers(durations),
-    minDurationMin: Math.min(...durations),
-    directAvailable: stopCounts.some((s) => s === 0),
-    allDirect: stopCounts.every((s) => s === 0),
-    airlines: Array.from(airlines).slice(0, 8),
-  } : null;
-
-  if (insights && supa) {
-    const stopDistribution = stopCounts.reduce((acc, s) => { acc[s] = (acc[s] || 0) + 1; return acc; }, {});
-    supa.from('route_pages').update({
-      direct_flight_available: insights.directAvailable,
-      all_direct: insights.allDirect,
-      avg_duration_min: insights.avgDurationMin,
-      min_duration_min: insights.minDurationMin,
-      stop_distribution: stopDistribution,
-      itinerary_count: offers.length,
-      insights_updated_at: new Date().toISOString(),
-    }).eq('origin_iata', from.toUpperCase()).eq('destination_iata', to.toUpperCase())
-      .then(() => {}).catch(() => {});
-  }
-
-  airlinesObserved.forEach((name, iataCode) => {
-    ensureAirlineExists(iataCode, name)
-      .then((airlineId) => { if (airlineId) return ensureRouteAirlineObserved(from.toUpperCase(), to.toUpperCase(), airlineId); })
-      .catch(() => {});
-  });
-
-  const currency = offers[0].total_currency || 'EUR';
-  const routeOffers = { cheapest, fastest, bestValue };
-
-  if (supa && cheapest && cheapest.price != null) {
-    supa.from('route_price_history').insert({
-      route_origin_iata: from.toUpperCase(),
-      route_destination_iata: to.toUpperCase(),
-      price: cheapest.price,
-      currency,
-      offer_count: offers.length,
-    }).then(() => {}).catch(() => {});
-  }
-
-  const fetchedAt = new Date().toISOString();
-  await setAdminConfig(cacheKey, { price: cheapest.price, currency, departure_date, insights, offers: routeOffers, offersCount: offers.length, fetchedAt });
-  await incrementDailyPriceCheckCounter();
-  const checksToday = await getDailyPriceCheckCount();
-  const snapshot = buildPriceSnapshot({ price: cheapest.price, currency, checkedAt: fetchedAt, source: 'live', offersCount: offers.length });
-  return { ok: true, price: cheapest.price, currency, departure_date, insights, offers: routeOffers, cached: false, checksToday, checkedAt: fetchedAt, offersCount: offers.length, snapshot };
+  // Route-page pricing has been retired. This function is intentionally a
+  // hard no-op so no background job, visitor route page, admin helper, or
+  // accidental future caller can create a Duffel offer-request for a route
+  // price. Normal user searches use fetchAndCacheSearch() and are unaffected.
+  return {
+    ok: true,
+    price: null,
+    currency: null,
+    departure_date: null,
+    insights: null,
+    offers: null,
+    cached: false,
+    disabled: true,
+    offersCount: 0,
+    snapshot: buildPriceSnapshot({ source: 'none' }),
+  };
 }
 
 const BEST_VALUE_WEIGHTS = { price: 0.5, duration: 0.3, stops: 0.2 };
