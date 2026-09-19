@@ -25,5 +25,10 @@ describe('client IP selection', () => {
     expect(clientIp(request({ 'cf-connecting-ip': '2001:db8::4' }, '10.0.0.8'))).toBe('2001:db8::4');
     expect(clientIp(request({}, 'not-an-ip'))).toBe('unknown');
   });
-});
 
+  test('allows X-Forwarded-For only for an Express test app', () => {
+    const req = request({ 'x-forwarded-for': '198.51.100.9' }, '10.0.0.8');
+    req.app = { get: (key) => key === 'env' ? 'test' : undefined };
+    expect(clientIp(req)).toBe('198.51.100.9');
+  });
+});
